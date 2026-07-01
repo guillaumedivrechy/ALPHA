@@ -25,7 +25,7 @@ import pyqtgraph as pg
 
 from core.banc import Banc
 from core.pilote import Pilote
-from ui.theme import COLORS, SPACING, APP_QSS, BTN_QSS, SEG_OFF_QSS, SEG_ON_QSS
+from ui.theme import COLORS, BTN_QSS, SEG_OFF_QSS, SEG_ON_QSS
 
 PERIODE_IHM_MS = 250
 HISTORIQUE_PTS = 600
@@ -397,10 +397,10 @@ class Application(QMainWindow):
         self._action_log: deque[dict] = deque(maxlen=20)
         self._t0_acq: datetime | None = None
         self._mode = "asservi"   # "manuel" | "asservi" | "sequence"
+        self._ref_re = "conduite"   # référence de la consigne Re : conduite | veine
         self._recording = False
         self._dirty: dict[str, bool] = {
             "re": False, "vman": False, "pdc": False,
-            "diaph": False, "bypass": False,
         }
 
         pg.setConfigOption("background", "#FFFFFF")
@@ -805,6 +805,22 @@ class Application(QMainWindow):
             sub_lbl=None,
         ))
 
+        # Référence du Reynolds : conduite Ø81,4 ou veine d'essai
+        ref_outer = QWidget()
+        ref_outer.setStyleSheet("background:transparent;")
+        rvl = QVBoxLayout(ref_outer)
+        rvl.setContentsMargins(0, 0, 0, 0)
+        rvl.setSpacing(7)
+        lref = QLabel("Référence Re")
+        lref.setObjectName("ctrl-lbl")
+        rvl.addWidget(lref)
+        ref_seg, self._ref_btns = self._seg(["Conduite", "Veine"])
+        self._ref_btns[0].clicked.connect(lambda: self._set_ref_re("conduite"))
+        self._ref_btns[1].clicked.connect(lambda: self._set_ref_re("veine"))
+        self._seg_set(self._ref_btns, 0)
+        rvl.addWidget(ref_seg)
+        vl.addWidget(ref_outer)
+
         # Tension variateur (manuel)
         vl.addWidget(self._ctrl_slider_block(
             label="Tension variateur (manuel)",
@@ -1085,13 +1101,6 @@ class Application(QMainWindow):
         self._foot_samples.setObjectName("foot-item")
         hl.addWidget(self._foot_samples)
 
-        # Nom du fichier d'acquisition
-        from datetime import date
-        _fname = f"acq_{date.today().strftime('%Y-%m-%d')}_aeraulique.csv"
-        self._foot_filename = QLabel(f"Fichier : {_fname}")
-        self._foot_filename.setObjectName("foot-item")
-        hl.addWidget(self._foot_filename)
-
         hl.addStretch()
 
         self._foot_rec = QLabel()
@@ -1107,7 +1116,6 @@ class Application(QMainWindow):
         self._foot_elapsed.setObjectName("foot-item")
         hl.addWidget(self._foot_elapsed)
 
-        self._foot_samples_count = 0
         return foot
 
     # ═══════════════════════════════════════════════════════ VUES CENTRALES
@@ -1698,8 +1706,7 @@ class Application(QMainWindow):
             self._inp_pdc.setText(str(pdc_pct))
             self._lbl_pdc_v.setText(f"≙ {pdc_v_courant:.1f} V (0–10 V)")
         elif mode == "asservi":
-            with self.pilote._verrou:
-                self.pilote.mode_manuel = False
+            self.pilote.mode_asservi()
         self._update_mode_seg()
         self._update_controls_enabled()
         self._log(f"Mode → {mode}", COLORS["accent"])
@@ -1727,9 +1734,10 @@ class Application(QMainWindow):
                 re_val = float(
                     getattr(self, "inp_re").text().replace(",", "."))
                 if re_val > 0:
-                    self.pilote.definir_consigne(re_val, "conduite")
+                    self.pilote.definir_consigne(re_val, self._ref_re)
                     self.pilote.demarrer_regulation()
-                    self._log(f"Consigne Re → {re_val:.0f}", COLORS["accent"])
+                    self._log(f"Consigne Re → {re_val:.0f} ({self._ref_re})",
+                              COLORS["accent"])
                     self._dirty["re"] = False
             except ValueError:
                 pass
@@ -1756,26 +1764,29 @@ class Application(QMainWindow):
         self._update_dirty()
 
     def _arreter(self) -> None:
+        # coupe régulation ET mode manuel (le pilote remet aussi RUN à 0)
         self.pilote.arreter_regulation()
         self._log("ARRÊT VARIATEUR", COLORS["error"])
 
     def _quitter(self) -> None:
         self.pilote.arreter_regulation()
-        self.pilote.mode_manuel_tension(0.0)
         self.pilote.commander_vanne_perte_charge(0.0)    # PdC ouverte (0 V = ouverture complète)
         self.pilote.commander_bypass(False)              # bypass fermé
-        self.pilote.es.ecrire_vanne_diaphragme(True)    # diaphragme ISO
+        self.pilote.commander_diaphragme("iso")          # diaphragme ISO
         self.close()
 
     def _cmd_diaph(self, pos: str) -> None:
-        vers_iso = (pos == "iso")
-        self.pilote.es.ecrire_vanne_diaphragme(vers_iso)
-        self.pilote.etat["diaphragme"] = pos
+        self.pilote.commander_diaphragme(pos)
         self._log(f"Vanne Diaphragme → {pos.upper()}", "#FF9900")
 
     def _cmd_bypass(self, ouvert: bool) -> None:
         self.pilote.commander_bypass(ouvert)
         self._log(f"Bypass → {'Ouvert' if ouvert else 'Fermé'}", COLORS["ok"])
+
+    def _set_ref_re(self, ref: str) -> None:
+        self._ref_re = ref
+        self._seg_set(self._ref_btns, 0 if ref == "conduite" else 1)
+        self._mark_dirty("re")
 
     # ── slider/input sync ──────────────────────────────────────────────────
 
@@ -1856,12 +1867,12 @@ class Application(QMainWindow):
             ]
             if (len(tensions) < 2
                     or not all(0 <= v <= 10 for v in tensions)
-                    or tensions != sorted(tensions)):
+                    or any(b <= a for a, b in zip(tensions, tensions[1:]))):
                 raise ValueError
         except ValueError:
             QMessageBox.critical(
                 self, "Courbe de gain",
-                "Au moins 2 paliers croissants entre 0 et 10 V.")
+                "Au moins 2 paliers strictement croissants entre 0 et 10 V.")
             return
         self._lancer_test("courbe_gain", tensions=tensions)
 
@@ -1950,7 +1961,6 @@ class Application(QMainWindow):
             self._hist_re.append(re)
             self._hist_cible.append(e.get("re_cible", 0.0))
             self._tracer()
-            self._foot_samples_count += 1
 
     def _tick_left(self, e: dict) -> None:
         brutes = e.get("mesures_brutes") or {}
@@ -2125,7 +2135,7 @@ class Application(QMainWindow):
             f" font-weight:700; color:{col}; background:transparent;")
 
         self._foot_samples.setText(
-            f"Échantillons : {self._foot_samples_count}")
+            f"Échantillons : {e.get('cycles', 0)}")
 
         if self._recording:
             self._foot_rec.setVisible(True)

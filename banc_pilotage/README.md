@@ -26,19 +26,23 @@ deux fichiers** (qm, Re, C, ε, Y1).
    logiciel lit ΔP, P_amont et T, recalcule le débit réel (ISO 5167 ou
    Miller, itératif comme dans Excel), en déduit le Re mesuré et corrige la
    tension 0-10 V.
-4. La **gamme capteur ΔP** est choisie automatiquement : FCO432 50 Pa
-   (0-1 V, plus précis) sous ~45 Pa, sinon 500 Pa (0-10 V). Idem P_amont.
+4. Les capteurs ΔP et P_amont utilisés sont les gammes **500 Pa (0-10 V)**.
+   La bascule automatique vers les gammes fines 50 Pa (0-1 V) est prévue
+   mais **non implémentée** (capteurs non câblés à ce jour).
 5. ρ et μ de l'air sont **recalculés en continu** (gaz parfait + Sutherland)
    à partir de P_amont et de la PT100 — plus précis que les tables figées
    des classeurs. Des valeurs forcées restent possibles (`config.json`).
 
 ## Installation
 
-Python ≥ 3.10 avec tkinter (inclus dans l'installateur Windows standard).
+Python ≥ 3.10.
 
 ```bash
-pip install pymodbus        # uniquement pour le mode matériel
+pip install -r requirements.txt   # PySide6, pyqtgraph, pymodbus, pytest
 ```
+
+(`pymodbus` n'est nécessaire qu'en mode matériel ; le mode `--simulation`
+fonctionne sans.)
 
 ## Lancement
 
@@ -86,6 +90,13 @@ le nœud. Les adresses par défaut de `config.json` supposent :
 - Limitation de rampe du variateur (0,5 V/s par défaut).
 - Anti-windup du PI, bande morte paramétrable.
 - Fermeture de l'application → variateur remis à 0.
+- Bouton « ARRÊT VARIATEUR » → coupe régulation **et** mode manuel
+  (tension 0 V, ordre RUN retiré).
+
+> ⚠️ Si le lien Modbus lui-même est rompu, le logiciel ne peut plus écrire
+> 0 V : la mise en sécurité repose alors sur le paramétrage du variateur
+> 3G3MV (comportement sur perte de référence / perte du contact RUN).
+> À vérifier à la mise en service.
 
 ## Structure du code
 
@@ -102,8 +113,11 @@ banc_pilotage/
 ├── io_banc/
 │   ├── wago.py              client Modbus TCP (mapping configurable)
 │   └── simulateur.py        banc virtuel pour tests
-└── gui/
-    └── app.py               IHM tkinter (consigne, mesures, tendance)
+├── gui/
+│   └── app.py               IHM PySide6 + pyqtgraph (consigne, mesures, tendance)
+├── ui/
+│   └── theme.py             tokens de design (couleurs, QSS)
+└── tests/                   tests pytest (moteur de calcul, PI, table de gains)
 ```
 
 ## Validation du moteur de calcul
@@ -119,3 +133,9 @@ banc_pilotage/
 
 Les écarts résiduels (< 0,1 %) proviennent des arrondis d'affichage des
 valeurs ρ/ν lues dans les classeurs pour le test.
+
+Ces valeurs sont verrouillées par les tests de non-régression :
+
+```bash
+python -m pytest tests/ -q
+```

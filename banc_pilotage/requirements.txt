@@ -1,0 +1,7 @@
+# IHM
+PySide6
+pyqtgraph
+# Communication Modbus TCP (inutile en mode --simulation)
+pymodbus
+# Développement / tests
+pytest

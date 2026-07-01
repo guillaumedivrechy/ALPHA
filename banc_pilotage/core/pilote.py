@@ -140,6 +140,10 @@ class Pilote:
         # Persisté sur disque pour que la première consigne d'une session
         # bénéficie du gain appris lors des sessions précédentes.
         self._chemin_etat = Path(cfg.get("fichier_etat", "etat_banc.json"))
+        if not self._chemin_etat.is_absolute():
+            # relatif au dossier du programme, pas au répertoire de lancement
+            self._chemin_etat = (Path(__file__).resolve().parent.parent
+                                 / self._chemin_etat)
         self._gain_re_par_volt: float | None = None
         self.table_gains = TableGains()
         try:
@@ -175,8 +179,13 @@ class Pilote:
             self._preparation_faite = False
 
     def arreter_regulation(self) -> None:
+        """Arrêt du variateur : coupe la régulation ET le mode manuel
+        (sinon la boucle réappliquerait la tension manuelle au cycle
+        suivant — inacceptable pour un bouton d'arrêt)."""
         with self._verrou:
             self.regulation_active = False
+            self.mode_manuel = False
+            self.tension_manuelle = 0.0
         self.es.ecrire_variateur(0.0)
         self.es.ecrire_variateur_run(False)
         self._run_actif = False
@@ -187,6 +196,11 @@ class Pilote:
             self.mode_manuel = True
             self.regulation_active = False
             self.tension_manuelle = volts
+
+    def mode_asservi(self) -> None:
+        """Quitte le mode manuel sans démarrer la régulation."""
+        with self._verrou:
+            self.mode_manuel = False
 
     def commander_variateur_manuel(self, volts: float) -> None:
         """Mode manuel : fixe la tension variateur (RUN géré automatiquement)."""
@@ -221,11 +235,45 @@ class Pilote:
             fc_attendue="fc_bypass_ouvert" if ouverte else "fc_bypass_ferme",
             t_course=self.t_vanne_bypass)
 
+    def commander_diaphragme(self, position: str) -> None:
+        """Vanne 3 voies vers "iso" (0°), "miller" (90°) ou "fermee" (180°).
+
+        L'actionneur s'arrête automatiquement à 90° dans les deux sens :
+        un trajet 0° ↔ 180° demande une seconde impulsion relais, déclenchée
+        par la boucle à la détection de l'arrêt intermédiaire (fc_relance).
+        Régulation gelée jusqu'à la fin de course cible (chien de garde)."""
+        mesures = self.etat.get("mesures_brutes") or {}
+        fc_iso = self._fc_par_diaphragme["iso"]
+        fc_miller = self._fc_par_diaphragme["miller"]
+        fc_cible = {"iso": fc_iso, "miller": fc_miller,
+                    "fermee": "fc_3voies_180"}[position]
+        if mesures.get(fc_cible):              # déjà en position
+            self.etat["diaphragme"] = position
+            return
+        if position == "miller":
+            # depuis 180° on remonte (impulsion vers ISO), sinon on descend
+            vers_iso = bool(mesures.get("fc_3voies_180"))
+            relance = None
+        else:
+            vers_iso = (position == "iso")
+            # extrême → extrême : arrêt auto à 90°, puis 2e impulsion
+            relance = None if mesures.get(fc_miller) else fc_miller
+        self.es.ecrire_vanne_diaphragme(vers_iso)
+        self.etat["diaphragme"] = position
+        self._demarrer_manoeuvre(
+            motif=f"vanne 3 voies → {position}",
+            fc_attendue=fc_cible, t_course=self.t_vanne_3voies,
+            fc_relance=relance, vers_iso=vers_iso)
+
     def _demarrer_manoeuvre(self, motif: str, fc_attendue: str,
-                            t_course: float) -> None:
+                            t_course: float, fc_relance: str | None = None,
+                            vers_iso: bool | None = None) -> None:
         self._manoeuvre = {
             "motif": motif,
             "fc_attendue": fc_attendue,
+            "fc_relance": fc_relance,       # arrêt intermédiaire à relancer
+            "vers_iso": vers_iso,
+            "t_relance": None,
             "t_debut": time.monotonic(),
             "t_max": time.monotonic() + t_course * self.facteur_chien_garde,
         }
@@ -277,6 +325,7 @@ class Pilote:
         # mesures brutes publiées telles quelles pour la supervision
         # (onglet lecture seule de l'IHM)
         self.etat["mesures_brutes"] = dict(mesures)
+        self.etat["cycles"] = self.etat.get("cycles", 0) + 1
 
         # au premier cycle : position réelle de la vanne 3 voies lue sur les
         # fins de course (ne pas supposer la position au démarrage)
@@ -284,6 +333,8 @@ class Pilote:
             for diaph_nom, fc in self._fc_par_diaphragme.items():
                 if mesures.get(fc):
                     self.etat["diaphragme"] = diaph_nom
+            if mesures.get("fc_3voies_180"):
+                self.etat["diaphragme"] = "fermee"
             self._position_initiale_lue = True
 
         p_amont = mesures.get("p_amont_500", 0.0)
@@ -313,17 +364,10 @@ class Pilote:
 
             nouveau_diaph = self.banc.choisir_diaphragme(re_cond_attendu, diaph)
             if nouveau_diaph != diaph:
-                self.es.ecrire_vanne_diaphragme(nouveau_diaph == "iso")
+                # commande + gel jusqu'à la fin de course (chien de garde),
+                # double impulsion gérée si la vanne part de 180°
+                self.commander_diaphragme(nouveau_diaph)
                 diaph = nouveau_diaph
-                self.etat["diaphragme"] = diaph
-                # gel jusqu'à la fin de course correspondante (≈ 11 s),
-                # chien de garde si elle n'est jamais atteinte
-                self._demarrer_manoeuvre(
-                    motif="commutation diaphragme "
-                          + ("Miller → ISO" if diaph == "iso"
-                             else "ISO → Miller"),
-                    fc_attendue=self._fc_par_diaphragme[diaph],
-                    t_course=self.t_vanne_3voies)
 
             self.etat["dp_attendu"] = self.banc.dP_attendu(
                 diaph, qm_vise, T, p_amont)
@@ -377,6 +421,16 @@ class Pilote:
                 if maintenant >= self._t_fin_gel:
                     self._manoeuvre = None
                     self._t_fin_gel = 0.0
+            elif m.get("fc_relance") and mesures.get(m["fc_relance"]):
+                # arrêt intermédiaire à 90° : 2e impulsion relais après une
+                # courte pause, chien de garde réarmé pour la 2e demi-course
+                if m["t_relance"] is None:
+                    m["t_relance"] = maintenant + 0.5
+                elif maintenant >= m["t_relance"]:
+                    self.es.ecrire_vanne_diaphragme(m["vers_iso"])
+                    m["fc_relance"] = None
+                    m["t_max"] = maintenant \
+                        + self.t_vanne_3voies * self.facteur_chien_garde
             elif maintenant > m["t_max"]:
                 # DÉFAUT VANNE : fin de course jamais atteinte -> repli sûr
                 self.es.ecrire_variateur(0.0)
@@ -407,8 +461,8 @@ class Pilote:
         # Hors manœuvre, la fin de course du diaphragme actif doit être
         # présente. Sinon : mapping erroné, vanne déplacée à la main, ou
         # défaut de fin de course.
-        fc_attendue = self._fc_par_diaphragme[diaph]
-        if fc_attendue in mesures and not mesures[fc_attendue]:
+        fc_attendue = self._fc_par_diaphragme.get(diaph)   # None si "fermee"
+        if fc_attendue and fc_attendue in mesures and not mesures[fc_attendue]:
             self._cycles_incoherence = getattr(self, "_cycles_incoherence", 0) + 1
         else:
             self._cycles_incoherence = 0
@@ -424,9 +478,14 @@ class Pilote:
         # pré-positionnement des prochaines consignes. Suspendu tant que le
         # variateur n'a pas atteint sa fréquence de consigne (sortie
         # multifonction 'fréquence atteinte' du 3G3MV, si câblée).
+        # Suspendu aussi en stratégie bas-Re / bypass ouvert : le Re y dépend
+        # de la vanne PdC et du bypass, pas seulement de la tension -> le
+        # rapport Re/volt n'est plus le gain du banc.
         u_courant = self.etat.get("u_variateur", 0.0)
         freq_ok = mesures.get("frequence_atteinte", True)
-        if freq_ok and u_courant > 0.3 and resultat["re_conduite"] > 200:
+        if (freq_ok and u_courant > 0.3 and resultat["re_conduite"] > 200
+                and not self._mode_bas_re
+                and not mesures.get("fc_bypass_ouvert")):
             g = resultat["re_conduite"] / u_courant
             if self._gain_re_par_volt is None:
                 self._gain_re_par_volt = g

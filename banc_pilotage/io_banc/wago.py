@@ -10,15 +10,20 @@ Rappels Wago 750-362 :
     0…32767 (0x7FFF) pour la pleine échelle d'un module 0-10 V (ex. 750-468).
   - Sorties analogiques : registres de sortie (FC6/FC16), même échelle
     (ex. 750-559 0-10 V).
-  - Sorties TOR : coils (FC5), adressées à partir de 0x0200 (512) sur les
-    coupleurs de la série 750 lorsque des modules de mots précèdent.
+  - Sorties TOR : coils (FC5) ; l'adressage dépend de la composition réelle
+    du nœud — se fier aux adresses de config.json, vérifiées avec
+    WAGO I/O CHECK.
   - Module RTD 750-461 (PT100) : valeur signée en 0,1 °C directement.
 
 Vérifiez le mapping réel avec WAGO I/O CHECK ou la doc du coupleur, puis
 ajustez config.json — aucun code à modifier.
+
+Le client Modbus est partagé entre plusieurs threads (boucle du pilote,
+IHM, apprentissage) : chaque transaction est protégée par un verrou.
 """
 
 from __future__ import annotations
+import threading
 
 try:
     from pymodbus.client import ModbusTcpClient
@@ -66,6 +71,7 @@ class WagoModbus(EntreesSorties):
             raise RuntimeError(
                 "pymodbus n'est pas installé : pip install pymodbus")
         self.cfg = cfg_modbus
+        self._verrou = threading.Lock()   # client pymodbus non thread-safe
         self.client = ModbusTcpClient(
             host=cfg_modbus["ip"], port=cfg_modbus.get("port", 502),
             timeout=cfg_modbus.get("timeout_s", 1.0))
@@ -77,8 +83,9 @@ class WagoModbus(EntreesSorties):
 
     def _lire_ai_volts(self, voie: dict) -> float:
         """Lit une entrée analogique et la convertit en volts."""
-        rr = self.client.read_input_registers(
-            address=voie["adresse"], count=1)
+        with self._verrou:
+            rr = self.client.read_input_registers(
+                address=voie["adresse"], count=1)
         if rr.isError():
             raise IOError(f"Erreur Modbus lecture AI @{voie['adresse']}")
         brut = rr.registers[0]
@@ -96,16 +103,21 @@ class WagoModbus(EntreesSorties):
     def lire_mesures(self) -> dict:
         voies = self.cfg["entrees"]
         mesures = {}
-        for nom in ("dp_diaph_500", "p_amont_500", "dp_iso_500"):
-            if nom in voies:
-                volts = self._lire_ai_volts(voies[nom])
-                mesures[nom] = self._volts_vers_unite(volts, voies[nom])
-        # recopie de position 0-10 V de la vanne perte de charge
-        if "pdc_recopie" in voies:
-            mesures["pdc_recopie"] = self._lire_ai_volts(voies["pdc_recopie"])
+        # toutes les entrées analogiques déclarées ; échelle capteur si
+        # définie (valeur_min/max), sinon valeur brute en volts (recopies)
+        for nom, voie in voies.items():
+            if nom.startswith("_") or nom == "temperature":
+                continue
+            volts = self._lire_ai_volts(voie)
+            if "valeur_min" in voie:
+                mesures[nom] = self._volts_vers_unite(volts, voie)
+            else:
+                mesures[nom] = volts
         # PT100 sur module RTD : valeur directe en 0,1 °C
         v_t = voies["temperature"]
-        rr = self.client.read_input_registers(address=v_t["adresse"], count=1)
+        with self._verrou:
+            rr = self.client.read_input_registers(
+                address=v_t["adresse"], count=1)
         if rr.isError():
             raise IOError("Erreur Modbus lecture PT100")
         brut = rr.registers[0]
@@ -116,8 +128,11 @@ class WagoModbus(EntreesSorties):
         # fins de course (entrées TOR, FC2)
         tor = self.cfg.get("entrees_tor", {})
         for nom, voie in tor.items():
-            rr = self.client.read_discrete_inputs(
-                address=voie["adresse"], count=1)
+            if nom.startswith("_"):
+                continue
+            with self._verrou:
+                rr = self.client.read_discrete_inputs(
+                    address=voie["adresse"], count=1)
             if rr.isError():
                 raise IOError(f"Erreur Modbus lecture DI @{voie['adresse']}")
             mesures[nom] = bool(rr.bits[0])
@@ -129,7 +144,8 @@ class WagoModbus(EntreesSorties):
         volts = min(max(volts, 0.0), voie.get("pleine_echelle_v", 10.0))
         brut = int(round(volts / voie.get("pleine_echelle_v", 10.0)
                          * self.PLEINE_ECHELLE))
-        self.client.write_register(address=voie["adresse"], value=brut)
+        with self._verrou:
+            self.client.write_register(address=voie["adresse"], value=brut)
 
     def ecrire_variateur(self, volts: float) -> None:
         self._ecrire_ao_volts(self.cfg["sorties"]["variateur"], volts)
@@ -137,7 +153,8 @@ class WagoModbus(EntreesSorties):
     def ecrire_variateur_run(self, marche: bool) -> None:
         if "variateur_run" in self.cfg["sorties"]:
             voie = self.cfg["sorties"]["variateur_run"]
-            self.client.write_coil(address=voie["adresse"], value=marche)
+            with self._verrou:
+                self.client.write_coil(address=voie["adresse"], value=marche)
 
     def ecrire_vanne_perte_charge(self, volts: float) -> None:
         if "vanne_perte_charge" in self.cfg["sorties"]:
@@ -146,16 +163,19 @@ class WagoModbus(EntreesSorties):
 
     def ecrire_vanne_diaphragme(self, vers_iso: bool) -> None:
         voie = self.cfg["sorties"]["vanne_diaphragme"]
-        self.client.write_coil(address=voie["adresse"], value=vers_iso)
+        with self._verrou:
+            self.client.write_coil(address=voie["adresse"], value=vers_iso)
 
     def ecrire_vanne_bypass(self, ouverte: bool) -> None:
         if "vanne_bypass" in self.cfg["sorties"]:
             voie = self.cfg["sorties"]["vanne_bypass"]
-            self.client.write_coil(address=voie["adresse"], value=ouverte)
+            with self._verrou:
+                self.client.write_coil(address=voie["adresse"], value=ouverte)
 
     def fermer(self) -> None:
         try:
             self.ecrire_variateur_run(False)
             self.ecrire_variateur(0.0)
         finally:
-            self.client.close()
+            with self._verrou:
+                self.client.close()
