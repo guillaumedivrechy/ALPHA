@@ -1,0 +1,10 @@
+# Exemple de profil pour le mode sequence (onglet Sequence de l'IHM)
+# colonne 1 : temps [s] ; colonne 2 : Reynolds cible
+# La derniere ligne marque la fin ; Re = 0 arrete la soufflerie.
+temps_s;re_cible
+0;3000
+60;6000
+120;10000
+240;10000
+300;4000
+360;0

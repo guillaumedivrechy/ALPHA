@@ -55,6 +55,22 @@ Le mode simulation reproduit la chaîne complète (ventilateur 1er ordre,
 ΔP générés par les mêmes équations, bruit capteur) : il permet de former
 les opérateurs et de régler les gains sans toucher au banc.
 
+## Mode séquence
+
+L'onglet **Séquence** suit automatiquement un profil chargé depuis un CSV
+à deux colonnes — temps [s] ; Reynolds cible (`exemple_sequence.csv`) :
+
+- séparateur `;`, `,` ou tabulation ; virgule décimale acceptée ; ligne
+  d'en-tête optionnelle ; lignes vides ou commençant par `#` ignorées ;
+- temps strictement croissants ; la consigne évolue **par échelons** aux
+  échéances du profil (référence Conduite/Veine du panneau Pilotage) ;
+- le temps de la dernière ligne marque la **fin de la séquence** : sa
+  consigne est ensuite maintenue jusqu'à l'arrêt par l'opérateur — mettre
+  `Re = 0` en dernière ligne pour arrêter la soufflerie en fin d'essai.
+
+« ARRÊT VARIATEUR », le passage en manuel ou l'application d'une consigne
+fixe interrompent la séquence.
+
 ## Configuration (`config.json`)
 
 | Section | Contenu |
@@ -109,6 +125,7 @@ banc_pilotage/
 │   ├── fluide.py            ρ, μ de l'air (gaz parfait, Sutherland)
 │   ├── banc.py              consigne Re ↔ qm, sélection diaphragme, gammes
 │   ├── regulation.py        régulateur PI (anti-windup, rampe)
+│   ├── sequence.py          chargement des profils CSV (mode séquence)
 │   └── pilote.py            boucle temps réel, feed-forward adaptatif
 ├── io_banc/
 │   ├── wago.py              client Modbus TCP (mapping configurable)

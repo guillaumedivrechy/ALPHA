@@ -26,8 +26,9 @@ core/
   fluide.py            rho, mu de l'air (gaz parfait, Sutherland)
   banc.py              consigne Re <-> qm, sélection diaphragme
   regulation.py        PI (anti-windup, rampe, bande morte)
+  sequence.py          chargement/validation des profils CSV (mode séquence)
   pilote.py            boucle temps réel (thread), manœuvres de vannes,
-                       feed-forward appris (etat_banc.json)
+                       suivi de séquence, feed-forward appris (etat_banc.json)
   apprentissage.py     séquences de caractérisation (thread dédié)
 io_banc/
   wago.py              EntreesSorties (interface) + WagoModbus

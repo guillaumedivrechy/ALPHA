@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QTabWidget, QStackedWidget, QScrollArea,
     QVBoxLayout, QHBoxLayout, QGridLayout,
     QGroupBox, QLabel, QLineEdit, QPushButton,
-    QCheckBox, QSlider, QMessageBox,
+    QCheckBox, QSlider, QMessageBox, QFileDialog,
     QFrame, QProgressBar,
 )
 from PySide6.QtGui import QPixmap
@@ -25,6 +25,7 @@ import pyqtgraph as pg
 
 from core.banc import Banc
 from core.pilote import Pilote
+from core.sequence import charger_sequence_csv
 from ui.theme import COLORS, BTN_QSS, SEG_OFF_QSS, SEG_ON_QSS
 
 PERIODE_IHM_MS = 250
@@ -1261,6 +1262,7 @@ class Application(QMainWindow):
         return l
 
     def _build_sequence(self) -> QWidget:
+        """Suivi d'un profil CSV (temps [s] ; Re cible) par échelons."""
         page = QWidget()
         vl = QVBoxLayout(page)
         vl.setContentsMargins(16, 16, 16, 16)
@@ -1268,12 +1270,127 @@ class Application(QMainWindow):
         panel.setObjectName("cv-panel")
         pl = QVBoxLayout(panel)
         pl.setContentsMargins(18, 18, 18, 18)
-        lbl = QLabel("Module séquence — à implémenter.")
-        lbl.setObjectName("muted")
-        pl.addWidget(lbl)
-        pl.addStretch()
+        pl.setSpacing(12)
+
+        self._seq_points: list | None = None
+
+        # barre de commandes
+        bar = QWidget()
+        bar.setStyleSheet("background:transparent;")
+        bhl = QHBoxLayout(bar)
+        bhl.setContentsMargins(0, 0, 0, 0)
+        bhl.setSpacing(10)
+        btn_charger = QPushButton("📂  Charger CSV…")
+        btn_charger.clicked.connect(self._charger_sequence)
+        bhl.addWidget(btn_charger)
+        self._btn_seq_start = QPushButton("▶  Démarrer")
+        self._btn_seq_start.setEnabled(False)
+        self._btn_seq_start.clicked.connect(self._demarrer_sequence)
+        bhl.addWidget(self._btn_seq_start)
+        btn_stop = QPushButton("■  Arrêter")
+        btn_stop.clicked.connect(self._arreter_sequence)
+        bhl.addWidget(btn_stop)
+        bh = QPushButton("?")
+        bh.setFixedSize(44, 32)
+        bh.setStyleSheet(
+            f"QPushButton {{ background:{COLORS['warn']}; border:none;"
+            f" border-radius:4px; color:#FFFFFF; font-weight:700;"
+            f" min-width:0; padding:0; }}"
+            f"QPushButton:hover {{ background:#E68A00; }}")
+        bh.clicked.connect(lambda: QMessageBox.information(
+            self, "Mode séquence",
+            "Fichier CSV à 2 colonnes : temps [s] ; Reynolds cible.\n"
+            "Séparateur « ; », « , » ou tabulation ; virgule décimale "
+            "acceptée ; ligne d'en-tête optionnelle ; lignes vides ou "
+            "commençant par # ignorées.\n\n"
+            "La consigne évolue par échelons aux échéances du profil "
+            "(référence Conduite/Veine du panneau Pilotage). Le temps de "
+            "la dernière ligne marque la fin de la séquence : sa consigne "
+            "est ensuite maintenue — mettre Re = 0 en dernière ligne pour "
+            "arrêter la soufflerie en fin d'essai."))
+        bhl.addWidget(bh)
+        bhl.addStretch()
+        self._lbl_seq_fichier = QLabel("aucun fichier chargé")
+        self._lbl_seq_fichier.setObjectName("muted")
+        bhl.addWidget(self._lbl_seq_fichier)
+        pl.addWidget(bar)
+
+        # aperçu du profil + progression
+        self._plot_seq = pg.PlotWidget()
+        self._plot_seq.setMenuEnabled(False)
+        self._plot_seq.showGrid(x=True, y=True, alpha=0.15)
+        self._plot_seq.setLabel("bottom", "Temps (s)")
+        self._plot_seq.setLabel("left", "Reynolds cible")
+        self._curve_seq = self._plot_seq.plot(
+            pen=pg.mkPen(COLORS["accent"], width=2),
+            symbol="o", symbolSize=6, symbolBrush=COLORS["accent"],
+            symbolPen=pg.mkPen("#E8EEF1", width=1))
+        self._line_seq_t = pg.InfiniteLine(
+            angle=90, movable=False,
+            pen=pg.mkPen(COLORS["warn"], width=2, style=Qt.PenStyle.DashLine))
+        self._line_seq_t.setVisible(False)
+        self._plot_seq.addItem(self._line_seq_t)
+        pl.addWidget(self._plot_seq, 1)
+
+        self._lbl_seq_statut = QLabel("—")
+        self._lbl_seq_statut.setObjectName("mono")
+        pl.addWidget(self._lbl_seq_statut)
+
         vl.addWidget(panel, 1)
         return page
+
+    # ── mode séquence : commandes ───────────────────────────────────────
+
+    def _charger_sequence(self) -> None:
+        chemin, _ = QFileDialog.getOpenFileName(
+            self, "Charger une séquence", "",
+            "Fichiers CSV (*.csv *.txt);;Tous les fichiers (*)")
+        if not chemin:
+            return
+        try:
+            points = charger_sequence_csv(chemin)
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, "Séquence",
+                                 f"Fichier invalide :\n{exc}")
+            return
+        self._seq_points = points
+        # tracé en échelons : chaque consigne tient jusqu'à l'échéance suivante
+        xs, ys = [], []
+        for i, (t, re) in enumerate(points):
+            if i:
+                xs.append(t)
+                ys.append(points[i - 1][1])
+            xs.append(t)
+            ys.append(re)
+        self._curve_seq.setData(xs, ys)
+        self._line_seq_t.setVisible(False)
+        self._lbl_seq_fichier.setText(
+            f"{Path(chemin).name} — {len(points)} étapes, "
+            f"{points[-1][0]:.0f} s")
+        self._lbl_seq_statut.setText("profil chargé — prêt à démarrer")
+        self._btn_seq_start.setEnabled(True)
+        self._log(f"Séquence chargée ({len(points)} étapes)", COLORS["accent"])
+
+    def _demarrer_sequence(self) -> None:
+        if not self._seq_points:
+            return
+        if self.apprentissage.etat["en_cours"]:
+            QMessageBox.warning(self, "Séquence",
+                                "Apprentissage en cours — attendre la fin.")
+            return
+        err = self.pilote.demarrer_sequence(self._seq_points, self._ref_re)
+        if err:
+            QMessageBox.warning(self, "Séquence", err)
+            return
+        self._set_mode("sequence")
+        self._log(f"Séquence démarrée ({len(self._seq_points)} étapes, "
+                  f"{self._seq_points[-1][0]:.0f} s)", COLORS["accent"])
+
+    def _arreter_sequence(self) -> None:
+        self.pilote.arreter_regulation()
+        self._line_seq_t.setVisible(False)
+        self._lbl_seq_statut.setText("séquence arrêtée")
+        self._log("Séquence arrêtée", COLORS["warn"])
 
     def _build_apprentissage(self) -> QWidget:
         page = QWidget()
@@ -1707,13 +1824,17 @@ class Application(QMainWindow):
             self._lbl_pdc_v.setText(f"≙ {pdc_v_courant:.1f} V (0–10 V)")
         elif mode == "asservi":
             self.pilote.mode_asservi()
+        elif mode == "sequence":
+            self._nav(2)                     # afficher l'onglet Séquence
         self._update_mode_seg()
         self._update_controls_enabled()
         self._log(f"Mode → {mode}", COLORS["accent"])
 
     def _update_controls_enabled(self) -> None:
-        """Active ou inhibe les contrôles manuels selon le mode courant."""
-        en = (self._mode != "asservi")
+        """Active ou inhibe les contrôles manuels selon le mode courant :
+        en asservi et en séquence, les actionneurs sont pilotés par la
+        régulation — commandes manuelles inhibées."""
+        en = (self._mode == "manuel")
         self._slider_u.setEnabled(en)
         self._inp_vman.setEnabled(en)
         self._slider_pdc.setEnabled(en)
@@ -1954,6 +2075,7 @@ class Application(QMainWindow):
         self._tick_footer(e)
         self._tick_entrees(e)
         self._tick_apprentissage()
+        self._tick_sequence(e)
         re = e.get("re_mesure")
         if re is not None:
             if self._t0_acq is None:
@@ -2042,7 +2164,11 @@ class Application(QMainWindow):
         elif e.get("manuel"):
             bg, fg, txt = "#FFF3E0", "#FF9900", "MANUEL"
         elif e.get("regulation"):
-            if e.get("convergee"):
+            seq = e.get("sequence")
+            if seq and not seq.get("terminee"):
+                bg, fg, txt = "#E3F4FB", COLORS["accentText"], \
+                    f"SÉQUENCE {seq['etape']}/{seq['n']}"
+            elif e.get("convergee"):
                 bg, fg, txt = "#E6F9EF", "#1F8F5B", "RÉGULÉ ✓"
             else:
                 bg, fg, txt = "#E3F4FB", COLORS["accentText"], "RÉGULATION…"
@@ -2150,6 +2276,27 @@ class Application(QMainWindow):
         # lbl_entrees ne contient plus que les 6 labels "Actif" du tableau Voies
         # → rien à mettre à jour dynamiquement (tous actifs en permanence)
         pass
+
+    def _tick_sequence(self, e: dict) -> None:
+        seq = e.get("sequence")
+        en_cours = bool(seq) and not seq.get("terminee")
+        self._btn_seq_start.setEnabled(
+            bool(self._seq_points) and not en_cours)
+        if not seq:
+            self._line_seq_t.setVisible(False)
+            return
+        if seq.get("terminee"):
+            self._lbl_seq_statut.setText(
+                f"séquence terminée — consigne finale "
+                f"Re = {seq['re_cible']:.0f} maintenue")
+            self._line_seq_t.setValue(seq["t_fin"])
+        else:
+            self._lbl_seq_statut.setText(
+                f"étape {seq['etape']}/{seq['n']} — "
+                f"t = {seq['t']:.0f}/{seq['t_fin']:.0f} s — "
+                f"Re cible {seq['re_cible']:.0f}")
+            self._line_seq_t.setValue(seq["t"])
+        self._line_seq_t.setVisible(True)
 
     def _tick_apprentissage(self) -> None:
         a = self.apprentissage

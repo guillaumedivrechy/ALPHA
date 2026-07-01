@@ -120,6 +120,9 @@ class Pilote:
         self.mode_manuel = False
         self.tension_manuelle = 0.0
 
+        # séquence : profil (t_s, re_cible) suivi par la boucle, ou None
+        self._sequence: dict | None = None
+
         # stratégie bas-Re : sous ce Re, on ouvre le bypass et on règle en
         # split-range (variateur + vanne perte de charge). Le seuil dérive de
         # la tension minimale exploitable du ventilateur, mesurée par
@@ -176,16 +179,41 @@ class Pilote:
         with self._verrou:
             self.mode_manuel = False
             self.regulation_active = True
+            self._sequence = None          # une consigne fixe annule la séquence
             self._preparation_faite = False
+        self.etat["sequence"] = None
+
+    def demarrer_sequence(self, points: list, reference: str) -> str | None:
+        """Suivi d'un profil (t_s, Re cible) : la consigne évolue par
+        échelons aux échéances du profil ; le temps de la dernière ligne
+        marque la fin, sa consigne est ensuite maintenue.
+        Retourne un message d'erreur ou None."""
+        if not points:
+            return "Séquence vide."
+        with self._verrou:
+            self.mode_manuel = False
+            self.tension_manuelle = 0.0
+            self.reference = reference
+            self.re_cible = float(points[0][1])
+            self.regulation_active = True
+            self._sequence = {
+                "points": [(float(t), float(re)) for t, re in points],
+                "t0": time.monotonic(),
+                "index": 0,
+            }
+        self._preparation_faite = False
+        return None
 
     def arreter_regulation(self) -> None:
-        """Arrêt du variateur : coupe la régulation ET le mode manuel
-        (sinon la boucle réappliquerait la tension manuelle au cycle
+        """Arrêt du variateur : coupe la régulation, le mode manuel ET la
+        séquence (sinon la boucle réappliquerait une consigne au cycle
         suivant — inacceptable pour un bouton d'arrêt)."""
         with self._verrou:
             self.regulation_active = False
             self.mode_manuel = False
             self.tension_manuelle = 0.0
+            self._sequence = None
+        self.etat["sequence"] = None
         self.es.ecrire_variateur(0.0)
         self.es.ecrire_variateur_run(False)
         self._run_actif = False
@@ -196,6 +224,8 @@ class Pilote:
             self.mode_manuel = True
             self.regulation_active = False
             self.tension_manuelle = volts
+            self._sequence = None          # le mode manuel annule la séquence
+        self.etat["sequence"] = None
 
     def mode_asservi(self) -> None:
         """Quitte le mode manuel sans démarrer la régulation."""
@@ -343,6 +373,35 @@ class Pilote:
         diaph_courant = self.etat["diaphragme"]
         dp = (mesures.get("dp_iso_500",    0.0) if diaph_courant == "iso"
               else mesures.get("dp_diaph_500", 0.0))
+
+        # ---- déroulement de la séquence (profil temps -> Re cible) ----------
+        # Avancé même pendant un gel de manœuvre : le profil est temporel.
+        with self._verrou:
+            seq = self._sequence
+        if seq is not None:
+            pts = seq["points"]
+            t_ecoule = time.monotonic() - seq["t0"]
+            i = 0
+            for j, (t_pt, _) in enumerate(pts):
+                if t_ecoule >= t_pt:
+                    i = j
+            if i != seq["index"]:
+                seq["index"] = i
+                with self._verrou:
+                    self.re_cible = pts[i][1]
+                # rechoix diaphragme + feed-forward sur le nouvel échelon
+                self._preparation_faite = False
+            terminee = t_ecoule >= pts[-1][0]
+            self.etat["sequence"] = {
+                "t": min(t_ecoule, pts[-1][0]), "t_fin": pts[-1][0],
+                "etape": i + 1, "n": len(pts),
+                "re_cible": pts[i][1], "terminee": terminee,
+            }
+            if terminee:
+                # fin de profil : la consigne finale reste appliquée,
+                # la régulation continue jusqu'à l'arrêt par l'opérateur
+                with self._verrou:
+                    self._sequence = None
 
         with self._verrou:
             re_cible = self.re_cible
