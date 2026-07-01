@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(py *)",
+      "Bash(python -c \"import ast, sys; ast.parse\\(open\\('gui/app.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "PowerShell(Get-Command *)",
+      "PowerShell(Start-Process \"C:\\\\Users\\\\guillaume.divrechy\\\\Desktop\\\\10-ENEROPTIM\\\\banc_pilotage2\\\\banc_pilotage\\\\Banc d'essais - Console \\(standalone\\).html\")",
+      "Bash(python3 --version)",
+      "Bash(python --version)",
+      "Bash(py --version)",
+      "Bash(python3 -c ' *)",
+      "Bash(py *)"
+    ]
+  }
+}

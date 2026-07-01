@@ -1,0 +1,179 @@
+{
+  "_commentaire": "Configuration du banc — toutes les constantes sont ici, aucun code à modifier.",
+  "patm_pa": 101325.0,
+  "diaphragme_iso": {
+    "_commentaire": "Norme NFX 10-102 / ISO 5167-1, prises d'angle. Valeurs du classeur ISO V12.",
+    "D20_mm": 81.4,
+    "d20_mm": 41.01843,
+    "alpha_conduite": 2.4e-05,
+    "alpha_diaphragme": 2.4e-05,
+    "formule_C": "RHG"
+  },
+  "diaphragme_miller": {
+    "_commentaire": "Corrélation Miller, faible Re. Valeurs du classeur Miller V1-13.",
+    "D20_mm": 81.4,
+    "d20_mm": 21.11306,
+    "alpha_conduite": 8e-05,
+    "alpha_diaphragme": 1.7e-05
+  },
+  "veine": {
+    "_commentaire": "A AJUSTER : section de passage de la veine d'essai et longueur caractéristique utilisée pour le Reynolds veine (hauteur de veine, diamètre hydraulique, corde du profil...).",
+    "section_m2": 0.04,
+    "longueur_caracteristique_m": 0.2
+  },
+  "fluide": {
+    "_commentaire": "rho et mu calculés en continu (gaz parfait + Sutherland) depuis P_amont et PT100. Renseigner rho_force / mu_force uniquement pour figer des valeurs.",
+    "gamma": 1.40273,
+    "rho_force": null,
+    "mu_force": null
+  },
+  "selection_diaphragme": {
+    "_commentaire": "Miller si Re conduite attendu < seuil, ISO sinon. Hysteresis contre les commutations répétées.",
+    "seuil_re": 5000,
+    "hysteresis_re": 500
+  },
+  "actionneurs": {
+    "_commentaire": "Temps de course des vannes motorisées, utilisés comme chien de garde (défaut vanne si la fin de course n'arrive pas dans 1,5x ce temps). Vanne 3 voies : 11 s pour la course complète 0-180 deg, donc ~5,5 s pour une commutation ISO/Miller (0-90 deg).",
+    "vanne_3voies_temps_s": 6.6,
+    "vanne_bypass_temps_s": 12.7,
+    "vanne_perte_charge_course_s": 26.3,
+    "marge_apres_manoeuvre_s": 2.0,
+    "facteur_chien_garde": 1.5,
+    "pdc_recopie_min_v": 0.008,
+    "pdc_recopie_max_v": 9.993
+  },
+  "regulation": {
+    "periode_s": 0.5,
+    "kp": 1.5,
+    "ki": 0.5,
+    "rampe_v_par_s": 1.0,
+    "bande_morte_relative": 0.002,
+    "tolerance_convergence_relative": 0.01
+  },
+  "modbus": {
+    "_commentaire": "Coupleur Wago 750-362, alimentation 2587-2144 (24V/5A). Ordre des modules : 750-497 (AI 0-10V, mots IN 0-7) / 750-496 (AI 4-20mA, mots IN 8-15) / 750-450 (RTD, mots IN 16-19) / 750-597 (AO, mots OUT 0-7) / 750-602 (injection 24V de champ, pas de donnees) / 750-1405 (16 DI, bits 0-15) / 3x 750-515 (12 relais, coils 0-11) / 750-1504 (16 DO, coils 12-27) / 750-600 (fin de bus, pas de donnees). AI: FC4 ; AO: FC6/16 ; DI: FC2 ; DO: FC5. A VERIFIER avec WAGO I/O CHECK apres montage.",
+    "ip": "192.168.1.10",
+    "port": 502,
+    "timeout_s": 1.0,
+    "entrees": {
+      "dp_diaph_500": {
+        "adresse": 0,
+        "pleine_echelle_v": 10.0,
+        "volts_min": 0.0,
+        "volts_max": 10.0,
+        "valeur_min": 0.0,
+        "valeur_max": 500.0
+      },
+      "p_amont_500": {
+        "adresse": 2,
+        "pleine_echelle_v": 10.0,
+        "volts_min": 0.0,
+        "volts_max": 10.0,
+        "valeur_min": 0.0,
+        "valeur_max": 500.0
+      },
+      "dp_iso_500": {
+        "adresse": 4,
+        "pleine_echelle_v": 10.0,
+        "volts_min": 0.0,
+        "volts_max": 10.0,
+        "valeur_min": 0.0,
+        "valeur_max": 500.0
+      },
+      "pdc_recopie": {
+        "adresse": 5,
+        "pleine_echelle_v": 10.0,
+        "_commentaire": "recopie de position 0-10V de la vanne perte de charge"
+      },
+      "temperature": {
+        "adresse": 16,
+        "facteur": 0.1,
+        "_commentaire": "module RTD 750-450 voie 1 (mot 16, apres 497=0-7 et 496=8-15), valeur 0,1 degC"
+      },
+      "frequence_variateur": {
+        "adresse": 6,
+        "pleine_echelle_v": 10.0,
+        "_commentaire": "option : sortie moniteur AM du 3G3MV (image 0-10V de la frequence de sortie)"
+      }
+    },
+    "entrees_tor": {
+      "_commentaire": "Fins de course 24VDC sur 750-1405 (FC2, bits 0-15), potentiel de champ via 750-602. Adresses a verifier avec WAGO I/O CHECK.",
+      "fc_3voies_0": {
+        "adresse": 0,
+        "_commentaire": "vanne 3 voies en position 0 deg"
+      },
+      "fc_3voies_90": {
+        "adresse": 1,
+        "_commentaire": "vanne 3 voies en position 90 deg (intermediaire)"
+      },
+      "fc_3voies_180": {
+        "adresse": 2,
+        "_commentaire": "vanne 3 voies en position 180 deg"
+      },
+      "fc_bypass_ouvert": {
+        "adresse": 3
+      },
+      "fc_bypass_ferme": {
+        "adresse": 4
+      },
+      "defaut_variateur": {
+        "adresse": 5,
+        "_commentaire": "relais de defaut MA/MB du 3G3MV (option, recommande)"
+      },
+      "frequence_atteinte": {
+        "adresse": 6,
+        "_commentaire": "sortie multifonction P1 ou P2 du 3G3MV configuree en 'frequence atteinte' (frequency agree). Optionnelle : si non cablee, comportement inchange."
+      },
+      "fc_pdc_ouvert": {
+        "adresse": 7,
+        "_commentaire": "vanne perte de charge en position ouverture complete (FC0 actionneur P6 POSI)"
+      },
+      "fc_pdc_ferme": {
+        "adresse": 8,
+        "_commentaire": "vanne perte de charge en position fermeture complete (FCF actionneur P6 POSI)"
+      }
+    },
+    "positions_vanne_3voies": {
+      "_commentaire": "Voie 1 = ISO, voie 2 = Miller. Hypothese : 0 deg = voie 1 (ISO), 90 deg = voie 2 (Miller), 180 deg sans role. A CONFIRMER a la mise en service : commander la vanne en manuel, observer la fin de course active et le diaphragme qui voit du Delta P.",
+      "fc_iso": "fc_3voies_0",
+      "fc_miller": "fc_3voies_90"
+    },
+    "sorties": {
+      "variateur": {
+        "adresse": 0,
+        "pleine_echelle_v": 10.0,
+        "_commentaire": "750-597 voie 1 -> borne FR du 3G3MV"
+      },
+      "vanne_perte_charge": {
+        "adresse": 1,
+        "pleine_echelle_v": 10.0,
+        "_commentaire": "750-597 voie 2 : commande 0-10V de la vanne proportionnelle"
+      },
+      "vanne_diaphragme": {
+        "adresse": 0,
+        "_commentaire": "relais 750-515 n.1 voie 1 (coil 0) commutant le 220VAC de l'electrovanne 3 voies : ON = vanne vers ISO, OFF = vers Miller"
+      },
+      "vanne_bypass": {
+        "adresse": 1,
+        "_commentaire": "relais 750-515 n.1 voie 2 (coil 1) commutant le 220VAC de l'electrovanne bypass : ON = ouverte"
+      },
+      "variateur_run": {
+        "adresse": 2,
+        "_commentaire": "relais 750-515 n.1 voie 3 (coil 2) : contact sec sur S1-SC du 3G3MV (n003=1)"
+      }
+    }
+  },
+  "apprentissage": {
+    "courbe_gain_pas_v": 1.0,
+    "courbe_gain_u_max_v": 9.0,
+    "courbe_gain_u_depart_defaut_v": 2.0
+  },
+  "simulation": {
+    "gain_qv_m3s_par_volt": 0.0035,
+    "constante_temps_s": 2.0,
+    "bruit_relatif": 0.01,
+    "temperature_c": 20.0,
+    "p_amont_eff_pa": 25.0,
+    "t_course_3voies_s": 5.5
+  }
+}
