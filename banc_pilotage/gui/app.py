@@ -1274,28 +1274,37 @@ class Application(QMainWindow):
 
         self._seq_points: list | None = None
 
-        # barre de commandes
+        # barre de commandes — style scopé par objectName : un
+        # setStyleSheet("background:transparent;") sans sélecteur se
+        # propagerait aux boutons enfants et les rendrait invisibles
         bar = QWidget()
-        bar.setStyleSheet("background:transparent;")
+        bar.setObjectName("seq-bar")
+        bar.setStyleSheet("QWidget#seq-bar { background:transparent; }")
         bhl = QHBoxLayout(bar)
         bhl.setContentsMargins(0, 0, 0, 0)
         bhl.setSpacing(10)
+        # NB : les propriétés géométriques QSS (min-width, padding) priment
+        # sur setMinimumSize/setFixedSize -> dimensions fixées dans le QSS
+        _btn_seq_qss = BTN_QSS + " QPushButton { padding:8px 18px; }"
         btn_charger = QPushButton("📂  Charger CSV…")
+        btn_charger.setStyleSheet(_btn_seq_qss)
         btn_charger.clicked.connect(self._charger_sequence)
         bhl.addWidget(btn_charger)
         self._btn_seq_start = QPushButton("▶  Démarrer")
+        self._btn_seq_start.setStyleSheet(_btn_seq_qss)
         self._btn_seq_start.setEnabled(False)
         self._btn_seq_start.clicked.connect(self._demarrer_sequence)
         bhl.addWidget(self._btn_seq_start)
         btn_stop = QPushButton("■  Arrêter")
+        btn_stop.setStyleSheet(_btn_seq_qss)
         btn_stop.clicked.connect(self._arreter_sequence)
         bhl.addWidget(btn_stop)
         bh = QPushButton("?")
-        bh.setFixedSize(44, 32)
         bh.setStyleSheet(
             f"QPushButton {{ background:{COLORS['warn']}; border:none;"
             f" border-radius:4px; color:#FFFFFF; font-weight:700;"
-            f" min-width:0; padding:0; }}"
+            f" min-width:44px; max-width:44px;"
+            f" min-height:34px; max-height:34px; padding:0; }}"
             f"QPushButton:hover {{ background:#E68A00; }}")
         bh.clicked.connect(lambda: QMessageBox.information(
             self, "Mode séquence",
