@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "PowerShell(python --version; git --version; python -m pytest --version)",
-      "PowerShell(py *)",
-      "PowerShell(git *)"
-    ]
-  }
-}

@@ -2,3 +2,9 @@ __pycache__/
 *.pyc
 .venv/
 .pytest_cache/
+
+# état runtime du banc (gain appris, propre à chaque machine)
+etat_banc.json
+
+# réglages locaux Claude Code
+**/.claude/settings.local.json
