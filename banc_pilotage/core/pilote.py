@@ -132,9 +132,22 @@ class Pilote:
         self.bas_re_actif = srcfg.get("actif", True)
         self.seuil_bas_re = srcfg.get("seuil_re", 0)        # 0 = auto/désactivé
         self.u_min_ventilateur = srcfg.get("u_min_ventilateur_v", 0.0)
+        # marge (×) appliquée à u_min pour dériver le seuil bas-Re auto,
+        # et point de bascule PdC->variateur du split-range (échelle 0..10)
+        self.marge_seuil_bas_re = srcfg.get("marge_seuil", 1.3)
+        self.split_point = min(max(srcfg.get("split_range_point", 5.0), 0.1), 9.9)
         self._mode_bas_re = False          # état courant de la stratégie
         sel = cfg.get("selection_diaphragme", {})
         self._hysteresis_bypass = sel.get("hysteresis_re", 500)
+
+        # état de la boucle, déclaré explicitement (plutôt que créé au fil de
+        # l'eau et lu via getattr) : sur du code de sécurité, une faute de
+        # frappe sur un de ces noms doit lever une erreur, pas renvoyer un défaut.
+        self._run_actif = None             # None = inconnu -> écriture RUN forcée au 1er cycle
+        self._preparation_faite = False
+        self._position_initiale_lue = False
+        self._cycles_incoherence = 0
+        self._re_conduite_prec = None      # garde-fou anti-transitoire de l'apprentissage du gain
 
         # état courant (lu par l'IHM)
         self.etat = {"diaphragme": "miller", "u_variateur": 0.0,
@@ -371,7 +384,7 @@ class Pilote:
 
         # au premier cycle : position réelle de la vanne 3 voies lue sur les
         # fins de course (ne pas supposer la position au démarrage)
-        if not getattr(self, "_position_initiale_lue", False):
+        if not self._position_initiale_lue:
             for diaph_nom, fc in self._fc_par_diaphragme.items():
                 if mesures.get(fc):
                     self.etat["diaphragme"] = diaph_nom
@@ -544,7 +557,7 @@ class Pilote:
         # défaut de fin de course.
         fc_attendue = self._fc_par_diaphragme.get(diaph)   # None si "fermee"
         if fc_attendue and fc_attendue in mesures and not mesures[fc_attendue]:
-            self._cycles_incoherence = getattr(self, "_cycles_incoherence", 0) + 1
+            self._cycles_incoherence += 1
         else:
             self._cycles_incoherence = 0
         self.etat["incoherence_vanne"] = self._cycles_incoherence \
@@ -586,14 +599,21 @@ class Pilote:
         # rapport Re/volt n'est plus le gain du banc.
         u_courant = self.etat.get("u_variateur", 0.0)
         freq_ok = mesures.get("frequence_atteinte", True)
-        if (freq_ok and u_courant > 0.3 and resultat["re_conduite"] > 200
+        re_cond = resultat["re_conduite"]
+        # garde-fou : n'apprendre que sur un régime établi. Sans la DI
+        # 'fréquence atteinte' (freq_ok défaut True), le Re en montée fausserait
+        # le gain ; on exige que le Re ait peu bougé depuis le cycle précédent.
+        etabli = (self._re_conduite_prec is not None and re_cond > 0
+                  and abs(re_cond - self._re_conduite_prec) < 0.01 * re_cond)
+        if (freq_ok and etabli and u_courant > 0.3 and re_cond > 200
                 and not self._mode_bas_re
                 and not mesures.get("fc_bypass_ouvert")):
-            g = resultat["re_conduite"] / u_courant
+            g = re_cond / u_courant
             if self._gain_re_par_volt is None:
                 self._gain_re_par_volt = g
             else:
                 self._gain_re_par_volt += 0.05 * (g - self._gain_re_par_volt)
+        self._re_conduite_prec = re_cond
 
         # ---- relecture autoritaire de la consigne avant d'agir -------------
         # Un arrêt (arreter_regulation) survenu APRÈS l'instantané de début de
@@ -609,7 +629,7 @@ class Pilote:
         # ---- ordre RUN du variateur (3G3MV : S1, n003=1) --------------------
         # RUN dès qu'une tension > 0 doit être appliquée ; arrêt sinon.
         run_voulu = (manuel and u_manu > 0.05) or (regul and re_cible > 0)
-        if run_voulu != getattr(self, "_run_actif", None):
+        if run_voulu != self._run_actif:
             self.es.ecrire_variateur_run(run_voulu)
             self._run_actif = run_voulu
 
@@ -635,9 +655,10 @@ class Pilote:
         seuil = self.seuil_bas_re
         if not seuil and self.u_min_ventilateur and self.table_gains.est_valide():
             seuil = self.table_gains.re_pour_tension(
-                self.u_min_ventilateur) * 1.3
+                self.u_min_ventilateur) * self.marge_seuil_bas_re
         elif not seuil and self.u_min_ventilateur and self._gain_re_par_volt:
-            seuil = self.u_min_ventilateur * self._gain_re_par_volt * 1.3
+            seuil = self.u_min_ventilateur * self._gain_re_par_volt \
+                * self.marge_seuil_bas_re
 
         # ---- action -------------------------------------------------------
         if manuel:
@@ -714,13 +735,14 @@ class Pilote:
             return cmd, 0.0                # variateur seul, vanne grande ouverte (0 V)
 
         u_min = self.u_min_ventilateur or 1.0
+        sp = self.split_point
         # Rappel convention : 0 V = ouvert, 10 V = fermé.
-        # première moitié : variateur à u_min, PdC passe de fermée (10V) à ouverte (0V)
-        # seconde moitié  : PdC grande ouverte (0V), variateur monte depuis u_min
-        if cmd <= 5.0:
+        # segment bas (cmd ≤ sp) : variateur à u_min, PdC de fermée (10V) à ouverte (0V)
+        # segment haut (cmd > sp) : PdC grande ouverte (0V), variateur monte depuis u_min
+        if cmd <= sp:
             u = u_min
-            pdc_v = 10.0 * (1.0 - cmd / 5.0)       # cmd=0 → 10V (fermé), cmd=5 → 0V (ouvert)
+            pdc_v = 10.0 * (1.0 - cmd / sp)         # cmd=0 → 10V (fermé), cmd=sp → 0V (ouvert)
         else:
             pdc_v = 0.0                              # grande ouverte (0 V)
-            u = u_min + (cmd - 5.0) / 5.0 * (10.0 - u_min)
+            u = u_min + (cmd - sp) / (10.0 - sp) * (10.0 - u_min)
         return u, pdc_v

@@ -81,6 +81,11 @@ class WagoModbus(EntreesSorties):
 
     # ------------------------------------------------------------- lectures
 
+    @staticmethod
+    def _signe16(brut: int) -> int:
+        """Décodage complément à deux d'un mot 16 bits (valeurs signées)."""
+        return brut - 65536 if brut > 32767 else brut
+
     def _lire_ai_volts(self, voie: dict) -> float:
         """Lit une entrée analogique et la convertit en volts."""
         with self._verrou:
@@ -88,9 +93,7 @@ class WagoModbus(EntreesSorties):
                 address=voie["adresse"], count=1)
         if rr.isError():
             raise IOError(f"Erreur Modbus lecture AI @{voie['adresse']}")
-        brut = rr.registers[0]
-        if brut > 32767:           # valeurs signées éventuelles
-            brut -= 65536
+        brut = self._signe16(rr.registers[0])
         return brut / self.PLEINE_ECHELLE * voie.get("pleine_echelle_v", 10.0)
 
     def _volts_vers_unite(self, volts: float, voie: dict) -> float:
@@ -120,10 +123,8 @@ class WagoModbus(EntreesSorties):
                 address=v_t["adresse"], count=1)
         if rr.isError():
             raise IOError("Erreur Modbus lecture PT100")
-        brut = rr.registers[0]
-        if brut > 32767:
-            brut -= 65536
-        mesures["temperature"] = brut * v_t.get("facteur", 0.1)
+        mesures["temperature"] = self._signe16(rr.registers[0]) \
+            * v_t.get("facteur", 0.1)
 
         # fins de course (entrées TOR, FC2)
         tor = self.cfg.get("entrees_tor", {})
