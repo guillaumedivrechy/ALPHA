@@ -66,6 +66,11 @@ class Apprentissage:
                 self.pilote.arreter_regulation()
             except Exception:
                 pass
+            # les tests de vannes commandent es.* directement et peuvent laisser
+            # etat["diaphragme"] désynchronisé (surtout si annulés en cours) :
+            # on force la boucle à relire la position réelle sur les fins de
+            # course au prochain cycle, pour ne pas réguler sur le mauvais capteur.
+            self.pilote._position_initiale_lue = False
             self.etat["en_cours"] = False
             self.etat["test"] = None
 

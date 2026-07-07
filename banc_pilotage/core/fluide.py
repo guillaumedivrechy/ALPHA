@@ -45,10 +45,12 @@ class ProprietesFluide:
         self.gamma = gamma
 
     def rho(self, P_abs: float, T_celsius: float) -> float:
-        return self.rho_force if self.rho_force else rho_air(P_abs, T_celsius)
+        return (self.rho_force if self.rho_force is not None
+                else rho_air(P_abs, T_celsius))
 
     def mu(self, T_celsius: float) -> float:
-        return self.mu_force if self.mu_force else mu_air(T_celsius)
+        return (self.mu_force if self.mu_force is not None
+                else mu_air(T_celsius))
 
     def nu(self, P_abs: float, T_celsius: float) -> float:
         return self.mu(T_celsius) / self.rho(P_abs, T_celsius)

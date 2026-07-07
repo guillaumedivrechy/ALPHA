@@ -108,6 +108,7 @@ class Pilote:
         self._pdc_consigne = 0.0
         self._pdc_position_estimee = 0.0
         self._pdc_cycles_divergents = 0
+        self._pdc_recopie_vue = False      # estimée pas encore calée sur la recopie
         self._t_dernier_cycle = None
         # butées calibrées de la recopie (0 % et 100 % réels en volts)
         self.pdc_recopie_min = act.get("pdc_recopie_min_v", 0.0)
@@ -341,8 +342,19 @@ class Pilote:
                 self.etat["erreur_com"] = None
             except Exception as exc:           # erreur Modbus : repli sûr
                 self.etat["erreur_com"] = str(exc)
+                # état sûr documenté : variateur 0 V ET ordre RUN retiré.
+                # On latche l'arrêt (regulation_active=False), comme les
+                # défauts variateur/vanne, pour ne pas relancer la soufflerie
+                # tout seul dès que la communication revient.
+                with self._verrou:
+                    self.regulation_active = False
                 try:
                     self.es.ecrire_variateur(0.0)
+                except Exception:
+                    pass
+                try:
+                    self.es.ecrire_variateur_run(False)
+                    self._run_actif = False
                 except Exception:
                     pass
             reste = self.periode - (time.monotonic() - debut)
@@ -455,8 +467,15 @@ class Pilote:
         pdc_recopie = mesures.get("pdc_recopie")
         if pdc_recopie is not None:
             self.etat["pdc_position"] = pdc_recopie
+            if not self._pdc_recopie_vue:
+                # première recopie : caler l'estimée sur la position réelle
+                # (sinon fausse divergence tant que la vanne rejoint la consigne)
+                self._pdc_position_estimee = pdc_recopie
+                self._pdc_recopie_vue = True
+                self._pdc_cycles_divergents = 0
+                self.etat["defaut_pdc"] = False
             # diagnostic : recopie incohérente avec le modèle d'actionneur
-            if abs(pdc_recopie - self._pdc_position_estimee) > 1.0:
+            elif abs(pdc_recopie - self._pdc_position_estimee) > 1.0:
                 self._pdc_cycles_divergents += 1
             else:
                 self._pdc_cycles_divergents = 0
@@ -492,7 +511,10 @@ class Pilote:
                         + self.t_vanne_3voies * self.facteur_chien_garde
             elif maintenant > m["t_max"]:
                 # DÉFAUT VANNE : fin de course jamais atteinte -> repli sûr
+                # (variateur 0 V ET ordre RUN retiré, comme sur défaut variateur)
                 self.es.ecrire_variateur(0.0)
+                self.es.ecrire_variateur_run(False)
+                self._run_actif = False
                 with self._verrou:
                     self.regulation_active = False
                 self.etat.update({
@@ -528,7 +550,29 @@ class Pilote:
         self.etat["incoherence_vanne"] = self._cycles_incoherence \
             > max(3, int(3.0 / self.periode))
 
+        # incohérence persistante en régulation : on réguerait sur un capteur
+        # ΔP qui ne correspond plus à la position réelle de la vanne -> repli
+        # sûr + latch (l'opérateur vérifie la vanne puis relance).
+        if self.etat["incoherence_vanne"] and regul:
+            self.es.ecrire_variateur(0.0)
+            self.es.ecrire_variateur_run(False)
+            self._run_actif = False
+            with self._verrou:
+                self.regulation_active = False
+            self.etat.update({
+                "defaut_vanne": "position vanne 3 voies incohérente avec le "
+                                "diaphragme actif (fin de course absente) — "
+                                "vérifier la vanne puis relancer",
+                "regulation": False, "u_variateur": 0.0, "convergee": False,
+            })
+            return
+
         # ---- mesure du débit et des Reynolds -------------------------------
+        # le diaphragme a pu changer pendant la préparation (vanne déjà en
+        # position, sans manœuvre) : relire le ΔP sur le capteur correspondant
+        # au diaphragme finalement retenu, pas celui du début de cycle.
+        dp = (mesures.get("dp_iso_500", 0.0) if diaph == "iso"
+              else mesures.get("dp_diaph_500", 0.0))
         resultat = self.banc.qm_depuis_mesures(diaph, dp, T, p_amont)
         re_mesure = resultat["re_veine"] if reference == "veine" \
             else resultat["re_conduite"]
@@ -550,6 +594,17 @@ class Pilote:
                 self._gain_re_par_volt = g
             else:
                 self._gain_re_par_volt += 0.05 * (g - self._gain_re_par_volt)
+
+        # ---- relecture autoritaire de la consigne avant d'agir -------------
+        # Un arrêt (arreter_regulation) survenu APRÈS l'instantané de début de
+        # cycle doit primer : sinon RUN et tension seraient réémis ici alors
+        # que l'opérateur vient de couper. On relit l'état juste avant les
+        # écritures pour réduire la fenêtre de course à ce strict minimum.
+        with self._verrou:
+            regul = self.regulation_active
+            manuel = self.mode_manuel
+            re_cible = self.re_cible
+            u_manu = self.tension_manuelle
 
         # ---- ordre RUN du variateur (3G3MV : S1, n003=1) --------------------
         # RUN dès qu'une tension > 0 doit être appliquée ; arrêt sinon.
