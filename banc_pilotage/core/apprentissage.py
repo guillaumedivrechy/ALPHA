@@ -524,25 +524,35 @@ class Apprentissage:
             m1 = self._dp_moyens(4.0, "identification : position ISO supposée")
             if m1 is None:
                 return
-            self._avancer_vanne_3voies(False, fc_miller,
-                                       "identification : vers Miller supposé")
-            if self._annule.wait(2.0):
-                self.etat["statut"] = "annulé"
+            t = self._avancer_vanne_3voies(False, fc_miller,
+                                           "identification : vers Miller supposé")
+            if self._annule.is_set():
                 return
-            m2 = self._dp_moyens(4.0, "identification : position Miller supposée")
-            if m2 is None:
-                return
-            d1 = self._capteur_dominant(*m1)
-            d2 = self._capteur_dominant(*m2)
-            if d1 == "iso" and d2 == "miller":
-                mapping = "ok"
-            elif d1 == "miller" and d2 == "iso":
-                mapping = "inverse"
+            if t is None:
+                # vanne pas arrivée : diagnostic « vanne », pas « capteurs »
+                # (mesurer m2 ici accuserait à tort les capteurs ΔP)
+                rapport["v3_identification"] = False
             else:
-                mapping = "indetermine"
-            rapport["mapping_iso_miller"] = mapping
-            rapport["dp_position_iso"] = [round(m1[0], 1), round(m1[1], 1)]
-            rapport["dp_position_miller"] = [round(m2[0], 1), round(m2[1], 1)]
+                if self._annule.wait(2.0):
+                    self.etat["statut"] = "annulé"
+                    return
+                m2 = self._dp_moyens(
+                    4.0, "identification : position Miller supposée")
+                if m2 is None:
+                    return
+                d1 = self._capteur_dominant(*m1)
+                d2 = self._capteur_dominant(*m2)
+                if d1 == "iso" and d2 == "miller":
+                    mapping = "ok"
+                elif d1 == "miller" and d2 == "iso":
+                    mapping = "inverse"
+                else:
+                    mapping = "indetermine"
+                rapport["mapping_iso_miller"] = mapping
+                rapport["dp_position_iso"] = [round(m1[0], 1),
+                                              round(m1[1], 1)]
+                rapport["dp_position_miller"] = [round(m2[0], 1),
+                                                 round(m2[1], 1)]
         self.pilote.mode_manuel_tension(0.0)
 
         rapport["mapping_inverse"] = mapping == "inverse"
@@ -675,13 +685,14 @@ class Apprentissage:
         # ouvert ou PdC fermée serait silencieusement fausse
         if not self._preparer_circuit_normal():
             return
-        # plafond du capteur ΔP actif : au-delà de ~90 % de sa pleine échelle
-        # les paliers ne mesurent plus le banc mais la saturation du capteur
+        # plafond du capteur ΔP actif : au-delà de la fraction de saturation
+        # les paliers ne mesurent plus le banc mais le plafond du capteur
         # (Re plafonné) — points faux qui corrompraient table et verdict
         cle_dp = ("dp_iso_500" if self.pilote.etat.get("diaphragme") == "iso"
                   else "dp_diaph_500")
         dp_max = (self.cfg.get("modbus", {}).get("entrees", {})
                   .get(cle_dp, {}).get("valeur_max", 500.0))
+        dp_max *= self.pilote.saturation_dp
         dt = self.pilote.periode
         fenetre = max(6, int(5.0 / dt))
         points = []                                  # (volts, re)
@@ -692,7 +703,7 @@ class Apprentissage:
                 f"palier {k+1}/{len(tensions)} à {u:.1f} V")
             if re is None:
                 return
-            if (self.pilote.etat.get("dp") or 0.0) > 0.9 * dp_max:
+            if (self.pilote.etat.get("dp") or 0.0) > dp_max:
                 sature_a = u
                 break
             points.append((u, re))

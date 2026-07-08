@@ -91,6 +91,9 @@ class Pilote:
         # fonctionnement ; quand le banc est caractérisé, on compense
         # (voir _echelle_gains). Désactivable au banc.
         self.gain_scheduling = r.get("gain_scheduling_actif", True)
+        # fraction de la pleine échelle du capteur ΔP au-delà de laquelle
+        # la mesure est considérée saturée (drapeau dp_sature)
+        self.saturation_dp = r.get("saturation_dp_relative", 0.9)
         # mise en forme de référence : le PI suit une consigne interne
         # filtrée au 1er ordre (trajectoire réalisable par la plante) au
         # lieu de l'échelon brut -> supprime le coup de bélier du terme P
@@ -225,6 +228,11 @@ class Pilote:
         with self._verrou:
             self.re_cible = re_cible
             self.reference = reference
+            # nouvelle consigne = nouvelle préparation (choix diaphragme,
+            # feed-forward, Re conduite équivalent), même si la régulation
+            # tourne : sans ce reset, un appel isolé laisserait le critère
+            # bas-Re et le split-range calés sur l'ancienne consigne
+            self._preparation_faite = False
 
     def demarrer_regulation(self) -> None:
         with self._verrou:
@@ -654,7 +662,7 @@ class Pilote:
         # atteignable par la mesure (le PI pousserait le ventilateur à fond
         # sans jamais converger). Signalé à l'opérateur via etat[dp_sature].
         cle_dp = "dp_iso_500" if diaph == "iso" else "dp_diaph_500"
-        if dp > 0.95 * self._dp_pleine_echelle[cle_dp]:
+        if dp > self.saturation_dp * self._dp_pleine_echelle[cle_dp]:
             self._cycles_dp_sature += 1
         else:
             self._cycles_dp_sature = 0

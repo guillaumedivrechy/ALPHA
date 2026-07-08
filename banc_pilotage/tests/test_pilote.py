@@ -294,6 +294,22 @@ def test_zero_capteur_soustrait_du_dp():
     assert pilote.etat["re_mesure"] == pytest.approx(0.0)
 
 
+def test_definir_consigne_seule_reprepare():
+    """Régression : definir_consigne() sans demarrer_regulation() laissait
+    le feed-forward, le choix de diaphragme et le Re conduite équivalent
+    calés sur l'ancienne consigne (critère bas-Re faussé)."""
+    pilote, es = _pilote_en_position("fc_3voies_0")
+    pilote.bas_re_actif = False
+    pilote.definir_consigne(8000.0, "conduite")
+    pilote.demarrer_regulation()
+    pilote._cycle()
+    appels = _espion_reinit(pilote.pi)
+    pilote.definir_consigne(12000.0, "conduite")   # sans demarrer_regulation
+    pilote._cycle()
+    assert len(appels) == 1                        # re-préparation déclenchée
+    assert pilote._re_cible_conduite == pytest.approx(12000.0, rel=1e-6)
+
+
 def test_dp_sature_signale():
     """ΔP proche de la pleine échelle du capteur : le Re mesuré plafonne au
     capteur, pas au banc — signalé (après debounce) pour que l'opérateur

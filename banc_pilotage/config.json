@@ -48,7 +48,7 @@
     "pdc_recopie_max_v": 9.993
   },
   "regulation": {
-    "_commentaire": "echelon_reinit_ff_relatif : saut de consigne relatif au-dela duquel un echelon de sequence reinitialise le PI sur le feed-forward ; en deca, l'etat PI (integrale) est conserve. gain_scheduling_actif : compense la variation du gain de boucle avec le point de fonctionnement (gains multiplies par la tension d'equilibre estimee, si table de gains ou gain appris disponible) ; desactiver pour retrouver des gains fixes. tau_consigne_s : mise en forme de reference (consigne interne filtree au 1er ordre suivie par le PI) ; regler = tau du procede (mesure par l'essai indiciel, reporte par Appliquer) ; 0 = echelon brut.",
+    "_commentaire": "echelon_reinit_ff_relatif : saut de consigne relatif au-dela duquel un echelon de sequence reinitialise le PI sur le feed-forward ; en deca, l'etat PI (integrale) est conserve. gain_scheduling_actif : compense la variation du gain de boucle avec le point de fonctionnement (gains multiplies par la tension d'equilibre estimee, si table de gains ou gain appris disponible) ; desactiver pour retrouver des gains fixes. tau_consigne_s : mise en forme de reference (consigne interne filtree au 1er ordre suivie par le PI) ; regler = tau du procede (mesure par l'essai indiciel, reporte par Appliquer) ; 0 = echelon brut. saturation_dp_relative : fraction de la pleine echelle du capteur Delta-P au-dela de laquelle la mesure est consideree saturee (drapeau dp_sature de la boucle, exclusion des paliers de courbe_gain).",
     "periode_s": 0.2,
     "kp": 1.5,
     "ki": 0.5,
@@ -57,7 +57,8 @@
     "tolerance_convergence_relative": 0.01,
     "echelon_reinit_ff_relatif": 0.2,
     "gain_scheduling_actif": true,
-    "tau_consigne_s": 2.0
+    "tau_consigne_s": 2.0,
+    "saturation_dp_relative": 0.9
   },
   "modbus": {
     "_commentaire": "Coupleur Wago 750-362, alimentation 2587-2144 (24V/5A). Ordre des modules : 750-497 (AI 0-10V, mots IN 0-7) / 750-496 (AI 4-20mA, mots IN 8-15) / 750-450 (RTD, mots IN 16-19) / 750-597 (AO, mots OUT 0-7) / 750-602 (injection 24V de champ, pas de donnees) / 750-1405 (16 DI, bits 0-15) / 3x 750-515 (12 relais, coils 0-11) / 750-1504 (16 DO, coils 12-27) / 750-600 (fin de bus, pas de donnees). AI: FC4 ; AO: FC6/16 ; DI: FC2 ; DO: FC5. A VERIFIER avec WAGO I/O CHECK apres montage.",
