@@ -29,18 +29,25 @@ def test_re_veine_aller_retour(banc):
     assert r["re_veine"] == pytest.approx(30000.0, rel=1e-9)
 
 
+# bornes dérivées de la config, pas écrites en dur : le seuil de bascule
+# sera réglé à la mise en service, ces tests doivent le suivre sans casser.
+_SEL = CFG["selection_diaphragme"]
+_SEUIL = _SEL["seuil_re"]
+_HYST = _SEL.get("hysteresis_re", 500)
+
+
 def test_selection_sans_historique(banc):
-    assert banc.choisir_diaphragme(3000.0) == "miller"
-    assert banc.choisir_diaphragme(8000.0) == "iso"
+    assert banc.choisir_diaphragme(_SEUIL * 0.6) == "miller"
+    assert banc.choisir_diaphragme(_SEUIL * 1.6) == "iso"
 
 
 def test_hysteresis_commutation(banc):
     # depuis Miller : bascule seulement au-delà de seuil + hystérésis
-    assert banc.choisir_diaphragme(5200.0, "miller") == "miller"
-    assert banc.choisir_diaphragme(5600.0, "miller") == "iso"
+    assert banc.choisir_diaphragme(_SEUIL + _HYST - 1, "miller") == "miller"
+    assert banc.choisir_diaphragme(_SEUIL + _HYST + 1, "miller") == "iso"
     # depuis ISO : bascule seulement en dessous de seuil - hystérésis
-    assert banc.choisir_diaphragme(4800.0, "iso") == "iso"
-    assert banc.choisir_diaphragme(4400.0, "iso") == "miller"
+    assert banc.choisir_diaphragme(_SEUIL - _HYST + 1, "iso") == "iso"
+    assert banc.choisir_diaphragme(_SEUIL - _HYST - 1, "iso") == "miller"
 
 
 def test_mesure_coherente_avec_inverse(banc):

@@ -26,9 +26,13 @@ deux fichiers** (qm, Re, C, ε, Y1).
    logiciel lit ΔP, P_amont et T, recalcule le débit réel (ISO 5167 ou
    Miller, itératif comme dans Excel), en déduit le Re mesuré et corrige la
    tension 0-10 V.
-4. Les capteurs ΔP et P_amont utilisés sont les gammes **500 Pa (0-10 V)**.
-   La bascule automatique vers les gammes fines 50 Pa (0-1 V) est prévue
-   mais **non implémentée** (capteurs non câblés à ce jour).
+4. Chaque voie ΔP et P_amont fournit un signal **0-10 V = 0-500 Pa**. Les
+   voies **ΔP Miller** et **P_amont** embarquent deux capteurs montés
+   **maître/esclave (50 Pa + 500 Pa)** : sous ~50 Pa la mesure provient du
+   capteur fin (meilleure précision aux bas ΔP), au-dessus du capteur
+   500 Pa. Cette bascule est **matérielle** et transparente pour le
+   logiciel — la sortie reste 0-10 V = 0-500 Pa. La voie **ΔP ISO**
+   (débits plus élevés, ΔP plus grands) n'a que le capteur 500 Pa.
 5. ρ et μ de l'air sont **recalculés en continu** (gaz parfait + Sutherland)
    à partir de P_amont et de la PT100 — plus précis que les tables figées
    des classeurs. Des valeurs forcées restent possibles (`config.json`).
@@ -79,7 +83,6 @@ fixe interrompent la séquence.
 | `veine` | **à renseigner** : section [m²] et longueur caractéristique [m] pour le Re veine |
 | `fluide` | γ, et valeurs forcées ρ/μ optionnelles |
 | `selection_diaphragme` | seuil Re = 5000 et hystérésis |
-| `capteurs_dp` | seuil de bascule 50 Pa / 500 Pa |
 | `regulation` | période, gains PI, rampe du variateur, tolérance de convergence |
 | `modbus` | IP du coupleur et **mapping des voies** |
 | `simulation` | paramètres du banc simulé |
@@ -89,9 +92,11 @@ fixe interrompent la séquence.
 L'image process du coupleur dépend de l'**ordre physique des modules** sur
 le nœud. Les adresses par défaut de `config.json` supposent :
 
-- entrées analogiques (FC4, mots 0…) : ΔP 500 Pa, ΔP 50 Pa, P_amont 500 Pa,
-  P_amont 50 Pa, ΔP diaphragme ISO, puis module RTD PT100 (750-461,
-  valeur en 0,1 °C) ;
+- entrées analogiques (FC4) : ΔP Miller (mot 0), P_amont (mot 2), ΔP ISO
+  (mot 4) — chacune une sortie unique 0-10 V = 0-500 Pa ; les voies ΔP
+  Miller et P_amont sont des capteurs maître/esclave 50+500 Pa (bascule
+  matérielle interne, cf. § Principe 4). Puis recopie vanne PdC et module
+  RTD PT100 (750-461, valeur en 0,1 °C) ;
 - sorties analogiques (FC6/16, mots 0…) : variateur, vanne perte de charge ;
 - sorties TOR (coils à partir de 512) : vanne 3 voies (ON = ISO),
   vanne bypass.

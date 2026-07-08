@@ -136,6 +136,12 @@ class SimulateurBanc(EntreesSorties):
         self._pdc_consigne = 0.0
         self._pdc_position = 0.0
         self._pdc_t_prec = time.monotonic()
+        # fractions de débit atteignant la veine (modèle de la PdC en série et
+        # du by-pass). PdC : 0 V = ouverte (pleine passe), 10 V = fermée
+        # (étranglée). Défauts choisis pour que le régime bas-Re soit pilotable.
+        self.bypass_frac  = cfg_simu.get("bypass_frac_veine", 0.35)  # by-pass ouvert, PdC ouverte
+        self.pdc_frac_min = cfg_simu.get("pdc_frac_min", 0.08)       # by-pass ouvert, PdC fermée
+        self.pdc_serie_min = cfg_simu.get("pdc_serie_min", 0.05)     # by-pass fermé, PdC fermée
 
     # ----- côté "procédé" : réception des commandes -------------------------
 
@@ -157,15 +163,8 @@ class SimulateurBanc(EntreesSorties):
     # ----- modèles internes ---------------------------------------------------
 
     def _avancer(self) -> None:
-        # sans ordre RUN, le 3G3MV ignore la référence 0-10 V
-        qv_cible = self.gain_qv * self._u_variateur if self._run else 0.0
-        # bypass ouvert : une partie du débit recircule -> moins dans la boucle
-        if self._bypass.position and not self._bypass.en_course:
-            qv_cible *= 0.35
-        a = self.periode_s / max(self.tau_s, self.periode_s)
-        self._qv += a * (qv_cible - self._qv)
-
-        # actionneur de la vanne perte de charge (0,4 V/s)
+        # actionneur de la vanne perte de charge (course lente) — mis à jour
+        # d'abord, sa position sert au calcul du débit qui atteint la veine
         t = time.monotonic()
         dt = t - self._pdc_t_prec
         self._pdc_t_prec = t
@@ -176,6 +175,22 @@ class SimulateurBanc(EntreesSorties):
 
         self._v3.actualiser()
         self._bypass.actualiser()
+
+        # débit refoulé par le ventilateur (sans RUN, le 3G3MV ignore la réf.)
+        qv_fan = self.gain_qv * self._u_variateur if self._run else 0.0
+        # fraction atteignant la veine : la PdC (en série) l'étrangle en se
+        # fermant, le by-pass (en parallèle) en dérive une part quand il est
+        # ouvert. PdC ouverte (0 V) -> ouv=1 -> pleine passe (régime normal
+        # inchangé) ; PdC fermée (10 V) -> ouv=0 -> débit mini.
+        ouv = 1.0 - min(max(self._pdc_position / 10.0, 0.0), 1.0)
+        if self._bypass.position and not self._bypass.en_course:
+            frac = self.pdc_frac_min + (self.bypass_frac - self.pdc_frac_min) * ouv
+        else:
+            frac = self.pdc_serie_min + (1.0 - self.pdc_serie_min) * ouv
+        qv_cible = qv_fan * frac
+
+        a = self.periode_s / max(self.tau_s, self.periode_s)
+        self._qv += a * (qv_cible - self._qv)
 
     # ----- côté "capteurs" ----------------------------------------------------
 

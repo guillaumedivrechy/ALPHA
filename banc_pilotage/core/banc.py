@@ -2,8 +2,9 @@
 """Logique métier du banc :
   - conversion consigne Re (veine ou conduite) -> débit massique visé
   - sélection automatique du diaphragme (Miller si Re_diaphragme < seuil, sinon ISO)
-  - choix automatique de la gamme capteur ΔP (500 Pa / 0-10 V ou 50 Pa / 0-1 V)
-  - calcul du Re mesuré à partir des capteurs (ΔP, P_amont, PT100)
+  - calcul du Re mesuré à partir des capteurs (ΔP, P_amont, PT100 ;
+    voies ΔP Miller et P_amont en maître/esclave 50/500 Pa côté matériel,
+    sortie unique 0-10 V = 0-500 Pa)
 """
 
 from __future__ import annotations
