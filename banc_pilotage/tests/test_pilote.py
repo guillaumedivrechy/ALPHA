@@ -190,11 +190,34 @@ def test_convergee_exige_des_cycles_consecutifs():
     pilote.tolerance = 2.0                # bande couvrant toute mesure
     pilote.definir_consigne(8000.0, "conduite")
     pilote.demarrer_regulation()
+    n = max(3, int(2.0 / pilote.periode))  # fenêtre du debounce (~2 s)
     pilote._cycle()
     assert pilote.etat["convergee"] is False        # 1er cycle en bande
-    for _ in range(3):
+    for _ in range(n - 1):
         pilote._cycle()
-    assert pilote.etat["convergee"] is True         # 4 cycles (2 s) en bande
+    assert pilote.etat["convergee"] is True         # n cycles (~2 s) en bande
+
+
+def test_consigne_interne_filtree():
+    """Mise en forme de référence : le PI suit une consigne interne filtrée
+    (ancrée sur la mesure, plancher 20 % de la cible) qui rejoint la cible
+    au 1er ordre, au lieu de l'échelon brut."""
+    pilote, es = _pilote_en_position("fc_3voies_0")
+    pilote.bas_re_actif = False
+    pilote.tau_consigne = 2.0
+    pilote.definir_consigne(8000.0, "conduite")
+    pilote.demarrer_regulation()
+    pilote._cycle()
+    c1 = pilote._consigne_interne
+    assert 0.2 * 8000.0 <= c1 < 8000.0    # ancrée au plancher, pas à la cible
+    pilote._cycle()
+    c2 = pilote._consigne_interne
+    assert c1 < c2 < 8000.0               # progression monotone vers la cible
+    # désactivée (tau = 0) : échelon brut, pas de consigne interne
+    pilote.tau_consigne = 0.0
+    pilote._preparer_pi(False, 8000.0, 0.0)
+    pilote._cycle()
+    assert pilote._consigne_interne is None
 
 
 def test_gain_scheduling_suit_le_point_de_fonctionnement():

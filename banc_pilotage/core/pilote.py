@@ -91,6 +91,11 @@ class Pilote:
         # fonctionnement ; quand le banc est caractérisé, on compense
         # (voir _echelle_gains). Désactivable au banc.
         self.gain_scheduling = r.get("gain_scheduling_actif", True)
+        # mise en forme de référence : le PI suit une consigne interne
+        # filtrée au 1er ordre (trajectoire réalisable par la plante) au
+        # lieu de l'échelon brut -> supprime le coup de bélier du terme P
+        # et le dépassement associé. 0 = désactivé (échelon brut).
+        self.tau_consigne = r.get("tau_consigne_s", 0.0)
         # temps de course des actionneurs (servent de CHIEN DE GARDE :
         # défaut vanne si la fin de course n'est pas atteinte à temps)
         act = cfg.get("actionneurs", {})
@@ -166,6 +171,7 @@ class Pilote:
         self._echelon_depuis = None        # Re cible avant le dernier échelon de séquence
         self._re_cible_conduite = 0.0      # Re conduite équivalent de la consigne (calé à la préparation)
         self._regime_pi = False            # régime pour lequel le PI est calé (True = bas-Re)
+        self._consigne_interne = None      # consigne filtrée suivie par le PI (None = à ancrer)
 
         # état courant (lu par l'IHM)
         self.etat = {"diaphragme": "miller", "u_variateur": 0.0,
@@ -739,9 +745,24 @@ class Pilote:
                 _, pdc_v = self._split_range(
                     self._cmd_ff_bas_re(re_cible_cond, seuil), True)
             else:
+                # mise en forme de référence : consigne interne filtrée au
+                # 1er ordre depuis la mesure courante (plancher 20 % de la
+                # cible pour garder l'erreur normalisée bornée). Le PI suit
+                # une trajectoire réalisable -> pas de dépassement lié au
+                # coup de bélier du terme P sur l'échelon.
+                if self.tau_consigne > 0:
+                    if self._consigne_interne is None:
+                        self._consigne_interne = max(re_mesure,
+                                                     0.2 * re_cible)
+                    a = self.periode / (self.tau_consigne + self.periode)
+                    self._consigne_interne += a * (re_cible
+                                                   - self._consigne_interne)
+                    consigne_pi = self._consigne_interne
+                else:
+                    consigne_pi = re_cible
                 # sortie unique du PI (gains, rampe et pré-positionnement
                 # calés par _preparer_pi), répartie en split-range
-                cmd = self.pi.calculer(re_cible, re_mesure)   # 0..10 (V équiv.)
+                cmd = self.pi.calculer(consigne_pi, re_mesure)  # 0..10 (V équiv.)
                 u, pdc_v = self._split_range(cmd, besoin_bas_re)
             self.es.ecrire_variateur(u)
             self.commander_vanne_perte_charge(pdc_v)
@@ -842,6 +863,7 @@ class Pilote:
                 u_ff = self.etat.get("u_variateur", 0.0)
             self.pi.reinitialiser(u_ff)
         self._regime_pi = bas_re
+        self._consigne_interne = None      # ré-ancrage sur la mesure courante
 
     def _rampe_bas_re(self) -> float:
         """Rampe PI en bas-Re. Sur le segment PdC du split-range, 1 unité de

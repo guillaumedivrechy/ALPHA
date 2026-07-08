@@ -615,7 +615,12 @@ class Apprentissage:
             reg["ki"] = r["ki_propose"]
             self.pilote.pi.kp = r["kp_propose"]
             self.pilote.pi.ki = r["ki_propose"]
-            lignes.append(f"kp={r['kp_propose']}, ki={r['ki_propose']}")
+            # mise en forme de référence calée sur le tau mesuré du procédé
+            # (la consigne interne suit alors la trajectoire naturelle)
+            reg["tau_consigne_s"] = r["tau_s"]
+            self.pilote.tau_consigne = r["tau_s"]
+            lignes.append(f"kp={r['kp_propose']}, ki={r['ki_propose']}, "
+                          f"tau_consigne={r['tau_s']} s")
         if "courbe_gain" in self.resultats and getattr(self, "_table_points", None):
             from core.pilote import TableGains
             t = TableGains(self._table_points)
