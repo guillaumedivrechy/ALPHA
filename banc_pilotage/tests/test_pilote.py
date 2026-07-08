@@ -294,6 +294,24 @@ def test_zero_capteur_soustrait_du_dp():
     assert pilote.etat["re_mesure"] == pytest.approx(0.0)
 
 
+def test_dp_sature_signale():
+    """ΔP proche de la pleine échelle du capteur : le Re mesuré plafonne au
+    capteur, pas au banc — signalé (après debounce) pour que l'opérateur
+    comprenne une non-convergence sur consigne trop haute."""
+    es = StubES({"temperature": 20.0, "fc_3voies_0": True,
+                 "dp_iso_500": 490.0})              # > 95 % de 500 Pa
+    pilote = Pilote(Banc(CFG), es, CFG)
+    n = max(3, int(1.0 / pilote.periode))
+    for _ in range(n - 1):
+        pilote._cycle()
+    assert pilote.etat["dp_sature"] is False        # debounce en cours
+    pilote._cycle()                                 # n-ième cycle saturé
+    assert pilote.etat["dp_sature"] is True
+    es.mesures["dp_iso_500"] = 200.0                # retour en plage
+    pilote._cycle()
+    assert pilote.etat["dp_sature"] is False
+
+
 def test_arreter_persiste_u_min(tmp_path):
     """u_min appris (freq_min) : réécrit par arreter() comme le gain et la
     table, sinon la valeur disparaît du fichier d'état à l'extinction."""

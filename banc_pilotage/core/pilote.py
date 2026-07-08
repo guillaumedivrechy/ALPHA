@@ -164,6 +164,12 @@ class Pilote:
         self.zero_capteurs = {k: v for k, v
                               in cfg.get("zero_capteurs", {}).items()
                               if not k.startswith("_")}
+        # pleine échelle des capteurs ΔP : au-delà de ~95 %, le Re mesuré
+        # plafonne au plafond du capteur, pas au banc (drapeau dp_sature)
+        entrees = cfg.get("modbus", {}).get("entrees", {})
+        self._dp_pleine_echelle = {
+            cle: entrees.get(cle, {}).get("valeur_max", 500.0)
+            for cle in ("dp_iso_500", "dp_diaph_500")}
 
         # état de la boucle, déclaré explicitement (plutôt que créé au fil de
         # l'eau et lu via getattr) : sur du code de sécurité, une faute de
@@ -173,6 +179,7 @@ class Pilote:
         self._position_initiale_lue = False
         self._cycles_incoherence = 0
         self._cycles_convergee = 0         # cycles consécutifs dans la bande de tolérance
+        self._cycles_dp_sature = 0         # cycles consécutifs ΔP proche de la pleine échelle
         self._re_conduite_prec = None      # garde-fou anti-transitoire de l'apprentissage du gain
         self._echelon_depuis = None        # Re cible avant le dernier échelon de séquence
         self._re_cible_conduite = 0.0      # Re conduite équivalent de la consigne (calé à la préparation)
@@ -642,6 +649,15 @@ class Pilote:
         # position, sans manœuvre) : relire le ΔP sur le capteur correspondant
         # au diaphragme finalement retenu, pas celui du début de cycle.
         dp = self._dp_corrige(mesures, diaph)
+        # capteur ΔP proche de sa pleine échelle : le Re mesuré plafonne au
+        # plafond du capteur, pas au banc — une consigne au-delà n'est plus
+        # atteignable par la mesure (le PI pousserait le ventilateur à fond
+        # sans jamais converger). Signalé à l'opérateur via etat[dp_sature].
+        cle_dp = "dp_iso_500" if diaph == "iso" else "dp_diaph_500"
+        if dp > 0.95 * self._dp_pleine_echelle[cle_dp]:
+            self._cycles_dp_sature += 1
+        else:
+            self._cycles_dp_sature = 0
         resultat = self.banc.qm_depuis_mesures(diaph, dp, T, p_amont)
         re_mesure = resultat["re_veine"] if reference == "veine" \
             else resultat["re_conduite"]
@@ -794,6 +810,7 @@ class Pilote:
             "pdc_consigne": self._pdc_consigne,
             "mode_bas_re": self._mode_bas_re,
             "seuil_bas_re_effectif": round(seuil) if seuil else None,
+            "dp_sature": self._cycles_dp_sature >= max(3, int(1.0 / self.periode)),
         })
 
     def _seuil_bas_re(self) -> float:

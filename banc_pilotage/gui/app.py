@@ -2259,6 +2259,8 @@ class Application(QMainWindow):
             ("defaut_variateur", "⚠ Défaut variateur"),
             ("defaut_pdc",       "⚠ Défaut PdC"),
             ("incoherence_vanne","⚠ Vanne 3 voies incohérente"),
+            ("dp_sature",        "⚠ ΔP saturé — Re au-delà de la plage "
+                                 "mesurable du capteur"),
         ]:
             if e.get(key) and not any(
                     d.get("msg", "").startswith(msg[:6])
