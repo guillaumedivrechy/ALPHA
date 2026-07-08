@@ -25,15 +25,27 @@ class _FauxResultat:
 
 
 class _FauxClient:
-    """Renvoie 5 V (16384) sur les AI, 20,5 °C sur la PT100, True en TOR."""
+    """Renvoie 5 V (16384) sur les AI, 20,5 °C sur la PT100, True en TOR.
+    Compte les transactions pour vérifier les lectures par blocs."""
+
+    def __init__(self):
+        self.transactions = 0
+        self.ecritures = 0
+
+    def write_register(self, address, value):
+        self.ecritures += 1
+        return _FauxResultat()
 
     def read_input_registers(self, address, count=1):
-        if address == CFG_MODBUS["entrees"]["temperature"]["adresse"]:
-            return _FauxResultat(registers=[205])          # 20,5 °C
-        return _FauxResultat(registers=[16384])            # ~5,0 V
+        self.transactions += 1
+        t_addr = CFG_MODBUS["entrees"]["temperature"]["adresse"]
+        return _FauxResultat(registers=[
+            205 if address + i == t_addr else 16384       # 20,5 °C / ~5,0 V
+            for i in range(count)])
 
     def read_discrete_inputs(self, address, count=1):
-        return _FauxResultat(bits=[True])
+        self.transactions += 1
+        return _FauxResultat(bits=[True] * count)
 
 
 @pytest.fixture
@@ -41,6 +53,8 @@ def wago():
     w = WagoModbus.__new__(WagoModbus)      # sans connexion réseau
     w.cfg = CFG_MODBUS
     w._verrou = threading.Lock()
+    w._ao_cache = {}
+    w._t_rafraichissement = 2.0
     w.client = _FauxClient()
     return w
 
@@ -67,3 +81,32 @@ def test_lire_mesures_complet(wago):
     for nom in CFG_MODBUS["entrees_tor"]:
         if not nom.startswith("_"):
             assert mesures[nom] is True
+
+
+def test_regroupement_en_blocs():
+    """Adresses voisines regroupées (trous <= 4 inclus), lointaines séparées."""
+    assert WagoModbus._blocs([0, 2, 4, 5, 6, 16]) == [[0, 7], [16, 1]]
+    assert WagoModbus._blocs([0, 1, 2, 3, 4, 5, 6, 7, 8]) == [[0, 9]]
+    assert WagoModbus._blocs([]) == []
+    assert WagoModbus._blocs([3, 3, 3]) == [[3, 1]]
+
+
+def test_lire_mesures_en_peu_de_transactions(wago):
+    """Le cycle ne doit pas faire une transaction Modbus par voie : chaque
+    aller-retour TCP allonge la boucle et est une occasion de timeout."""
+    wago.lire_mesures()
+    assert wago.client.transactions <= 4
+
+
+def test_ecriture_ao_sur_changement_seulement(wago):
+    """Une valeur AO inchangée n'est pas réémise à chaque cycle ; le
+    rafraîchissement périodique couvre la perte du coupleur. Un changement
+    de valeur (dont les mises à 0 de sécurité) part immédiatement."""
+    wago.ecrire_variateur(5.0)
+    wago.ecrire_variateur(5.0)              # inchangé -> pas de réécriture
+    assert wago.client.ecritures == 1
+    wago.ecrire_variateur(0.0)              # changement -> écrit tout de suite
+    assert wago.client.ecritures == 2
+    wago._t_rafraichissement = 0.0          # délai écoulé -> réécrit
+    wago.ecrire_variateur(0.0)
+    assert wago.client.ecritures == 3

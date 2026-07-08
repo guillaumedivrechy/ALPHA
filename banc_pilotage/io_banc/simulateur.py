@@ -112,7 +112,6 @@ class SimulateurBanc(EntreesSorties):
         self.banc = banc
         self.gain_qv = cfg_simu.get("gain_qv_m3s_par_volt", 0.0035)
         self.tau_s = cfg_simu.get("constante_temps_s", 2.0)
-        self.periode_s = cfg_simu.get("periode_s", 0.2)
         self.bruit_rel = cfg_simu.get("bruit_relatif", 0.01)
         self.temperature = cfg_simu.get("temperature_c", 20.0)
         self.p_amont_eff = cfg_simu.get("p_amont_eff_pa", 25.0)
@@ -189,7 +188,9 @@ class SimulateurBanc(EntreesSorties):
             frac = self.pdc_serie_min + (1.0 - self.pdc_serie_min) * ouv
         qv_cible = qv_fan * frac
 
-        a = self.periode_s / max(self.tau_s, self.periode_s)
+        # 1er ordre au pas de temps REEL entre deux appels : la constante de
+        # temps configuree est respectee quelle que soit la periode de la boucle
+        a = dt / max(self.tau_s, dt) if dt > 0 else 0.0
         self._qv += a * (qv_cible - self._qv)
 
     # ----- côté "capteurs" ----------------------------------------------------

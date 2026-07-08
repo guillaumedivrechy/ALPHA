@@ -2269,8 +2269,16 @@ class Application(QMainWindow):
             f"font-family:'IBM Plex Mono',monospace; font-size:11px;"
             f" font-weight:700; color:{col}; background:transparent;")
 
+        # durée réelle du cycle : un dépassement durable de la période
+        # signale une communication Modbus lente (timeouts imminents)
+        duree = e.get("duree_cycle_s")
+        cycle_txt = ""
+        if duree is not None:
+            cycle_txt = f" · cycle {duree * 1000:.0f} ms"
+            if duree > self.pilote.periode:
+                cycle_txt += " ⚠"
         self._foot_samples.setText(
-            f"Échantillons : {e.get('cycles', 0)}")
+            f"Échantillons : {e.get('cycles', 0)}{cycle_txt}")
 
         if self._recording:
             self._foot_rec.setVisible(True)

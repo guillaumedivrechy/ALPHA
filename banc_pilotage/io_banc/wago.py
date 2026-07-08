@@ -24,6 +24,7 @@ IHM, apprentissage) : chaque transaction est protégée par un verrou.
 
 from __future__ import annotations
 import threading
+import time
 
 try:
     from pymodbus.client import ModbusTcpClient
@@ -72,6 +73,11 @@ class WagoModbus(EntreesSorties):
                 "pymodbus n'est pas installé : pip install pymodbus")
         self.cfg = cfg_modbus
         self._verrou = threading.Lock()   # client pymodbus non thread-safe
+        # dernière valeur écrite par sortie analogique : évite de réémettre
+        # une valeur inchangée à chaque cycle (voir _ecrire_ao_volts)
+        self._ao_cache: dict[int, tuple[int, float]] = {}
+        self._t_rafraichissement = cfg_modbus.get(
+            "rafraichissement_sorties_s", 2.0)
         self.client = ModbusTcpClient(
             host=cfg_modbus["ip"], port=cfg_modbus.get("port", 502),
             timeout=cfg_modbus.get("timeout_s", 1.0))
@@ -86,15 +92,18 @@ class WagoModbus(EntreesSorties):
         """Décodage complément à deux d'un mot 16 bits (valeurs signées)."""
         return brut - 65536 if brut > 32767 else brut
 
-    def _lire_ai_volts(self, voie: dict) -> float:
-        """Lit une entrée analogique et la convertit en volts."""
-        with self._verrou:
-            rr = self.client.read_input_registers(
-                address=voie["adresse"], count=1)
-        if rr.isError():
-            raise IOError(f"Erreur Modbus lecture AI @{voie['adresse']}")
-        brut = self._signe16(rr.registers[0])
-        return brut / self.PLEINE_ECHELLE * voie.get("pleine_echelle_v", 10.0)
+    @staticmethod
+    def _blocs(adresses, ecart_max: int = 4) -> list:
+        """Regroupe des adresses en blocs (début, nombre) pour lire en une
+        transaction par bloc. Les trous ≤ ecart_max sont inclus dans le bloc
+        (lire quelques mots inutilisés coûte moins qu'un aller-retour TCP)."""
+        blocs: list[list[int]] = []
+        for a in sorted(set(adresses)):
+            if blocs and a - (blocs[-1][0] + blocs[-1][1] - 1) <= ecart_max:
+                blocs[-1][1] = a - blocs[-1][0] + 1
+            else:
+                blocs.append([a, 1])
+        return blocs
 
     def _volts_vers_unite(self, volts: float, voie: dict) -> float:
         """Conversion volts -> grandeur physique (échelle linéaire capteur)."""
@@ -104,39 +113,51 @@ class WagoModbus(EntreesSorties):
         return u0 + (v - v0) / (v1 - v0) * (u1 - u0)
 
     def lire_mesures(self) -> dict:
-        voies = self.cfg["entrees"]
+        # Lectures par blocs d'adresses voisines : 2-3 transactions par cycle
+        # au lieu d'une par voie. Moins de latence dans la boucle, et moins
+        # d'occasions de timeout (chaque erreur Modbus latche l'arrêt de la
+        # régulation côté pilote).
+        voies = {nom: v for nom, v in self.cfg["entrees"].items()
+                 if not nom.startswith("_")}
+        registres = {}
+        for debut, nombre in self._blocs(v["adresse"] for v in voies.values()):
+            with self._verrou:
+                rr = self.client.read_input_registers(
+                    address=debut, count=nombre)
+            if rr.isError():
+                raise IOError(f"Erreur Modbus lecture AI @{debut}+{nombre}")
+            for i in range(nombre):
+                registres[debut + i] = rr.registers[i]
+
         mesures = {}
-        # toutes les entrées analogiques déclarées ; échelle capteur si
-        # définie (valeur_min/max), sinon valeur brute en volts (recopies)
+        # échelle capteur si définie (valeur_min/max), valeur brute en volts
+        # sinon (recopies) ; PT100 sur module RTD : valeur directe en 0,1 °C
         for nom, voie in voies.items():
-            if nom.startswith("_") or nom == "temperature":
+            brut = self._signe16(registres[voie["adresse"]])
+            if nom == "temperature":
+                mesures[nom] = brut * voie.get("facteur", 0.1)
                 continue
-            volts = self._lire_ai_volts(voie)
+            volts = brut / self.PLEINE_ECHELLE * voie.get("pleine_echelle_v",
+                                                          10.0)
             if "valeur_min" in voie:
                 mesures[nom] = self._volts_vers_unite(volts, voie)
             else:
                 mesures[nom] = volts
-        # PT100 sur module RTD : valeur directe en 0,1 °C
-        v_t = voies["temperature"]
-        with self._verrou:
-            rr = self.client.read_input_registers(
-                address=v_t["adresse"], count=1)
-        if rr.isError():
-            raise IOError("Erreur Modbus lecture PT100")
-        mesures["temperature"] = self._signe16(rr.registers[0]) \
-            * v_t.get("facteur", 0.1)
 
-        # fins de course (entrées TOR, FC2)
-        tor = self.cfg.get("entrees_tor", {})
-        for nom, voie in tor.items():
-            if nom.startswith("_"):
-                continue
+        # fins de course (entrées TOR, FC2), lues en bloc également
+        tor = {nom: v for nom, v in self.cfg.get("entrees_tor", {}).items()
+               if not nom.startswith("_")}
+        bits = {}
+        for debut, nombre in self._blocs(v["adresse"] for v in tor.values()):
             with self._verrou:
                 rr = self.client.read_discrete_inputs(
-                    address=voie["adresse"], count=1)
+                    address=debut, count=nombre)
             if rr.isError():
-                raise IOError(f"Erreur Modbus lecture DI @{voie['adresse']}")
-            mesures[nom] = bool(rr.bits[0])
+                raise IOError(f"Erreur Modbus lecture DI @{debut}+{nombre}")
+            for i in range(nombre):
+                bits[debut + i] = bool(rr.bits[i])
+        for nom, voie in tor.items():
+            mesures[nom] = bits[voie["adresse"]]
         return mesures
 
     # ------------------------------------------------------------- écritures
@@ -145,8 +166,18 @@ class WagoModbus(EntreesSorties):
         volts = min(max(volts, 0.0), voie.get("pleine_echelle_v", 10.0))
         brut = int(round(volts / voie.get("pleine_echelle_v", 10.0)
                          * self.PLEINE_ECHELLE))
+        # écriture sur changement seulement, avec réécriture périodique en
+        # garde-fou (coupleur redémarré ou écriture perdue). Un changement
+        # de valeur — dont les mises à 0 de sécurité — part immédiatement.
+        adresse = voie["adresse"]
+        precedent = self._ao_cache.get(adresse)
+        maintenant = time.monotonic()
+        if precedent is not None and precedent[0] == brut \
+                and maintenant - precedent[1] < self._t_rafraichissement:
+            return
         with self._verrou:
-            self.client.write_register(address=voie["adresse"], value=brut)
+            self.client.write_register(address=adresse, value=brut)
+        self._ao_cache[adresse] = (brut, maintenant)
 
     def ecrire_variateur(self, volts: float) -> None:
         self._ecrire_ao_volts(self.cfg["sorties"]["variateur"], volts)

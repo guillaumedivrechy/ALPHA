@@ -81,6 +81,16 @@ class Pilote:
             kp=r["kp"], ki=r["ki"], periode_s=self.periode,
             rampe_v_par_s=r.get("rampe_v_par_s", 0.5),
             bande_morte_relative=r.get("bande_morte_relative", 0.0))
+        self._rampe_nominale = self.pi.rampe
+        # échelon relatif au-delà duquel un échelon de séquence réinitialise
+        # le PI sur le feed-forward ; en deçà, l'état PI est conservé
+        # (l'intégrale compense déjà l'erreur de la table de gains)
+        self.echelon_reinit_ff = r.get("echelon_reinit_ff_relatif", 0.2)
+        # gain scheduling : l'erreur du PI étant normalisée par la consigne,
+        # le gain de boucle vaut ~kp/u_equilibre et varie avec le point de
+        # fonctionnement ; quand le banc est caractérisé, on compense
+        # (voir _echelle_gains). Désactivable au banc.
+        self.gain_scheduling = r.get("gain_scheduling_actif", True)
         # temps de course des actionneurs (servent de CHIEN DE GARDE :
         # défaut vanne si la fin de course n'est pas atteinte à temps)
         act = cfg.get("actionneurs", {})
@@ -136,6 +146,10 @@ class Pilote:
         # et point de bascule PdC->variateur du split-range (échelle 0..10)
         self.marge_seuil_bas_re = srcfg.get("marge_seuil", 1.3)
         self.split_point = min(max(srcfg.get("split_range_point", 5.0), 0.1), 9.9)
+        # facteur (×) sur les gains PI en bas-Re. 1.0 = nominal (le séquencement
+        # de démarrage suffit à maîtriser le dépassement) ; à réduire au banc si
+        # la vraie vanne PdC fait osciller la boucle.
+        self.bas_re_scale = min(max(srcfg.get("gain_scale", 1.0), 0.05), 1.0)
         self._mode_bas_re = False          # état courant de la stratégie
         sel = cfg.get("selection_diaphragme", {})
         self._hysteresis_bypass = sel.get("hysteresis_re", 500)
@@ -147,7 +161,11 @@ class Pilote:
         self._preparation_faite = False
         self._position_initiale_lue = False
         self._cycles_incoherence = 0
+        self._cycles_convergee = 0         # cycles consécutifs dans la bande de tolérance
         self._re_conduite_prec = None      # garde-fou anti-transitoire de l'apprentissage du gain
+        self._echelon_depuis = None        # Re cible avant le dernier échelon de séquence
+        self._re_cible_conduite = 0.0      # Re conduite équivalent de la consigne (calé à la préparation)
+        self._regime_pi = False            # régime pour lequel le PI est calé (True = bas-Re)
 
         # état courant (lu par l'IHM)
         self.etat = {"diaphragme": "miller", "u_variateur": 0.0,
@@ -195,6 +213,7 @@ class Pilote:
             self.regulation_active = True
             self._sequence = None          # une consigne fixe annule la séquence
             self._preparation_faite = False
+        self._echelon_depuis = None
         self.etat["sequence"] = None
 
     def demarrer_sequence(self, points: list, reference: str) -> str | None:
@@ -216,6 +235,7 @@ class Pilote:
                 "index": 0,
             }
         self._preparation_faite = False
+        self._echelon_depuis = None        # 1er échelon : préparation complète
         return None
 
     def arreter_regulation(self) -> None:
@@ -227,6 +247,7 @@ class Pilote:
             self.mode_manuel = False
             self.tension_manuelle = 0.0
             self._sequence = None
+        self._echelon_depuis = None        # PI remis à zéro : ne pas conserver
         self.etat["sequence"] = None
         self.es.ecrire_variateur(0.0)
         self.es.ecrire_variateur_run(False)
@@ -239,6 +260,7 @@ class Pilote:
             self.regulation_active = False
             self.tension_manuelle = volts
             self._sequence = None          # le mode manuel annule la séquence
+        self._echelon_depuis = None
         self.etat["sequence"] = None
 
     def mode_asservi(self) -> None:
@@ -333,14 +355,18 @@ class Pilote:
         if self._thread:
             self._thread.join(timeout=3.0)
         self.es.fermer()
-        # persistance du gain appris pour les sessions suivantes
-        if self._gain_re_par_volt or self.table_gains.est_valide():
+        # persistance des grandeurs apprises pour les sessions suivantes
+        # (mêmes clés que la relecture du __init__ : gain, table, u_min)
+        if self._gain_re_par_volt or self.table_gains.est_valide() \
+                or self.u_min_ventilateur:
             try:
                 donnees = {}
                 if self._gain_re_par_volt:
                     donnees["gain_re_par_volt"] = self._gain_re_par_volt
                 if self.table_gains.est_valide():
                     donnees["table_gains"] = self.table_gains.to_list()
+                if self.u_min_ventilateur:
+                    donnees["u_min_ventilateur_v"] = self.u_min_ventilateur
                 self._chemin_etat.write_text(
                     json.dumps(donnees), encoding="utf-8")
             except OSError:
@@ -370,7 +396,11 @@ class Pilote:
                     self._run_actif = False
                 except Exception:
                     pass
-            reste = self.periode - (time.monotonic() - debut)
+            # durée réelle du cycle publiée : un dépassement durable de la
+            # période signale une communication lente (le dt du PI est fixe)
+            duree = time.monotonic() - debut
+            self.etat["duree_cycle_s"] = round(duree, 3)
+            reste = self.periode - duree
             if reste > 0:
                 self._stop.wait(reste)
 
@@ -413,6 +443,9 @@ class Pilote:
             if i != seq["index"]:
                 seq["index"] = i
                 with self._verrou:
+                    # consigne précédente mémorisée : un petit échelon
+                    # conservera l'état PI au lieu de repartir du feed-forward
+                    self._echelon_depuis = self.re_cible
                     self.re_cible = pts[i][1]
                 # rechoix diaphragme + feed-forward sur le nouvel échelon
                 self._preparation_faite = False
@@ -447,7 +480,8 @@ class Pilote:
                 qm_vise, T, self.banc.patm_pa + p_amont)["re_conduite"]
 
             nouveau_diaph = self.banc.choisir_diaphragme(re_cond_attendu, diaph)
-            if nouveau_diaph != diaph:
+            diaphragme_change = nouveau_diaph != diaph
+            if diaphragme_change:
                 # commande + gel jusqu'à la fin de course (chien de garde),
                 # double impulsion gérée si la vanne part de 180°
                 self.commander_diaphragme(nouveau_diaph)
@@ -455,16 +489,29 @@ class Pilote:
 
             self.etat["dp_attendu"] = self.banc.dP_attendu(
                 diaph, qm_vise, T, p_amont)
-            # pré-positionnement : table de gains (tension->Re mesurée) si
-            # disponible, sinon gain unique appris, sinon tension courante
-            if self.table_gains.est_valide():
-                u_ff = self.table_gains.tension_pour_re(re_cond_attendu)
-            elif self._gain_re_par_volt:
-                u_ff = min(max(re_cond_attendu / self._gain_re_par_volt,
-                               0.0), 10.0)
+            # le critère bas-Re et le split-range travaillent en Re conduite :
+            # mémoriser l'équivalent conduite de la consigne (rapport purement
+            # géométrique en référence veine, identité en référence conduite)
+            self._re_cible_conduite = re_cond_attendu
+            seuil = self._seuil_bas_re()
+            bas_re = self._besoin_bas_re(re_cond_attendu, seuil)
+            # petit échelon de séquence, même diaphragme, même régime : on
+            # conserve l'état PI (l'intégrale compense déjà l'erreur du
+            # feed-forward ; se recaler sur la table referait converger
+            # depuis la même erreur à chaque échelon)
+            conserver_pi = (self._echelon_depuis is not None
+                            and not diaphragme_change
+                            and bas_re == self._regime_pi
+                            and abs(re_cible - self._echelon_depuis)
+                            < self.echelon_reinit_ff * self._echelon_depuis)
+            self._echelon_depuis = None
+            if conserver_pi:
+                # seule l'échelle des gains suit le nouveau point de
+                # fonctionnement, sans à-coup (intégrale recalée)
+                self.pi.changer_gain_scale(
+                    self._echelle_gains(bas_re, re_cond_attendu))
             else:
-                u_ff = self.etat.get("u_variateur", 0.0)
-            self.pi.reinitialiser(u_ff)
+                self._preparer_pi(bas_re, re_cond_attendu, seuil)
             self._preparation_faite = True
 
         # ---- vanne perte de charge : recopie réelle + diagnostic ------------
@@ -652,13 +699,7 @@ class Pilote:
         # ---- décision stratégie bas-Re (mode automatique) ------------------
         # Seuil effectif : valeur de config si fixée, sinon dérivé de la
         # tension min exploitable et du gain (Re atteignable à u_min + marge).
-        seuil = self.seuil_bas_re
-        if not seuil and self.u_min_ventilateur and self.table_gains.est_valide():
-            seuil = self.table_gains.re_pour_tension(
-                self.u_min_ventilateur) * self.marge_seuil_bas_re
-        elif not seuil and self.u_min_ventilateur and self._gain_re_par_volt:
-            seuil = self.u_min_ventilateur * self._gain_re_par_volt \
-                * self.marge_seuil_bas_re
+        seuil = self._seuil_bas_re()
 
         # ---- action -------------------------------------------------------
         if manuel:
@@ -668,14 +709,15 @@ class Pilote:
             self.es.ecrire_variateur(u)
             self._mode_bas_re = False
         elif regul and re_cible > 0:
-            # hystérésis bypass : on entre en bas-Re si re_cible < seuil,
-            # on en sort seulement si re_cible > seuil + hysteresis_bypass.
-            if self._mode_bas_re:
-                besoin_bas_re = (self.bas_re_actif and seuil
-                                 and re_cible < seuil + self._hysteresis_bypass)
-            else:
-                besoin_bas_re = (self.bas_re_actif and seuil
-                                 and re_cible < seuil)
+            # critère sur le Re CONDUITE équivalent de la cible : une consigne
+            # veine n'est pas à l'échelle du seuil (qui est un Re conduite)
+            re_cible_cond = self._re_cible_conduite or re_cible
+            besoin_bas_re = self._besoin_bas_re(re_cible_cond, seuil)
+            if besoin_bas_re != self._regime_pi:
+                # bascule de régime hors préparation (dérive du seuil appris) :
+                # la commande PI change de signification (tension <-> split-
+                # range), on la re-cale sur le feed-forward du nouveau régime
+                self._preparer_pi(besoin_bas_re, re_cible_cond, seuil)
             # gestion du bypass selon le besoin (manœuvre = gel géré ailleurs)
             bypass_ouvert = bool(mesures.get("fc_bypass_ouvert"))
             if besoin_bas_re and not bypass_ouvert \
@@ -686,9 +728,21 @@ class Pilote:
                 self.commander_bypass(False)
             self._mode_bas_re = besoin_bas_re
 
-            # sortie unique du PI, répartie en split-range
-            cmd = self.pi.calculer(re_cible, re_mesure)   # 0..10 (V équiv.)
-            u, pdc_v = self._split_range(cmd, besoin_bas_re)
+            if besoin_bas_re and not bypass_ouvert:
+                # by-pass pas encore ouvert : le refoulement n'est pas dérivé,
+                # tout le débit irait à la veine. On coupe le ventilateur (0 V)
+                # pour ne pas charger l'écoulement, et on pré-ferme la PdC (elle
+                # se positionne pendant la manœuvre du by-pass), PI gelé. Dès le
+                # by-pass ouvert, le PI reprend et le ventilateur remonte vers
+                # u_min sur un débit déjà dérivé -> pas de dépassement.
+                u = 0.0
+                _, pdc_v = self._split_range(
+                    self._cmd_ff_bas_re(re_cible_cond, seuil), True)
+            else:
+                # sortie unique du PI (gains, rampe et pré-positionnement
+                # calés par _preparer_pi), répartie en split-range
+                cmd = self.pi.calculer(re_cible, re_mesure)   # 0..10 (V équiv.)
+                u, pdc_v = self._split_range(cmd, besoin_bas_re)
             self.es.ecrire_variateur(u)
             self.commander_vanne_perte_charge(pdc_v)
         else:
@@ -696,8 +750,12 @@ class Pilote:
             self.es.ecrire_variateur(u)
             self._mode_bas_re = False
 
-        convergee = regul and re_cible > 0 and \
+        dans_bande = regul and re_cible > 0 and \
             abs(re_mesure - re_cible) / re_cible < self.tolerance
+        # anti-battement : le bruit de mesure est du même ordre que la
+        # tolérance -> convergence affichée après ~2 s consécutives en bande
+        self._cycles_convergee = self._cycles_convergee + 1 if dans_bande else 0
+        convergee = self._cycles_convergee >= max(3, int(2.0 / self.periode))
 
         self.etat.update({
             "temperature": T, "p_amont": p_amont, "dp": dp,
@@ -713,6 +771,104 @@ class Pilote:
             "mode_bas_re": self._mode_bas_re,
             "seuil_bas_re_effectif": round(seuil) if seuil else None,
         })
+
+    def _seuil_bas_re(self) -> float:
+        """Re en dessous duquel on bascule en stratégie bas-Re (bypass +
+        split-range PdC). Valeur de config si fixée, sinon dérivée de la
+        tension mini exploitable et du gain (Re atteignable à u_min × marge)."""
+        if self.seuil_bas_re:
+            return self.seuil_bas_re
+        if self.u_min_ventilateur and self.table_gains.est_valide():
+            return self.table_gains.re_pour_tension(
+                self.u_min_ventilateur) * self.marge_seuil_bas_re
+        if self.u_min_ventilateur and self._gain_re_par_volt:
+            return self.u_min_ventilateur * self._gain_re_par_volt \
+                * self.marge_seuil_bas_re
+        return 0.0
+
+    def _besoin_bas_re(self, re_cond_cible: float, seuil: float) -> bool:
+        """Critère UNIQUE d'engagement de la stratégie bas-Re (préparation et
+        boucle), avec hystérésis : entrée si le Re conduite cible < seuil,
+        sortie seulement s'il dépasse seuil + hystérésis."""
+        if not (self.bas_re_actif and seuil):
+            return False
+        if self._mode_bas_re:
+            return re_cond_cible < seuil + self._hysteresis_bypass
+        return re_cond_cible < seuil
+
+    def _echelle_gains(self, bas_re: bool, re_cond_attendu: float) -> float:
+        """Facteur d'échelle des gains PI au point de fonctionnement visé.
+
+        L'erreur du PI est normalisée par la consigne : le gain de boucle
+        vaut kp·G/Re_cible ≈ kp/u_équilibre et varie donc avec le point
+        (boucle vive aux faibles Re, molle aux forts Re). Quand le banc est
+        caractérisé (table ou gain appris), on compense en multipliant les
+        gains par la tension d'équilibre estimée -> gain de boucle ≈ kp
+        partout. Sans caractérisation ou si désactivé : échelle neutre.
+        En bas-Re, la PdC tient la boucle : facteur dédié bas_re_scale."""
+        if bas_re:
+            return self.bas_re_scale
+        if not self.gain_scheduling:
+            return 1.0
+        if self.table_gains.est_valide():
+            u_eq = self.table_gains.tension_pour_re(re_cond_attendu)
+        elif self._gain_re_par_volt:
+            u_eq = re_cond_attendu / self._gain_re_par_volt
+        else:
+            return 1.0
+        return min(max(u_eq, 0.5), 10.0)
+
+    def _preparer_pi(self, bas_re: bool, re_cond_attendu: float,
+                     seuil: float) -> None:
+        """Cale le PI sur le régime visé : échelle des gains, rampe et
+        pré-positionnement (feed-forward). Appelé à la préparation d'une
+        consigne et sur bascule de régime en cours de régulation."""
+        self.pi.gain_scale = self._echelle_gains(bas_re, re_cond_attendu)
+        if bas_re:
+            # la commande PI pilote le split-range : initialisée près de
+            # l'équilibre estimé, rampe bornée à ce que la vanne PdC
+            # (actionneur lent) sait suivre
+            self.pi.rampe = self._rampe_bas_re()
+            self.pi.reinitialiser(self._cmd_ff_bas_re(re_cond_attendu, seuil))
+        else:
+            # régime normal : la commande PI est la tension variateur
+            self.pi.rampe = self._rampe_nominale
+            if self.table_gains.est_valide():
+                u_ff = self.table_gains.tension_pour_re(re_cond_attendu)
+            elif self._gain_re_par_volt:
+                u_ff = min(max(re_cond_attendu / self._gain_re_par_volt,
+                               0.0), 10.0)
+            else:
+                u_ff = self.etat.get("u_variateur", 0.0)
+            self.pi.reinitialiser(u_ff)
+        self._regime_pi = bas_re
+
+    def _rampe_bas_re(self) -> float:
+        """Rampe PI en bas-Re. Sur le segment PdC du split-range, 1 unité de
+        commande vaut 10/split_point V de vanne ; la vanne parcourt 10 V en
+        t_vanne_pdc_course s. Au-delà de split_point/t_course par seconde, la
+        commande devance l'actionneur et l'intégrale s'enroule contre lui
+        (l'anti-windup se recale sur la sortie commandée, pas sur la position
+        réelle) -> dépassement puis oscillation lente."""
+        return min(self._rampe_nominale,
+                   self.split_point / self.t_vanne_pdc_course)
+
+    def _cmd_ff_bas_re(self, re_cible: float, seuil: float) -> float:
+        """Commande split-range estimée pour un Re cible en bas-Re — sert à
+        pré-positionner PdC + variateur à l'entrée du régime (évite le
+        transitoire de démarrage PdC grande ouverte). Re_umin = Re atteint à
+        u_min, PdC ouverte (~ seuil / marge) correspond à cmd = split_point."""
+        re_umin = seuil / self.marge_seuil_bas_re if self.marge_seuil_bas_re \
+            else seuil
+        sp = self.split_point
+        if re_umin <= 0:
+            return sp
+        if re_cible <= re_umin:                    # segment PdC (variateur figé)
+            return max(0.0, min(sp, sp * re_cible / re_umin))
+        # segment variateur : reprise depuis u_min au-delà de Re_umin
+        return max(sp, min(10.0,
+                           sp + (10.0 - sp) * min((re_cible - re_umin) / re_umin,
+                                                  1.0)))
 
     def _split_range(self, cmd: float, bas_re: bool) -> tuple[float, float]:
         """Répartit la commande PI unique (0..10) sur variateur + vanne PdC.

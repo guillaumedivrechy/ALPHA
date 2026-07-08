@@ -56,3 +56,25 @@ def test_bande_morte():
 def test_consigne_nulle():
     pi = _pi()
     assert pi.calculer(consigne=0.0, mesure=5000.0) == 0.0
+
+
+def test_preposition_survit_a_un_transitoire_clippe():
+    """Régression : l'anti-windup par recalcul détruisait le feed-forward au
+    premier clip de rampe -> la sortie retombait sous la tension d'équilibre
+    pendant que l'erreur se résorbait (convergence retardée de ~15 s)."""
+    pi = _pi()
+    pi.reinitialiser(u_initial=4.0)
+    pi.calculer(consigne=10000.0, mesure=0.0)          # transitoire clippé
+    for mesure in (5000.0, 7500.0, 9000.0, 10000.0):   # erreur qui décroît
+        u = pi.calculer(consigne=10000.0, mesure=mesure)
+        assert u >= 4.0 - 1e-9   # jamais sous le feed-forward (erreur >= 0)
+
+
+def test_changement_echelle_gains_sans_a_coup():
+    """Gain scheduling en cours de route : la sortie à erreur nulle doit
+    rester identique (l'intégrale est recalée sur la nouvelle échelle)."""
+    pi = _pi()
+    pi.reinitialiser(u_initial=5.0)
+    pi.changer_gain_scale(3.0)
+    u = pi.calculer(consigne=10000.0, mesure=10000.0)
+    assert u == pytest.approx(5.0, abs=1e-9)
