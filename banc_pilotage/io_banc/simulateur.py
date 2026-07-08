@@ -113,6 +113,9 @@ class SimulateurBanc(EntreesSorties):
         self.gain_qv = cfg_simu.get("gain_qv_m3s_par_volt", 0.0035)
         self.tau_s = cfg_simu.get("constante_temps_s", 2.0)
         self.bruit_rel = cfg_simu.get("bruit_relatif", 0.01)
+        # sous cette tension, le ventilateur décroche : débit effondré et
+        # erratique (permet de valider l'apprentissage 'freq_min')
+        self.u_decrochage = cfg_simu.get("u_decrochage_v", 1.2)
         self.temperature = cfg_simu.get("temperature_c", 20.0)
         self.p_amont_eff = cfg_simu.get("p_amont_eff_pa", 25.0)
 
@@ -177,6 +180,10 @@ class SimulateurBanc(EntreesSorties):
 
         # débit refoulé par le ventilateur (sans RUN, le 3G3MV ignore la réf.)
         qv_fan = self.gain_qv * self._u_variateur if self._run else 0.0
+        # décrochage sous la tension seuil : le ventilateur ne tient plus son
+        # débit, effondré et erratique (détecté par l'apprentissage freq_min)
+        if self._run and 0.0 < self._u_variateur < self.u_decrochage:
+            qv_fan *= 0.25 * max(0.0, 1.0 + random.gauss(0.0, 0.6))
         # fraction atteignant la veine : la PdC (en série) l'étrangle en se
         # fermant, le by-pass (en parallèle) en dérive une part quand il est
         # ouvert. PdC ouverte (0 V) -> ouv=1 -> pleine passe (régime normal

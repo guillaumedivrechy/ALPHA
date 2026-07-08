@@ -579,10 +579,15 @@ class Apprentissage:
         return statistics.fmean(série[-fenetre:])
 
     def _test_freq_min(self, u_depart: float = 5.0, pas: float = 0.25,
-                       duree_max: float = 120.0) -> None:
+                       t_palier_s: float = 8.0) -> None:
         """Descend la tension par paliers depuis u_depart et détecte le
-        décrochage du ventilateur (ΔP/Re qui s'effondre, devient bruité ou
-        ne répond plus). Retient la dernière tension stable + marge.
+        décrochage du ventilateur (Re qui ne baisse plus, devient bruité ou
+        s'effondre). Retient la dernière tension stable + marge.
+
+        Chaque palier dure t_palier_s et n'est mesuré que sur sa fin (hors
+        transitoire) : avec un procédé lent, mesurer trop tôt fait paraître
+        « non monotone » une descente parfaitement saine et déclare un faux
+        décrochage dès le premier palier.
 
         Préparation : ferme le bypass et ouvre la vanne perte de charge à 100 %
         (état maintenu en fin de test)."""
@@ -593,34 +598,47 @@ class Apprentissage:
         if not self._preparer_circuit_normal():
             return
 
-        re_prec = self._mesure_palier(u_depart, fenetre, 0.03, duree_max,
-                                      f"stabilisation à {u_depart:.1f} V")
-        if re_prec is None:
-            return
-        u = u_depart
-        derniere_stable = u
-        re_a_derniere = re_prec
-        paliers = [(round(u, 2), round(re_prec))]
-
-        while u - pas > 0.05:
-            if self._annule.is_set():
-                self.etat["statut"] = "annulé"
-                return
-            u = round(u - pas, 2)
+        def _palier(u: float, statut: str, duree: float | None = None):
+            """Applique u, attend duree (t_palier_s par défaut), mesure sur
+            la fin du palier. Retourne (re_moyen, bruit_relatif) ou None si
+            annulé."""
+            duree = t_palier_s if duree is None else duree
             self.pilote.commander_variateur_manuel(u)
-            série = []
+            série: list[float] = []
             t0 = time.monotonic()
-            while time.monotonic() - t0 < 4.0:
+            while time.monotonic() - t0 < duree:
                 if self._annule.is_set():
                     self.etat["statut"] = "annulé"
-                    return
+                    return None
                 série.append(self.pilote.etat.get("re_mesure") or 0.0)
-                self.etat["statut"] = f"palier descendant {u:.2f} V"
+                self.etat["statut"] = statut
                 time.sleep(dt)
             d = série[-fenetre:] if len(série) >= fenetre else série
             re_moy = statistics.fmean(d)
-            bruit = (max(d) - min(d)) / max(re_moy, 1.0)
-            non_monotone = re_moy >= re_a_derniere * 0.98
+            return re_moy, (max(d) - min(d)) / max(re_moy, 1.0)
+
+        # le palier de départ part loin de l'équilibre (ventilateur arrêté) :
+        # sans stabilisation longue, la base est mesurée trop bas et le
+        # premier pas de descente paraît « non monotone » (faux décrochage)
+        r = _palier(u_depart, f"stabilisation à {u_depart:.1f} V",
+                    duree=3.0 * t_palier_s)
+        if r is None:
+            return
+        re_a_derniere = r[0]
+        u = u_depart
+        derniere_stable = u
+        paliers = [(round(u, 2), round(re_a_derniere))]
+
+        while u - pas > 0.05:
+            u = round(u - pas, 2)
+            r = _palier(u, f"palier descendant {u:.2f} V")
+            if r is None:
+                return
+            re_moy, bruit = r
+            # baisse attendue ≈ pas/u : en exiger au moins 40 % sépare une
+            # descente saine (régime établi) d'un plateau de décrochage
+            seuil_baisse = 1.0 - 0.4 * pas / max(u + pas, pas)
+            non_monotone = re_moy >= re_a_derniere * seuil_baisse
             paliers.append((u, round(re_moy)))
             self.etat["paliers_freq_min"] = list(paliers)
             if bruit > 0.06 or non_monotone or re_moy < 50:
@@ -657,17 +675,33 @@ class Apprentissage:
         # ouvert ou PdC fermée serait silencieusement fausse
         if not self._preparer_circuit_normal():
             return
+        # plafond du capteur ΔP actif : au-delà de ~90 % de sa pleine échelle
+        # les paliers ne mesurent plus le banc mais la saturation du capteur
+        # (Re plafonné) — points faux qui corrompraient table et verdict
+        cle_dp = ("dp_iso_500" if self.pilote.etat.get("diaphragme") == "iso"
+                  else "dp_diaph_500")
+        dp_max = (self.cfg.get("modbus", {}).get("entrees", {})
+                  .get(cle_dp, {}).get("valeur_max", 500.0))
         dt = self.pilote.periode
         fenetre = max(6, int(5.0 / dt))
         points = []                                  # (volts, re)
+        sature_a = None
         for k, u in enumerate(tensions):
             re = self._mesure_palier(
                 u, fenetre, 0.02, duree_max,
                 f"palier {k+1}/{len(tensions)} à {u:.1f} V")
             if re is None:
                 return
+            if (self.pilote.etat.get("dp") or 0.0) > 0.9 * dp_max:
+                sature_a = u
+                break
             points.append((u, re))
         self.pilote.mode_manuel_tension(0.0)
+        if len(points) < 2:
+            self.etat["statut"] = ("capteur ΔP saturé dès les premiers "
+                                   "paliers — vérifier la gamme capteur "
+                                   "et le diaphragme actif")
+            return
 
         # gains locaux entre paliers successifs et mesure de non-linéarité
         gains = [(points[i+1][1] - points[i][1]) / (points[i+1][0] - points[i][0])
@@ -682,15 +716,19 @@ class Apprentissage:
             "gains_locaux_Re_par_V": [round(g) for g in gains],
             "gain_moyen": round(g_moy),
             "non_linearite_pct": round(ecart_max, 1),
+            "sature_a_v": sature_a,
             "verdict": "quasi-linéaire" if lineaire
                        else "non linéaire — table de gains recommandée",
         }
         # construction de la table (toujours, elle est exacte même si linéaire)
         self._table_points = points
+        note_sat = (f" — capteur ΔP saturé au-delà de {points[-1][0]:.1f} V "
+                    f"(Re mesurable ≤ {points[-1][1]:.0f})" if sature_a else "")
         self.etat["statut"] = (
             f"terminé : {len(points)} points, gain moyen {g_moy:.0f} Re/V, "
             f"non-linéarité {ecart_max:.1f} % → "
-            + ("quasi-linéaire" if lineaire else "table de gains recommandée"))
+            + ("quasi-linéaire" if lineaire else "table de gains recommandée")
+            + note_sat)
 
     # ------------------------------------------------- essai indiciel
 

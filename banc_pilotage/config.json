@@ -190,6 +190,7 @@
     "gain_qv_m3s_par_volt": 0.0035,
     "constante_temps_s": 2.0,
     "bruit_relatif": 0.01,
+    "u_decrochage_v": 1.2,
     "temperature_c": 20.0,
     "p_amont_eff_pa": 25.0,
     "t_course_3voies_s": 5.5
