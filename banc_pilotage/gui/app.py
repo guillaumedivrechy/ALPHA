@@ -1426,6 +1426,18 @@ class Application(QMainWindow):
         vl.addWidget(sub, 1)
 
         _HELP = {
+            "verif_cablage": ("Contrôle câblage E/S",
+                "Actionne chaque sortie et vérifie le retour attendu : "
+                "fins de course bypass et vanne 3 voies, recopie PdC, "
+                "réponse du variateur. Identifie ensuite quelle position de "
+                "la vanne 3 voies alimente quel diaphragme (le capteur ΔP "
+                "qui répond fait foi) ; un mapping ISO/Miller inversé est "
+                "corrigé par « Appliquer »."),
+            "zero_capteurs": ("Zéro capteurs ΔP",
+                "Ventilateur arrêté, moyenne ~10 s des deux capteurs ΔP : "
+                "les offsets de zéro sont ensuite soustraits des mesures "
+                "par la boucle. Décisif en bas-Re, où le ΔP utile ne vaut "
+                "que quelques pascals."),
             "calibration_pdc": ("Calibration recopie PdC",
                 "Envoie 0 V puis 10 V à la vanne PdC et mesure la tension brute "
                 "à chaque butée (5 s de stabilisation). Prérequis pour les tests "
@@ -1458,6 +1470,12 @@ class Application(QMainWindow):
         self._lbls_vanne: dict[str, tuple] = {}
 
         entries = [
+            ("▶  Contrôle câblage E/S", "verif_cablage",
+             lambda r: r["resume"]),
+            ("▶  Zéro capteurs ΔP", "zero_capteurs",
+             lambda r: "  ".join(f"{v.replace('_500', '')} = {o} Pa"
+                                 for v, o in r.items())),
+            None,
             ("▶  Calibration recopie vanne perte de charge", "calibration_pdc",
              lambda r: (f"0% = {r['v_min_recopie']} V  "
                         f"100% = {r['v_max_recopie']} V")),

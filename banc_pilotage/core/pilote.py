@@ -159,6 +159,12 @@ class Pilote:
         sel = cfg.get("selection_diaphragme", {})
         self._hysteresis_bypass = sel.get("hysteresis_re", 500)
 
+        # zéros des capteurs ΔP (Pa), mesurés à débit nul par l'apprentissage
+        # 'zero_capteurs' et soustraits des mesures (voir _dp_corrige)
+        self.zero_capteurs = {k: v for k, v
+                              in cfg.get("zero_capteurs", {}).items()
+                              if not k.startswith("_")}
+
         # état de la boucle, déclaré explicitement (plutôt que créé au fil de
         # l'eau et lu via getattr) : sur du code de sécurité, une faute de
         # frappe sur un de ces noms doit lever une erreur, pas renvoyer un défaut.
@@ -431,9 +437,7 @@ class Pilote:
         p_amont = mesures.get("p_amont_500", 0.0)
         # Chaque diaphragme a son propre capteur physique câblé sur ses prises
         # de pression : on lit le bon capteur selon la position de la vanne 3 voies.
-        diaph_courant = self.etat["diaphragme"]
-        dp = (mesures.get("dp_iso_500",    0.0) if diaph_courant == "iso"
-              else mesures.get("dp_diaph_500", 0.0))
+        dp = self._dp_corrige(mesures, self.etat["diaphragme"])
 
         # ---- déroulement de la séquence (profil temps -> Re cible) ----------
         # Avancé même pendant un gel de manœuvre : le profil est temporel.
@@ -637,8 +641,7 @@ class Pilote:
         # le diaphragme a pu changer pendant la préparation (vanne déjà en
         # position, sans manœuvre) : relire le ΔP sur le capteur correspondant
         # au diaphragme finalement retenu, pas celui du début de cycle.
-        dp = (mesures.get("dp_iso_500", 0.0) if diaph == "iso"
-              else mesures.get("dp_diaph_500", 0.0))
+        dp = self._dp_corrige(mesures, diaph)
         resultat = self.banc.qm_depuis_mesures(diaph, dp, T, p_amont)
         re_mesure = resultat["re_veine"] if reference == "veine" \
             else resultat["re_conduite"]
@@ -806,6 +809,13 @@ class Pilote:
             return self.u_min_ventilateur * self._gain_re_par_volt \
                 * self.marge_seuil_bas_re
         return 0.0
+
+    def _dp_corrige(self, mesures: dict, diaphragme: str) -> float:
+        """ΔP du capteur correspondant au diaphragme actif, corrigé du zéro
+        appris à débit nul (décisif en bas-Re : le ΔP utile ne vaut que
+        quelques Pa, un offset capteur serait poursuivi par le PI)."""
+        cle = "dp_iso_500" if diaphragme == "iso" else "dp_diaph_500"
+        return mesures.get(cle, 0.0) - self.zero_capteurs.get(cle, 0.0)
 
     def _besoin_bas_re(self, re_cond_cible: float, seuil: float) -> bool:
         """Critère UNIQUE d'engagement de la stratégie bas-Re (préparation et

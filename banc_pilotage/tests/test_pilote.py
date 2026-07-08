@@ -282,6 +282,18 @@ def test_duree_cycle_publiee(tmp_path):
     assert pilote.etat["duree_cycle_s"] < CFG["regulation"]["periode_s"]
 
 
+def test_zero_capteur_soustrait_du_dp():
+    """L'offset de zéro appris est soustrait du ΔP avant le calcul du débit :
+    un capteur qui lit 1,5 Pa à débit nul ne doit pas produire un Re fictif."""
+    es = StubES({"temperature": 20.0, "fc_3voies_0": True,
+                 "dp_iso_500": 1.5})
+    pilote = Pilote(Banc(CFG), es, CFG)
+    pilote.zero_capteurs = {"dp_iso_500": 1.5}
+    pilote._cycle()
+    assert pilote.etat["dp"] == pytest.approx(0.0)
+    assert pilote.etat["re_mesure"] == pytest.approx(0.0)
+
+
 def test_arreter_persiste_u_min(tmp_path):
     """u_min appris (freq_min) : réécrit par arreter() comme le gain et la
     table, sinon la valeur disparaît du fichier d'état à l'extinction."""

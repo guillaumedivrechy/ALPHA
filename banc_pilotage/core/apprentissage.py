@@ -41,9 +41,16 @@ class Apprentissage:
                  "vanne_pdc": self._test_vanne_pdc,
                  "indiciel": self._test_indiciel,
                  "courbe_gain": self._test_courbe_gain,
-                 "freq_min": self._test_freq_min}.get(test)
+                 "freq_min": self._test_freq_min,
+                 "zero_capteurs": self._test_zero_capteurs,
+                 "verif_cablage": self._test_verif_cablage}.get(test)
         if cible is None:
             return f"Test inconnu : {test}"
+        if test == "indiciel" and self.pilote.gain_scheduling \
+                and not self.pilote.table_gains.est_valide():
+            return ("Lancer d'abord la courbe de gain : sans table de "
+                    "gains, les kp/ki proposés par l'essai indiciel ne "
+                    "vaudraient qu'au point d'essai (gain scheduling actif).")
         self._annule.clear()
         self.etat.update({"en_cours": True, "test": test, "statut": "démarrage…"})
         self._thread = threading.Thread(target=self._executer,
@@ -93,6 +100,22 @@ class Apprentissage:
             time.sleep(self.pilote.periode / 2)
         self.etat["statut"] = f"{statut} : délai dépassé"
         return None
+
+    def _preparer_circuit_normal(self) -> bool:
+        """Bypass fermé + vanne PdC grande ouverte : le circuit de mesure du
+        régime normal. Indispensable avant toute caractérisation — une table
+        de gains ou un tau mesurés circuit dérivé seraient silencieusement
+        faux, et le feed-forward, le gain scheduling et le seuil bas-Re en
+        hériteraient."""
+        es = self.pilote.es
+        t = self._chronometrer_vanne(lambda: es.ecrire_vanne_bypass(False),
+                                     "fc_bypass_ferme", "fermeture bypass")
+        if t is None:
+            return False
+        self.pilote.commander_vanne_perte_charge_pct(0.0)   # 0 % = 0 V = ouverte
+        ok = self._attendre_pdc_extreme(
+            0.0, 90.0, "ouverture vanne perte de charge")
+        return ok is not None
 
     # ------------------------------------------------- utilitaire recopie PdC
 
@@ -357,6 +380,189 @@ class Apprentissage:
         self.etat["statut"] = (f"terminé : T1={res['ouverture_s']} s, "
                                f"T2={res['fermeture_s']} s")
 
+    # ------------------------------------------------- zéro des capteurs ΔP
+
+    def _test_zero_capteurs(self, attente_s: float = 8.0,
+                            duree_s: float = 10.0) -> None:
+        """Zéro des capteurs ΔP : moyenne à débit nul (ventilateur arrêté).
+        Les offsets sont ensuite soustraits des mesures par la boucle —
+        décisif en bas-Re, où le ΔP utile ne vaut que quelques Pa."""
+        self.pilote.mode_manuel_tension(0.0)
+        dt = self.pilote.periode
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < attente_s:
+            if self._annule.is_set():
+                self.etat["statut"] = "annulé"
+                return
+            self.etat["statut"] = ("extinction de l'écoulement "
+                                   f"({attente_s - (time.monotonic() - t0):.0f} s)")
+            time.sleep(dt)
+        voies = ("dp_diaph_500", "dp_iso_500")
+        series: dict[str, list] = {v: [] for v in voies}
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < duree_s:
+            if self._annule.is_set():
+                self.etat["statut"] = "annulé"
+                return
+            brutes = self._brutes()
+            for v in voies:
+                if v in brutes:
+                    series[v].append(brutes[v])
+            self.etat["statut"] = f"mesure du zéro ({time.monotonic() - t0:.0f} s)"
+            time.sleep(dt)
+        offsets = {v: round(statistics.fmean(s), 3)
+                   for v, s in series.items() if s}
+        if not offsets:
+            self.etat["statut"] = "aucune mesure — capteurs absents ?"
+            return
+        aberrants = {v: o for v, o in offsets.items() if abs(o) > 25.0}
+        if aberrants:
+            self.etat["statut"] = (
+                "zéro anormalement élevé ("
+                + ", ".join(f"{v} = {o} Pa" for v, o in aberrants.items())
+                + ") — écoulement résiduel ou capteur en défaut ?")
+            return
+        self.resultats["zero_capteurs"] = offsets
+        self.etat["statut"] = "terminé : " + ", ".join(
+            f"{v} = {o} Pa" for v, o in offsets.items())
+
+    # ------------------------------------------------- contrôle de câblage
+
+    @staticmethod
+    def _capteur_dominant(dp_iso: float, dp_miller: float) -> str | None:
+        """Quel capteur ΔP voit l'écoulement ? None si trop faible ou ambigu."""
+        if max(dp_iso, dp_miller) < 5.0:
+            return None
+        if dp_iso > 3.0 * max(dp_miller, 0.1):
+            return "iso"
+        if dp_miller > 3.0 * max(dp_iso, 0.1):
+            return "miller"
+        return None
+
+    def _dp_moyens(self, duree_s: float, statut: str) -> tuple | None:
+        """Moyennes (dp_iso, dp_miller) sur duree_s ; None si annulé."""
+        dt = self.pilote.periode
+        iso: list[float] = []
+        miller: list[float] = []
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < duree_s:
+            if self._annule.is_set():
+                self.etat["statut"] = "annulé"
+                return None
+            brutes = self._brutes()
+            iso.append(brutes.get("dp_iso_500") or 0.0)
+            miller.append(brutes.get("dp_diaph_500") or 0.0)
+            self.etat["statut"] = statut
+            time.sleep(dt)
+        return statistics.fmean(iso), statistics.fmean(miller)
+
+    def _test_verif_cablage(self, u_essai: float = 3.0) -> None:
+        """Contrôle de câblage guidé : actionne chaque sortie et vérifie le
+        retour attendu (fins de course, recopie, réponse du variateur), puis
+        identifie quelle position de la vanne 3 voies alimente quel
+        diaphragme — le capteur ΔP qui répond fait foi. Rien n'est modifié
+        pendant le test ; un mapping ISO/Miller inversé est corrigé par
+        « Appliquer »."""
+        rapport: dict = {}
+        es = self.pilote.es
+
+        # 1) bypass : les deux fins de course répondent (état final : fermé)
+        t = self._chronometrer_vanne(
+            lambda: es.ecrire_vanne_bypass(True),
+            "fc_bypass_ouvert", "câblage bypass (ouverture)")
+        rapport["bypass_ouverture"] = t is not None
+        t = self._chronometrer_vanne(
+            lambda: es.ecrire_vanne_bypass(False),
+            "fc_bypass_ferme", "câblage bypass (fermeture)")
+        rapport["bypass_fermeture"] = t is not None
+        if self._annule.is_set():
+            return
+
+        # 2) vanne PdC : recopie suivie dans les deux sens
+        #    (état final : grande ouverte = circuit de mesure normal)
+        self.pilote.commander_vanne_perte_charge(10.0)
+        ok = self._attendre_pdc_extreme(10.0, 90.0, "câblage PdC (fermeture)")
+        rapport["pdc_fermeture"] = ok is not None
+        self.pilote.commander_vanne_perte_charge(0.0)
+        ok = self._attendre_pdc_extreme(0.0, 90.0, "câblage PdC (ouverture)")
+        rapport["pdc_ouverture"] = ok is not None
+        if self._annule.is_set():
+            return
+
+        # 3) vanne 3 voies : les trois fins de course sont atteignables
+        #    (fin du parcours : position ISO supposée, prête pour le point 4)
+        fc_iso = self.pilote._fc_par_diaphragme["iso"]
+        fc_miller = self.pilote._fc_par_diaphragme["miller"]
+        for vers_iso, fc, nom in ((False, "fc_3voies_180", "180°"),
+                                  (True, fc_miller, "90°"),
+                                  (True, fc_iso, "0°")):
+            t = self._avancer_vanne_3voies(vers_iso, fc,
+                                           f"câblage 3 voies ({nom})")
+            rapport[f"v3_{fc}"] = t is not None
+            if self._annule.is_set():
+                return
+
+        # 4) variateur : RUN + tension -> un écoulement doit apparaître
+        self.pilote.mode_manuel_tension(u_essai)
+
+        def _flux_present():
+            b = self._brutes()
+            return ((b.get("dp_iso_500") or 0.0)
+                    + (b.get("dp_diaph_500") or 0.0) > 5.0
+                    or (b.get("frequence_variateur") or 0.0) > 0.5)
+
+        t = self._attendre(_flux_present, 30.0, "câblage variateur (montée)")
+        rapport["variateur_repond"] = t is not None
+
+        # 5) identification ISO/Miller par le capteur ΔP qui répond
+        mapping = None
+        if rapport["variateur_repond"] and rapport.get(f"v3_{fc_iso}") \
+                and rapport.get(f"v3_{fc_miller}"):
+            if self._annule.wait(3.0):                 # établissement du flux
+                self.etat["statut"] = "annulé"
+                return
+            m1 = self._dp_moyens(4.0, "identification : position ISO supposée")
+            if m1 is None:
+                return
+            self._avancer_vanne_3voies(False, fc_miller,
+                                       "identification : vers Miller supposé")
+            if self._annule.wait(2.0):
+                self.etat["statut"] = "annulé"
+                return
+            m2 = self._dp_moyens(4.0, "identification : position Miller supposée")
+            if m2 is None:
+                return
+            d1 = self._capteur_dominant(*m1)
+            d2 = self._capteur_dominant(*m2)
+            if d1 == "iso" and d2 == "miller":
+                mapping = "ok"
+            elif d1 == "miller" and d2 == "iso":
+                mapping = "inverse"
+            else:
+                mapping = "indetermine"
+            rapport["mapping_iso_miller"] = mapping
+            rapport["dp_position_iso"] = [round(m1[0], 1), round(m1[1], 1)]
+            rapport["dp_position_miller"] = [round(m2[0], 1), round(m2[1], 1)]
+        self.pilote.mode_manuel_tension(0.0)
+
+        rapport["mapping_inverse"] = mapping == "inverse"
+        defauts = [k for k, v in rapport.items()
+                   if v is False and k != "mapping_inverse"]
+        if mapping == "inverse":
+            resume = ("MAPPING ISO/MILLER INVERSÉ — la position dite ISO fait "
+                      "réagir le capteur Miller et inversement (vanne 3 voies "
+                      "ou capteurs intervertis) ; « Appliquer » corrige "
+                      "positions_vanne_3voies")
+        elif defauts:
+            resume = "défauts : " + ", ".join(defauts)
+        elif mapping == "indetermine":
+            resume = "identification ISO/Miller indéterminée (ΔP trop faible ?)"
+        else:
+            resume = "câblage conforme"
+        rapport["resume"] = resume
+        self.resultats["verif_cablage"] = rapport
+        self.etat["statut"] = "terminé : " + resume
+
     # ------------------------------------------------- courbe de gain multi-points
 
     def _mesure_palier(self, u: float, fenetre: int, tol: float,
@@ -384,15 +590,7 @@ class Apprentissage:
         fenetre = max(6, int(4.0 / dt))
 
         # 0) préparation des vannes
-        es = self.pilote.es
-        t = self._chronometrer_vanne(lambda: es.ecrire_vanne_bypass(False),
-                                     "fc_bypass_ferme", "fermeture bypass")
-        if t is None:
-            return
-        self.pilote.commander_vanne_perte_charge_pct(0.0)   # 0 % = 0 V = ouvert
-        ok = self._attendre_pdc_extreme(
-            0.0, 90.0, "ouverture vanne perte de charge")
-        if ok is None:
+        if not self._preparer_circuit_normal():
             return
 
         re_prec = self._mesure_palier(u_depart, fenetre, 0.03, duree_max,
@@ -455,6 +653,10 @@ class Apprentissage:
             n      = max(1, round((u_max - u_min) / pas))
             tensions = [round(u_min + i * pas, 2) for i in range(n + 1)
                         if u_min + i * pas <= u_max + 1e-9]
+        # circuit de mesure normal obligatoire : une table relevée bypass
+        # ouvert ou PdC fermée serait silencieusement fausse
+        if not self._preparer_circuit_normal():
+            return
         dt = self.pilote.periode
         fenetre = max(6, int(5.0 / dt))
         points = []                                  # (volts, re)
@@ -501,6 +703,10 @@ class Apprentissage:
 
     def _test_indiciel(self, u1: float = 2.0, u2: float = 4.0,
                        duree_max: float = 120.0) -> None:
+        # même exigence que la courbe de gain : un tau mesuré circuit
+        # dérivé fausserait kp/ki et tau_consigne_s
+        if not self._preparer_circuit_normal():
+            return
         dt = self.pilote.periode
         fenêtre = max(6, int(5.0 / dt))      # ~5 s de mesures stables
 
@@ -585,6 +791,23 @@ class Apprentissage:
         act = self.cfg.setdefault("actionneurs", {})
         reg = self.cfg.setdefault("regulation", {})
         lignes = []
+        if "zero_capteurs" in self.resultats:
+            z = dict(self.resultats["zero_capteurs"])
+            self.cfg.setdefault("zero_capteurs", {}).update(z)
+            self.pilote.zero_capteurs = z
+            lignes.append("zéros capteurs : " + ", ".join(
+                f"{v} = {o} Pa" for v, o in z.items()))
+        if self.resultats.get("verif_cablage", {}).get("mapping_inverse"):
+            pos = self.cfg.setdefault("modbus", {}).setdefault(
+                "positions_vanne_3voies", {})
+            pos["fc_iso"], pos["fc_miller"] = (
+                pos.get("fc_miller", "fc_3voies_90"),
+                pos.get("fc_iso", "fc_3voies_0"))
+            self.pilote._fc_par_diaphragme = {"iso": pos["fc_iso"],
+                                              "miller": pos["fc_miller"]}
+            # la position réelle sera relue sur les fins de course
+            self.pilote._position_initiale_lue = False
+            lignes.append("mapping vanne 3 voies ISO/Miller interverti")
         if "calibration_pdc" in self.resultats:
             r = self.resultats["calibration_pdc"]
             act["pdc_recopie_min_v"] = r["v_min_recopie"]

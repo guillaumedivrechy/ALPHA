@@ -27,6 +27,11 @@
     "rho_force": null,
     "mu_force": null
   },
+  "zero_capteurs": {
+    "_commentaire": "Offsets de zero des capteurs Delta-P (Pa), mesures a debit nul par l'apprentissage 'zero_capteurs' et soustraits des mesures par la boucle. Decisif en bas-Re (Delta-P utile de quelques Pa).",
+    "dp_diaph_500": 0.0,
+    "dp_iso_500": 0.0
+  },
   "selection_diaphragme": {
     "_commentaire": "Miller si Re conduite attendu < seuil, ISO sinon. Hysteresis contre les commutations répétées.",
     "seuil_re": 5000,
