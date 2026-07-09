@@ -4,9 +4,13 @@
 Déroule la procédure complète du jour J dans l'ordre, avec « Appliquer »
 après chaque étape, puis une consigne de contrôle :
 
-  verif_cablage -> zero_capteurs -> calibration_pdc -> vanne_3voies ->
+  zero_capteurs -> verif_cablage -> calibration_pdc -> vanne_3voies ->
   vanne_bypass -> vanne_pdc -> freq_min -> courbe_gain -> indiciel ->
   consigne Re 6000 (convergence attendue avec les réglages appris)
+
+(le zéro des capteurs se mesure ventilateur arrêté, sans dépendre du
+câblage : le passer en premier corrige les offsets pour l'identification
+ISO/Miller du contrôle de câblage)
 
 Les fichiers écrits (config appliquée, état) vont dans un dossier
 temporaire : la configuration réelle n'est pas modifiée.
@@ -72,16 +76,12 @@ def main() -> int:
         print(f"  OK  {test:16s} {time.monotonic() - t0:5.0f} s  {statut}")
         print(f"      -> {app.appliquer()}")
 
-    def _verif_cablage(r: dict) -> None:
-        _exiger(r["mapping_iso_miller"] == "ok", f"mapping : {r}")
-        defauts = [k for k, v in r.items()
-                   if v is False and k != "mapping_inverse"]
-        _exiger(not defauts, f"défauts câblage : {defauts}")
-
-    etape("verif_cablage", _verif_cablage)
     etape("zero_capteurs",
           lambda r: _exiger(all(abs(o) < 2.0 for o in r.values()),
                             f"zéros non nuls : {r}"))
+    # le verdict agrégé (resume) couvre mapping + défauts : source unique
+    etape("verif_cablage",
+          lambda r: _exiger(r["resume"] == "câblage conforme", r["resume"]))
     etape("calibration_pdc",
           lambda r: _exiger(r["plage_v"] > 8.0, f"plage recopie : {r}"))
     etape("vanne_3voies",

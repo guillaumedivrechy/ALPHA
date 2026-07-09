@@ -1470,11 +1470,11 @@ class Application(QMainWindow):
         self._lbls_vanne: dict[str, tuple] = {}
 
         entries = [
-            ("▶  Contrôle câblage E/S", "verif_cablage",
-             lambda r: r["resume"]),
             ("▶  Zéro capteurs ΔP", "zero_capteurs",
              lambda r: "  ".join(f"{v.replace('_500', '')} = {o} Pa"
                                  for v, o in r.items())),
+            ("▶  Contrôle câblage E/S", "verif_cablage",
+             lambda r: r["resume"]),
             None,
             ("▶  Calibration recopie vanne perte de charge", "calibration_pdc",
              lambda r: (f"0% = {r['v_min_recopie']} V  "

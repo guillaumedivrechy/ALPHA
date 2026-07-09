@@ -397,24 +397,11 @@ class Apprentissage:
             self.etat["statut"] = ("extinction de l'écoulement "
                                    f"({attente_s - (time.monotonic() - t0):.0f} s)")
             time.sleep(dt)
-        voies = ("dp_diaph_500", "dp_iso_500")
-        series: dict[str, list] = {v: [] for v in voies}
-        t0 = time.monotonic()
-        while time.monotonic() - t0 < duree_s:
-            if self._annule.is_set():
-                self.etat["statut"] = "annulé"
-                return
-            brutes = self._brutes()
-            for v in voies:
-                if v in brutes:
-                    series[v].append(brutes[v])
-            self.etat["statut"] = f"mesure du zéro ({time.monotonic() - t0:.0f} s)"
-            time.sleep(dt)
-        offsets = {v: round(statistics.fmean(s), 3)
-                   for v, s in series.items() if s}
-        if not offsets:
-            self.etat["statut"] = "aucune mesure — capteurs absents ?"
+        m = self._dp_moyens(duree_s, "mesure du zéro", corriger=False)
+        if m is None:
             return
+        offsets = {"dp_iso_500": round(m[0], 3),
+                   "dp_diaph_500": round(m[1], 3)}
         aberrants = {v: o for v, o in offsets.items() if abs(o) > 25.0}
         if aberrants:
             self.etat["statut"] = (
@@ -439,8 +426,12 @@ class Apprentissage:
             return "miller"
         return None
 
-    def _dp_moyens(self, duree_s: float, statut: str) -> tuple | None:
-        """Moyennes (dp_iso, dp_miller) sur duree_s ; None si annulé."""
+    def _dp_moyens(self, duree_s: float, statut: str,
+                   corriger: bool = True) -> tuple | None:
+        """Moyennes (dp_iso, dp_miller) sur duree_s, corrigées du zéro
+        appris — un offset capteur fausserait les seuils d'identification
+        (corriger=False pour la mesure du zéro elle-même). None si annulé."""
+        z = self.pilote.zero_capteurs if corriger else {}
         dt = self.pilote.periode
         iso: list[float] = []
         miller: list[float] = []
@@ -450,8 +441,10 @@ class Apprentissage:
                 self.etat["statut"] = "annulé"
                 return None
             brutes = self._brutes()
-            iso.append(brutes.get("dp_iso_500") or 0.0)
-            miller.append(brutes.get("dp_diaph_500") or 0.0)
+            iso.append((brutes.get("dp_iso_500") or 0.0)
+                       - z.get("dp_iso_500", 0.0))
+            miller.append((brutes.get("dp_diaph_500") or 0.0)
+                          - z.get("dp_diaph_500", 0.0))
             self.etat["statut"] = statut
             time.sleep(dt)
         return statistics.fmean(iso), statistics.fmean(miller)
@@ -507,9 +500,11 @@ class Apprentissage:
 
         def _flux_present():
             b = self._brutes()
-            return ((b.get("dp_iso_500") or 0.0)
-                    + (b.get("dp_diaph_500") or 0.0) > 5.0
-                    or (b.get("frequence_variateur") or 0.0) > 0.5)
+            z = self.pilote.zero_capteurs
+            dp = ((b.get("dp_iso_500") or 0.0) - z.get("dp_iso_500", 0.0)
+                  + (b.get("dp_diaph_500") or 0.0)
+                  - z.get("dp_diaph_500", 0.0))
+            return dp > 5.0 or (b.get("frequence_variateur") or 0.0) > 0.5
 
         t = self._attendre(_flux_present, 30.0, "câblage variateur (montée)")
         rapport["variateur_repond"] = t is not None
@@ -685,14 +680,6 @@ class Apprentissage:
         # ouvert ou PdC fermée serait silencieusement fausse
         if not self._preparer_circuit_normal():
             return
-        # plafond du capteur ΔP actif : au-delà de la fraction de saturation
-        # les paliers ne mesurent plus le banc mais le plafond du capteur
-        # (Re plafonné) — points faux qui corrompraient table et verdict
-        cle_dp = ("dp_iso_500" if self.pilote.etat.get("diaphragme") == "iso"
-                  else "dp_diaph_500")
-        dp_max = (self.cfg.get("modbus", {}).get("entrees", {})
-                  .get(cle_dp, {}).get("valeur_max", 500.0))
-        dp_max *= self.pilote.saturation_dp
         dt = self.pilote.periode
         fenetre = max(6, int(5.0 / dt))
         points = []                                  # (volts, re)
@@ -703,7 +690,10 @@ class Apprentissage:
                 f"palier {k+1}/{len(tensions)} à {u:.1f} V")
             if re is None:
                 return
-            if (self.pilote.etat.get("dp") or 0.0) > dp_max:
+            # capteur ΔP saturé : le palier mesure le plafond du capteur,
+            # pas le banc — point faux qui corromprait table et verdict.
+            # Critère unique : le drapeau anti-rebond calculé par la boucle.
+            if self.pilote.etat.get("dp_sature"):
                 sature_a = u
                 break
             points.append((u, re))

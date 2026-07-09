@@ -16,12 +16,13 @@ CFG_MODBUS = json.loads(
 
 
 class _FauxResultat:
-    def __init__(self, registers=None, bits=None):
+    def __init__(self, registers=None, bits=None, erreur=False):
         self.registers = registers or []
         self.bits = bits or []
+        self._erreur = erreur
 
     def isError(self):
-        return False
+        return self._erreur
 
 
 class _FauxClient:
@@ -31,10 +32,11 @@ class _FauxClient:
     def __init__(self):
         self.transactions = 0
         self.ecritures = 0
+        self.erreur_ecriture = False
 
     def write_register(self, address, value):
         self.ecritures += 1
-        return _FauxResultat()
+        return _FauxResultat(erreur=self.erreur_ecriture)
 
     def read_input_registers(self, address, count=1):
         self.transactions += 1
@@ -110,3 +112,15 @@ def test_ecriture_ao_sur_changement_seulement(wago):
     wago._t_rafraichissement = 0.0          # délai écoulé -> réécrit
     wago.ecrire_variateur(0.0)
     assert wago.client.ecritures == 3
+
+
+def test_ecriture_ao_refusee_non_cachee(wago):
+    """Régression : une écriture AO refusée (réponse d'exception Modbus)
+    était mise en cache comme émise — une mise à 0 de sécurité pouvait
+    être dédupliquée 2 s au lieu d'être retentée au cycle suivant."""
+    wago.client.erreur_ecriture = True
+    with pytest.raises(IOError):
+        wago.ecrire_variateur(0.0)
+    wago.client.erreur_ecriture = False
+    wago.ecrire_variateur(0.0)              # retentée -> réellement écrite
+    assert wago.client.ecritures == 2

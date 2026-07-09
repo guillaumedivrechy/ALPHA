@@ -69,6 +69,10 @@ class TableGains:
 from core.banc import Banc
 from core.regulation import RegulateurPI
 
+# capteur ΔP physiquement câblé sur chaque diaphragme (voir modbus.entrees).
+# Source unique du mapping : toute sélection de capteur doit passer par ici.
+CLE_DP = {"iso": "dp_iso_500", "miller": "dp_diaph_500"}
+
 
 class Pilote:
     def __init__(self, banc: Banc, es, cfg: dict):
@@ -172,7 +176,7 @@ class Pilote:
         entrees = cfg.get("modbus", {}).get("entrees", {})
         self._dp_pleine_echelle = {
             cle: entrees.get(cle, {}).get("valeur_max", 500.0)
-            for cle in ("dp_iso_500", "dp_diaph_500")}
+            for cle in CLE_DP.values()}
 
         # état de la boucle, déclaré explicitement (plutôt que créé au fil de
         # l'eau et lu via getattr) : sur du code de sécurité, une faute de
@@ -661,7 +665,7 @@ class Pilote:
         # plafond du capteur, pas au banc — une consigne au-delà n'est plus
         # atteignable par la mesure (le PI pousserait le ventilateur à fond
         # sans jamais converger). Signalé à l'opérateur via etat[dp_sature].
-        cle_dp = "dp_iso_500" if diaph == "iso" else "dp_diaph_500"
+        cle_dp = CLE_DP.get(diaph, CLE_DP["miller"])
         if dp > self.saturation_dp * self._dp_pleine_echelle[cle_dp]:
             self._cycles_dp_sature += 1
         else:
@@ -839,7 +843,7 @@ class Pilote:
         """ΔP du capteur correspondant au diaphragme actif, corrigé du zéro
         appris à débit nul (décisif en bas-Re : le ΔP utile ne vaut que
         quelques Pa, un offset capteur serait poursuivi par le PI)."""
-        cle = "dp_iso_500" if diaphragme == "iso" else "dp_diaph_500"
+        cle = CLE_DP.get(diaphragme, CLE_DP["miller"])
         return mesures.get(cle, 0.0) - self.zero_capteurs.get(cle, 0.0)
 
     def _besoin_bas_re(self, re_cond_cible: float, seuil: float) -> bool:
@@ -866,13 +870,20 @@ class Pilote:
             return self.bas_re_scale
         if not self.gain_scheduling:
             return 1.0
-        if self.table_gains.est_valide():
-            u_eq = self.table_gains.tension_pour_re(re_cond_attendu)
-        elif self._gain_re_par_volt:
-            u_eq = re_cond_attendu / self._gain_re_par_volt
-        else:
+        u_eq = self._u_equilibre(re_cond_attendu)
+        if u_eq is None:
             return 1.0
         return min(max(u_eq, 0.5), 10.0)
+
+    def _u_equilibre(self, re_cond_attendu: float) -> float | None:
+        """Tension variateur d'équilibre estimée pour un Re conduite visé :
+        table de gains, sinon gain appris, sinon None (banc non caractérisé).
+        Source unique pour le gain scheduling ET le feed-forward."""
+        if self.table_gains.est_valide():
+            return self.table_gains.tension_pour_re(re_cond_attendu)
+        if self._gain_re_par_volt:
+            return re_cond_attendu / self._gain_re_par_volt
+        return None
 
     def _preparer_pi(self, bas_re: bool, re_cond_attendu: float,
                      seuil: float) -> None:
@@ -889,13 +900,9 @@ class Pilote:
         else:
             # régime normal : la commande PI est la tension variateur
             self.pi.rampe = self._rampe_nominale
-            if self.table_gains.est_valide():
-                u_ff = self.table_gains.tension_pour_re(re_cond_attendu)
-            elif self._gain_re_par_volt:
-                u_ff = min(max(re_cond_attendu / self._gain_re_par_volt,
-                               0.0), 10.0)
-            else:
-                u_ff = self.etat.get("u_variateur", 0.0)
+            u_eq = self._u_equilibre(re_cond_attendu)
+            u_ff = (min(max(u_eq, 0.0), 10.0) if u_eq is not None
+                    else self.etat.get("u_variateur", 0.0))
             self.pi.reinitialiser(u_ff)
         self._regime_pi = bas_re
         self._consigne_interne = None      # ré-ancrage sur la mesure courante

@@ -176,7 +176,11 @@ class WagoModbus(EntreesSorties):
                 and maintenant - precedent[1] < self._t_rafraichissement:
             return
         with self._verrou:
-            self.client.write_register(address=adresse, value=brut)
+            rr = self.client.write_register(address=adresse, value=brut)
+        if rr.isError():
+            # ne PAS mettre en cache : une mise à 0 de sécurité refusée
+            # doit être retentée au cycle suivant, pas dédupliquée
+            raise IOError(f"Erreur Modbus écriture AO @{adresse}")
         self._ao_cache[adresse] = (brut, maintenant)
 
     def ecrire_variateur(self, volts: float) -> None:
