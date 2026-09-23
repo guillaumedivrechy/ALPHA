@@ -259,3 +259,57 @@ def test_champs_exposes_existent_dans_la_config():
             assert isinstance(noeud, dict) and cle in noeud, (
                 "« %s » absent de config.json" % ".".join(lu))
             noeud = noeud[cle]
+
+
+# ── replis sûrs et concurrence (revue à froid) ────────────────────────────
+
+def test_fermeture_par_la_croix_arrete_la_soufflerie():
+    """RÉGRESSION : closeEvent n'appelait que pilote.arreter(), qui arrête le
+    thread et ferme la liaison sans toucher aux sorties. Fermer la fenêtre
+    ventilateur en marche le laissait tourner, hors supervision et sans plus
+    aucun moyen de l'arrêter depuis le logiciel."""
+    deb = SRC_GUI.find("def closeEvent")
+    fin = SRC_GUI.find("\n    def ", deb + 10)
+    corps = SRC_GUI[deb:fin]
+    assert "arreter_regulation()" in corps, \
+        "closeEvent doit couper la machine tournante avant d'arrêter le thread"
+    assert corps.index("arreter_regulation()") < corps.index("self.pilote.arreter()")
+
+
+def test_enregistrement_config_refuse_pendant_la_regulation():
+    """Le déverrouillage vérifiait l'arrêt, mais rien n'empêchait de démarrer
+    ENTRE le déverrouillage et la sauvegarde. appliquer_config relit des
+    paramètres utilisés par la boucle temps réel."""
+    deb = SRC_GUI.find("def _enregistrer_configuration")
+    fin = SRC_GUI.find("\n    # ", deb + 10)
+    corps = SRC_GUI[deb:fin if fin > deb else deb + 3000]
+    assert 'self.pilote.etat.get("regulation")' in corps
+    # comparer sur l'APPEL, pas sur la mention : le commentaire ci-dessus
+    # cite appliquer_config et fausserait la position
+    assert corps.index('etat.get("regulation")') \
+        < corps.index("self.pilote.appliquer_config(")
+    # et le verrou se referme tout seul si la régulation démarre après coup
+    assert "chk_unlock.setChecked(False)" in SRC_GUI.split("def _tick(")[1][:6000] \
+        or "reverrouillage vivant" in SRC_GUI
+
+
+def test_config_ecrite_avec_saut_de_ligne_final():
+    """Sans lui, chaque sauvegarde depuis l'IHM ou depuis « Appliquer »
+    produit un fichier sans newline terminal : git le signale à chaque fois
+    et pollue les diffs."""
+    src_appr = (RACINE / "core" / "apprentissage.py").read_text(encoding="utf-8")
+    for nom, src in (("gui/app.py", SRC_GUI), ("core/apprentissage.py", src_appr)):
+        assert r'ensure_ascii=False) + "\n"' in src, nom
+    assert (RACINE / "config.json").read_text(encoding="utf-8").endswith("\n")
+
+
+def test_fenetre_de_convergence_lue_par_reference_locale():
+    """appliquer_config() remplace la fenêtre (sa profondeur dépend de la
+    période). La lire deux fois dans le même cycle exposait à un
+    fenetre_pleine sur l'ancienne et une moyenne None sur la nouvelle, donc
+    un TypeError remonté en arrêt de sécurité."""
+    deb = SRC_PILOTE.find("fenetre_pleine =")
+    corps = SRC_PILOTE[deb - 400:deb + 300]
+    assert "fenetre = self._historique_re" in corps
+    assert "len(fenetre) == fenetre.maxlen" in corps
+    assert "fmean(self._historique_re)" not in corps

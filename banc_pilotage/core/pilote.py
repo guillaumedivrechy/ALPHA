@@ -1072,10 +1072,15 @@ class Pilote:
         else:
             self._historique_re.clear()
 
-        fenetre_pleine = len(self._historique_re) == self._historique_re.maxlen
-        re_moyen = fmean(self._historique_re) if self._historique_re else None
-        re_sigma = pstdev(self._historique_re) \
-            if len(self._historique_re) > 1 else None
+        # référence locale : appliquer_config() remplace la fenêtre (sa
+        # profondeur dépend de la période). Sans cela, un enregistrement de
+        # configuration tombant entre ces lignes donnait fenetre_pleine sur
+        # l'ancienne et une moyenne None sur la nouvelle -> TypeError, donc
+        # un arrêt de sécurité assorti d'un message incompréhensible.
+        fenetre = self._historique_re
+        fenetre_pleine = len(fenetre) == fenetre.maxlen
+        re_moyen = fmean(fenetre) if fenetre else None
+        re_sigma = pstdev(fenetre) if len(fenetre) > 1 else None
 
         convergee = bool(
             regul and re_cible > 0 and fenetre_pleine

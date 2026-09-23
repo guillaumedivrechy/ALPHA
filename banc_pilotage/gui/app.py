@@ -471,7 +471,22 @@ class Application(QMainWindow):
         self._timer.start(PERIODE_IHM_MS)
 
     def closeEvent(self, event):
+        """Fermeture par la croix, Alt-F4 ou fin de session.
+
+        arreter() ne fait qu'arreter le thread et fermer la liaison : les
+        sorties du coupleur gardent leur derniere valeur. Sans l'arret de
+        regulation prealable, fermer la fenetre ventilateur en marche le
+        laissait tourner, hors de toute supervision et sans plus aucun
+        moyen de l'arreter depuis le logiciel.
+
+        On ne remet pas les vannes en position de repos ici : c'est le role
+        délibéré du bouton Quitter. La croix garantit le minimum, l'arret
+        de la machine tournante."""
         self._timer.stop()
+        try:
+            self.pilote.arreter_regulation()   # 0 V + RUN retire, mode manuel coupe
+        except Exception:                      # noqa: BLE001
+            pass                               # la fermeture ne doit jamais echouer
         self.pilote.arreter()
         event.accept()
 
@@ -2588,6 +2603,18 @@ class Application(QMainWindow):
         if erreurs:
             QMessageBox.critical(self, "Saisie invalide", "\n".join(erreurs))
             return
+        # Le deverrouillage verifie l'arret de la regulation, mais rien
+        # n'empechait de demarrer ENTRE le deverrouillage et la sauvegarde.
+        # appliquer_config relit des parametres utilises par la boucle temps
+        # reel (gains, periode, fenetre de moyennage) : les changer sous ses
+        # pieds n'a rien d'anodin.
+        if self.pilote.etat.get("regulation"):
+            QMessageBox.warning(
+                self, "Régulation active",
+                "La régulation a démarré depuis le déverrouillage.\n\n"
+                "Arrêtez-la avant d'enregistrer : ces paramètres sont lus "
+                "par la boucle temps réel.")
+            return
         rep = QMessageBox.question(
             self, "Confirmer",
             "Enregistrer ces paramètres dans config.json ?")
@@ -2597,7 +2624,7 @@ class Application(QMainWindow):
             _cfg_ecrire(self.cfg, chemin, v)
         try:
             self.chemin_cfg.write_text(
-                json.dumps(self.cfg, indent=2, ensure_ascii=False),
+                json.dumps(self.cfg, indent=2, ensure_ascii=False) + "\n",
                 encoding="utf-8")
         except OSError as exc:
             QMessageBox.critical(self, "Écriture impossible", str(exc))
@@ -2846,6 +2873,14 @@ class Application(QMainWindow):
                 cycle_txt += " ⚠"
         self._foot_samples.setText(
             f"Échantillons : {e.get('cycles', 0)}{cycle_txt}")
+
+        # reverrouillage vivant : si la regulation demarre alors que les
+        # champs sont deverrouilles, on retire la main avant la sauvegarde
+        if e.get("regulation") and self.chk_unlock.isChecked():
+            self.chk_unlock.setChecked(False)
+            self.lbl_cfg_statut.setStyleSheet(f"color:{COLORS['warn']};")
+            self.lbl_cfg_statut.setText(
+                "paramètres reverrouillés : régulation démarrée")
 
         journal = e.get("journal")
         erreur_j = e.get("journal_erreur")

@@ -855,6 +855,6 @@ class Apprentissage:
         except OSError:
             pass
         self.chemin_cfg.write_text(
-            json.dumps(self.cfg, indent=2, ensure_ascii=False),
+            json.dumps(self.cfg, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8")
         return "Appliqué et enregistré : " + " ; ".join(lignes)
