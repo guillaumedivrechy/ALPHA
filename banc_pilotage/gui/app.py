@@ -1472,9 +1472,10 @@ class Application(QMainWindow):
                 "à chaque butée (5 s de stabilisation). Prérequis pour les tests "
                 "de temps de course."),
             "vanne_3voies": ("Vanne 3 voies",
-                "Démarre en fermeture complète (FC1=180°). "
-                "T1 : FC1→ISO (FC2=0°), T2 : FC2→FC1, T3 : FC1→Miller (FC3=90°), T4 : FC3→FC1. "
-                "T1 et T2 passent automatiquement par la position intermédiaire (2 impulsions relais). "
+                "Chronomètre les deux courses utiles de la carte GF3 : "
+                "T1 de 0° (ISO) vers 90° (Miller) par l'ordre I, T2 de 90° "
+                "vers 0° par l'ordre F. La position 180° n'est pas commandée "
+                "— le constructeur ne la définit pas pour un boisseau en L. "
                 "Sauvegarde le temps max + 10 % comme chien de garde."),
             "vanne_bypass": ("Vanne bypass",
                 "Démarre en fermeture complète (FC1). "
@@ -1510,8 +1511,8 @@ class Application(QMainWindow):
                         f"100% = {r['v_max_recopie']} V")),
             None,
             ("▶  Vanne 3 voies", "vanne_3voies",
-             lambda r: (f"T1={r['T1_fc1_to_iso_s']} s  T2={r['T2_iso_to_fc1_s']} s  "
-                        f"T3={r['T3_fc1_to_miller_s']} s  T4={r['T4_miller_to_fc1_s']} s")),
+             lambda r: (f"T1={r['T1_0_vers_90_s']} s  "
+                        f"T2={r['T2_90_vers_0_s']} s")),
             ("▶  Vanne bypass", "vanne_bypass",
              lambda r: f"T1={r['ouverture_s']} s  T2={r['fermeture_s']} s"),
             ("▶  Vanne perte de charge", "vanne_pdc",
@@ -2460,7 +2461,13 @@ class Application(QMainWindow):
                 btn.setStyleSheet("")
                 lbl.setStyleSheet(
                     f"color:{COLORS['ok']}; font-weight:700;")
-                lbl.setText(fmt_r(a.resultats[key]))
+                try:
+                    lbl.setText(fmt_r(a.resultats[key]))
+                except (KeyError, TypeError, ValueError) as exc:
+                    # un formateur désynchronisé des clés produites ne doit pas
+                    # faire tomber le QTimer : l'IHM entière cesserait de se
+                    # rafraîchir, y compris les alertes de sécurité
+                    lbl.setText(f"résultat illisible ({exc})")
             else:
                 btn.setStyleSheet("")
                 lbl.setStyleSheet(f"color:{COLORS['muted']};")
