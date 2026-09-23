@@ -49,9 +49,14 @@ class EntreesSorties:
         Sans cet ordre, la référence 0-10 V est ignorée par le variateur."""
         raise NotImplementedError
 
-    def ecrire_vanne_diaphragme(self, vers_iso: bool) -> None:
-        """Vanne TOR 3 voies : True -> flux vers diaphragme ISO,
-        False -> flux vers diaphragme Miller."""
+    def ecrire_vanne_diaphragme(self, vers_0deg: bool) -> None:
+        """Vanne 3 voies, carte GF3 : True -> ordre F (butée 0°),
+        False -> ordre I (position intermédiaire 90°).
+
+        Les deux ordres sont portés par deux relais distincts et ne doivent
+        jamais être actifs ensemble : la carte recevrait deux consignes
+        contradictoires. La correspondance angle -> diaphragme est dans
+        config.json (modbus.positions_vanne_3voies), pas ici."""
         raise NotImplementedError
 
     def ecrire_vanne_bypass(self, ouverte: bool) -> None:
@@ -73,9 +78,11 @@ class WagoModbus(EntreesSorties):
                 "pymodbus n'est pas installé : pip install pymodbus")
         self.cfg = cfg_modbus
         self._verrou = threading.Lock()   # client pymodbus non thread-safe
-        # dernière valeur écrite par sortie analogique : évite de réémettre
-        # une valeur inchangée à chaque cycle (voir _ecrire_ao_volts)
+        # dernière valeur écrite par sortie : évite de réémettre une valeur
+        # inchangée à chaque cycle, tout en la réaffirmant périodiquement
+        # (voir _ecrire_ao_volts et _ecrire_coil)
         self._ao_cache: dict[int, tuple[int, float]] = {}
+        self._coil_cache: dict[int, tuple[bool, float]] = {}
         self._t_rafraichissement = cfg_modbus.get(
             "rafraichissement_sorties_s", 2.0)
         self.client = ModbusTcpClient(
@@ -157,7 +164,10 @@ class WagoModbus(EntreesSorties):
             for i in range(nombre):
                 bits[debut + i] = bool(rr.bits[i])
         for nom, voie in tor.items():
-            mesures[nom] = bits[voie["adresse"]]
+            # "inverse" : entrée câblée sur un contact NF (MB du variateur,
+            # FC3 de la vanne 3 voies). Une rupture de fil produit alors
+            # l'état actif, ce qui rend le défaut détectable.
+            mesures[nom] = bits[voie["adresse"]] != voie.get("inverse", False)
         return mesures
 
     # ------------------------------------------------------------- écritures
@@ -183,30 +193,49 @@ class WagoModbus(EntreesSorties):
             raise IOError(f"Erreur Modbus écriture AO @{adresse}")
         self._ao_cache[adresse] = (brut, maintenant)
 
+    def _ecrire_coil(self, voie: dict, etat: bool) -> None:
+        """Écriture d'une sortie TOR, même politique que les sorties
+        analogiques : on n'émet que sur changement, mais on réaffirme
+        périodiquement. Sans cette réaffirmation, un coupleur redémarré
+        laisserait les relais retombés — donc, sur la vanne 3 voies dont la
+        carte est alimentée par ses bornes de commande, un actionneur sans
+        tension et sans résistance anti-condensation."""
+        adresse = voie["adresse"]
+        precedent = self._coil_cache.get(adresse)
+        maintenant = time.monotonic()
+        if precedent is not None and precedent[0] == etat                 and maintenant - precedent[1] < self._t_rafraichissement:
+            return
+        with self._verrou:
+            rr = self.client.write_coil(address=adresse, value=etat)
+        if rr.isError():
+            # ne PAS mettre en cache : un retrait de sécurité refusé doit
+            # être retenté au cycle suivant, pas dédupliqué
+            raise IOError(f"Erreur Modbus écriture coil @{adresse}")
+        self._coil_cache[adresse] = (etat, maintenant)
+
     def ecrire_variateur(self, volts: float) -> None:
         self._ecrire_ao_volts(self.cfg["sorties"]["variateur"], volts)
 
     def ecrire_variateur_run(self, marche: bool) -> None:
         if "variateur_run" in self.cfg["sorties"]:
-            voie = self.cfg["sorties"]["variateur_run"]
-            with self._verrou:
-                self.client.write_coil(address=voie["adresse"], value=marche)
+            self._ecrire_coil(self.cfg["sorties"]["variateur_run"], marche)
 
     def ecrire_vanne_perte_charge(self, volts: float) -> None:
         if "vanne_perte_charge" in self.cfg["sorties"]:
             self._ecrire_ao_volts(
                 self.cfg["sorties"]["vanne_perte_charge"], volts)
 
-    def ecrire_vanne_diaphragme(self, vers_iso: bool) -> None:
-        voie = self.cfg["sorties"]["vanne_diaphragme"]
-        with self._verrou:
-            self.client.write_coil(address=voie["adresse"], value=vers_iso)
+    def ecrire_vanne_diaphragme(self, vers_0deg: bool) -> None:
+        s = self.cfg["sorties"]
+        cible = "vanne_diaphragme_0deg" if vers_0deg else "vanne_diaphragme_90deg"
+        autre = "vanne_diaphragme_90deg" if vers_0deg else "vanne_diaphragme_0deg"
+        # relâcher avant de coller : jamais les deux ordres ensemble
+        self._ecrire_coil(s[autre], False)
+        self._ecrire_coil(s[cible], True)
 
     def ecrire_vanne_bypass(self, ouverte: bool) -> None:
         if "vanne_bypass" in self.cfg["sorties"]:
-            voie = self.cfg["sorties"]["vanne_bypass"]
-            with self._verrou:
-                self.client.write_coil(address=voie["adresse"], value=ouverte)
+            self._ecrire_coil(self.cfg["sorties"]["vanne_bypass"], ouverte)
 
     def fermer(self) -> None:
         try:

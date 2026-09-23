@@ -56,6 +56,7 @@ def wago():
     w.cfg = CFG_MODBUS
     w._verrou = threading.Lock()
     w._ao_cache = {}
+    w._coil_cache = {}
     w._t_rafraichissement = 2.0
     w.client = _FauxClient()
     return w
@@ -79,10 +80,24 @@ def test_lire_mesures_complet(wago):
     assert mesures["frequence_variateur"] == pytest.approx(5.0, rel=1e-3)
     # PT100 en 0,1 °C
     assert mesures["temperature"] == pytest.approx(20.5)
-    # toutes les entrées TOR déclarées sont présentes
-    for nom in CFG_MODBUS["entrees_tor"]:
-        if not nom.startswith("_"):
-            assert mesures[nom] is True
+    # toutes les entrées TOR déclarées sont présentes, et celles câblées sur
+    # un contact NF ("inverse") sont complémentées à la lecture
+    for nom, voie in CFG_MODBUS["entrees_tor"].items():
+        if nom.startswith("_"):
+            continue
+        assert mesures[nom] is not voie.get("inverse", False)
+
+
+def test_entrees_tor_inversees(wago):
+    """Le drapeau 'inverse' de config.json complémente la lecture : le contact
+    NF MB du variateur et le contact NF FC3 de la vanne 3 voies sont lus dans
+    le sens attendu par le code métier, sans condition dans core/."""
+    inversees = {nom for nom, voie in CFG_MODBUS["entrees_tor"].items()
+                 if not nom.startswith("_") and voie.get("inverse")}
+    assert inversees == {"defaut_variateur", "fc_3voies_90"}
+    mesures = wago.lire_mesures()               # le faux client renvoie True
+    assert mesures["defaut_variateur"] is False  # contact fermé = pas de défaut
+    assert mesures["fc_3voies_90"] is False      # FC3 fermé = hors position 90°
 
 
 def test_regroupement_en_blocs():

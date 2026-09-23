@@ -28,7 +28,7 @@ class StubES:
     def ecrire_variateur_run(self, marche):
         pass
 
-    def ecrire_vanne_diaphragme(self, vers_iso):
+    def ecrire_vanne_diaphragme(self, vers_0deg):
         pass
 
     def ecrire_vanne_bypass(self, ouverte):
@@ -78,10 +78,13 @@ def test_appliquer_intervertit_mapping_iso_miller(tmp_path):
     app.resultats["verif_cablage"] = {"mapping_inverse": True,
                                       "resume": "mapping inversé"}
     app.appliquer()
+    # l'ambiguite ne porte plus sur les fins de course (Miller n'en a plus
+    # en propre) mais sur la plomberie : quelle butee alimente quel diaphragme
     pos = app.cfg["modbus"]["positions_vanne_3voies"]
-    assert pos["fc_iso"] == "fc_3voies_90"
-    assert pos["fc_miller"] == "fc_3voies_0"
-    assert pilote._fc_par_diaphragme["iso"] == "fc_3voies_90"
+    assert pos["diaphragme_a_0deg"] == "miller"
+    assert pos["diaphragme_a_90deg"] == "iso"
+    assert pilote._angle_par_diaphragme["iso"] == "90"
+    assert pilote._diaphragme_par_angle["0"] == "miller"
     assert pilote._position_initiale_lue is False   # position relue aux FC
 
 

@@ -6,5 +6,8 @@ __pycache__/
 # état runtime du banc (gain appris, propre à chaque machine)
 etat_banc.json
 
+# journaux d'essai (un CSV par session de régulation)
+journaux/
+
 # réglages locaux Claude Code
 **/.claude/settings.local.json

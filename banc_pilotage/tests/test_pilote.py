@@ -34,8 +34,8 @@ class StubES:
     def ecrire_variateur_run(self, marche):
         self.run.append(marche)
 
-    def ecrire_vanne_diaphragme(self, vers_iso):
-        self.coil_diaphragme.append(vers_iso)
+    def ecrire_vanne_diaphragme(self, vers_0deg):
+        self.coil_diaphragme.append(vers_0deg)
 
     def ecrire_vanne_bypass(self, ouverte):
         pass
@@ -65,32 +65,37 @@ def test_arret_coupe_aussi_le_mode_manuel(pilote_stub):
     assert es.run[-1] is False
 
 
-def test_commander_diaphragme_fermee_double_impulsion(pilote_stub):
-    """Depuis ISO (0°), la fermeture (180°) exige une relance à 90°."""
+def test_commander_diaphragme_va_droit_a_la_butee(pilote_stub):
+    """Carte GF3 : un seul ordre suffit depuis n'importe quelle position.
+    Depuis 0°, aller à Miller = ordre I (borne 4), sans relance."""
     pilote, es = pilote_stub
     pilote.etat["mesures_brutes"] = {"fc_3voies_0": True}
-    pilote.commander_diaphragme("fermee")
-    assert es.coil_diaphragme == [False]
-    assert pilote.etat["diaphragme"] == "fermee"
-    m = pilote._manoeuvre
-    assert m["fc_attendue"] == "fc_3voies_180"
-    assert m["fc_relance"] == "fc_3voies_90"
+    pilote.commander_diaphragme("miller")
+    assert es.coil_diaphragme == [False]         # False = butée 90°
+    assert pilote.etat["diaphragme"] == "miller"
+    assert pilote._manoeuvre["angle_attendu"] == "90"
 
 
-def test_commander_diaphragme_deja_en_position(pilote_stub):
+def test_commander_diaphragme_reaffirme_en_position(pilote_stub):
+    """Déjà en place : pas de manœuvre, mais l'ordre est tout de même émis.
+    Sur la carte GF3 l'actionneur est alimenté par ses bornes de commande —
+    un relais retombé le priverait de sa résistance anti-condensation."""
     pilote, es = pilote_stub
     pilote.etat["mesures_brutes"] = {"fc_3voies_0": True}
     pilote.commander_diaphragme("iso")
-    assert es.coil_diaphragme == []          # aucune impulsion
+    assert es.coil_diaphragme == [True]          # True = butée 0°
     assert pilote._manoeuvre is None
 
 
-def test_commander_miller_depuis_fermee_remonte(pilote_stub):
-    """Depuis 180°, aller à Miller (90°) = impulsion vers ISO."""
-    pilote, es = pilote_stub
-    pilote.etat["mesures_brutes"] = {"fc_3voies_180": True}
-    pilote.commander_diaphragme("miller")
-    assert es.coil_diaphragme == [True]
+def test_decodage_position_un_parmi_trois():
+    """Les trois fins de course forment un codage un-parmi-trois. Zéro ou
+    plusieurs contacts actifs = rupture de fil ou commun 24 V absent."""
+    d = Pilote._angle_vanne_3voies
+    assert d({"fc_3voies_0": True}) == "0"
+    assert d({"fc_3voies_90": True}) == "90"
+    assert d({"fc_3voies_180": True}) == "180"
+    assert d({}) is None                                     # aucune butée
+    assert d({"fc_3voies_0": True, "fc_3voies_90": True}) is None
 
 
 def test_cycle_supporte_position_fermee():
@@ -182,20 +187,65 @@ def test_sequence_grand_echelon_reinitialise_le_pi():
     assert len(appels) == 2
 
 
-def test_convergee_exige_des_cycles_consecutifs():
-    """Anti-battement : la convergence n'est affichée qu'après ~2 s
-    consécutives dans la bande de tolérance, pas sur un échantillon isolé."""
+def test_convergee_jugee_sur_la_moyenne_et_non_sur_l_echantillon():
+    """Le bruit des capteurs ΔP est du même ordre que la tolérance : un
+    critère exigeant N échantillons CONSÉCUTIFS dans la bande fait retomber
+    le voyant dès qu'un seul en sort, alors que le débit ne bouge pas
+    (mesuré : 41 % du temps à 1 % de bruit). La convergence se juge donc sur
+    la moyenne de la fenêtre, et la dispersion est publiée."""
     pilote, es = _pilote_en_position("fc_3voies_0")
     pilote.bas_re_actif = False
-    pilote.tolerance = 2.0                # bande couvrant toute mesure
+    es.mesures["dp_iso_500"] = 200.0
     pilote.definir_consigne(8000.0, "conduite")
     pilote.demarrer_regulation()
-    n = max(3, int(2.0 / pilote.periode))  # fenêtre du debounce (~2 s)
     pilote._cycle()
-    assert pilote.etat["convergee"] is False        # 1er cycle en bande
+    re0 = pilote.etat["re_mesure"]                  # Re produit par ce ΔP
+
+    # consigne calée sur la mesure : la moyenne est pile dans la bande
+    pilote.definir_consigne(re0, "conduite")
+    pilote.demarrer_regulation()
+    n = pilote._historique_re.maxlen
     for _ in range(n - 1):
         pilote._cycle()
-    assert pilote.etat["convergee"] is True         # n cycles (~2 s) en bande
+    assert pilote.etat["convergee"] is False        # fenêtre incomplète
+    pilote._cycle()
+    assert pilote.etat["convergee"] is True         # fenêtre pleine, en bande
+    assert pilote.etat["re_ecart_type"] == pytest.approx(0.0, abs=1e-6)
+
+    # RÉGRESSION : un échantillon isolé hors bande ne doit PAS faire
+    # retomber le voyant — c'est le battement qu'on vient de supprimer
+    es.mesures["dp_iso_500"] = 260.0                # ~ +14 % sur le Re
+    pilote._cycle()
+    es.mesures["dp_iso_500"] = 200.0
+    assert pilote.etat["convergee"] is True
+    assert pilote.etat["re_ecart_type"] > 0.0       # dispersion visible
+
+    # en revanche un décalage durable doit bien la faire tomber
+    es.mesures["dp_iso_500"] = 260.0
+    for _ in range(n):
+        pilote._cycle()
+    assert pilote.etat["convergee"] is False
+
+
+def test_convergee_depuis_mesure_la_duree_du_palier():
+    """L'opérateur part mesurer sur le banc : il doit pouvoir lire depuis
+    combien de temps le palier tient, pas seulement qu'il tient."""
+    pilote, es = _pilote_en_position("fc_3voies_0")
+    pilote.bas_re_actif = False
+    es.mesures["dp_iso_500"] = 200.0
+    pilote.definir_consigne(8000.0, "conduite")
+    pilote.demarrer_regulation()
+    pilote._cycle()
+    pilote.definir_consigne(pilote.etat["re_mesure"], "conduite")
+    pilote.demarrer_regulation()
+    for _ in range(pilote._historique_re.maxlen):
+        pilote._cycle()
+    assert pilote.etat["convergee"] is True
+    assert pilote.etat["convergee_depuis_s"] is not None
+    t1 = pilote.etat["convergee_depuis_s"]
+    time.sleep(0.05)
+    pilote._cycle()
+    assert pilote.etat["convergee_depuis_s"] > t1   # le palier s'allonge
 
 
 def test_consigne_interne_filtree():
@@ -310,6 +360,67 @@ def test_definir_consigne_seule_reprepare():
     assert pilote._re_cible_conduite == pytest.approx(12000.0, rel=1e-6)
 
 
+def test_position_illisible_verrouille_la_regulation():
+    """Fil de fin de course coupé en cours de régulation : la lecture devient
+    inexploitable. Réguler sur un capteur ΔP qui ne correspond plus à la
+    position réelle emballerait le ventilateur -> repli sûr et verrouillage."""
+    es = StubES({"temperature": 20.0, "fc_3voies_0": True})
+    pilote = Pilote(Banc(CFG), es, CFG)
+    pilote.bas_re_actif = False
+    pilote.definir_consigne(8000.0, "conduite")
+    pilote.demarrer_regulation()
+    pilote._cycle()
+    assert pilote.etat["regulation"] is True
+    es.mesures["fc_3voies_0"] = False              # rupture de fil
+    for _ in range(max(3, int(3.0 / pilote.periode)) + 1):
+        pilote._cycle()
+    assert pilote.etat["incoherence_vanne"] is True
+    assert pilote.regulation_active is False       # latch
+    assert es.variateur[-1] == 0.0
+    assert es.run[-1] is False
+
+
+def test_split_range_vanne_pdc_0v_fermee():
+    """Convention carte P6 (sens usine) : 0 V = fermée, 10 V = grande ouverte.
+    Hors bas-Re la vanne doit être pleinement ouverte ; en bas-Re, une commande
+    nulle doit la fermer."""
+    pilote, es = _pilote_en_position("fc_3voies_0")
+    pilote.u_min_ventilateur = 2.0
+    u, pdc = pilote._split_range(5.0, bas_re=False)
+    assert pdc == 10.0                              # circuit de mesure normal
+    u, pdc = pilote._split_range(0.0, bas_re=True)
+    assert pdc == 0.0                               # étranglée au minimum
+    u, pdc = pilote._split_range(pilote.split_point, bas_re=True)
+    assert pdc == pytest.approx(10.0)               # haut du segment PdC
+    u, pdc = pilote._split_range(10.0, bas_re=True)
+    assert pdc == 10.0                              # segment variateur
+
+
+def test_maintien_tor_suspendu_puis_retabli():
+    """L'apprentissage manœuvre les vannes en direct ; la boucle doit cesser
+    de réaffirmer ses ordres, puis les reprendre une fois la position relue."""
+    es = StubES({"temperature": 20.0, "fc_3voies_0": True})
+    pilote = Pilote(Banc(CFG), es, CFG)
+    pilote._cycle()                                 # lit la position initiale
+    assert pilote._diaphragme_commande == "0"       # maintien établi
+    pilote.suspendre_maintien_tor()
+    assert pilote._diaphragme_commande is None
+    n = len(es.coil_diaphragme)
+    pilote._cycle()
+    assert len(es.coil_diaphragme) == n             # plus aucune réaffirmation
+    # régression : la relecture de position remettait le maintien en route au
+    # cycle suivant, donc pendant la séquence d'apprentissage, et la boucle
+    # ramenait la vanne en place pendant qu'on essayait de la chronométrer
+    pilote._position_initiale_lue = False
+    pilote._cycle()
+    assert pilote._diaphragme_commande is None      # toujours suspendu
+    assert len(es.coil_diaphragme) == n
+    pilote.reprendre_maintien_tor()
+    pilote._position_initiale_lue = False           # ce que fait l'apprentissage
+    pilote._cycle()
+    assert pilote._diaphragme_commande == "0"       # maintien rétabli
+
+
 def test_dp_sature_signale():
     """ΔP proche de la pleine échelle du capteur : le Re mesuré plafonne au
     capteur, pas au banc — signalé (après debounce) pour que l'opérateur
@@ -338,3 +449,117 @@ def test_arreter_persiste_u_min(tmp_path):
     pilote.arreter()
     donnees = json.loads((tmp_path / "etat.json").read_text(encoding="utf-8"))
     assert donnees["u_min_ventilateur_v"] == 2.5
+
+
+# ── correctifs de la revue fonctionnelle (point de vue opérateur) ──────────
+
+def test_temperature_invraisemblable_arrete_le_banc():
+    """RÉGRESSION : une PT100 coupée sature le 750-450 et, le coupleur Modbus
+    n'ayant pas accès aux octets de statut du module, rien ne le signalait.
+    Le T aberrant faussait rho et mu, donc le Re, et le PI emmenait le
+    ventilateur à 100 % en affichant « RÉGULATION… » indéfiniment."""
+    pilote, es = _pilote_en_position("fc_3voies_0")
+    pilote.bas_re_actif = False
+    es.mesures["dp_iso_500"] = 200.0
+    pilote.definir_consigne(8000.0, "conduite")
+    pilote.demarrer_regulation()
+    pilote._cycle()
+    assert pilote.etat.get("defaut_capteur") is None
+
+    es.mesures["temperature"] = 3276.7          # saturation du module RTD
+    for _ in range(max(3, int(2.0 / pilote.periode)) + 1):
+        pilote._cycle()
+
+    assert "température invraisemblable" in pilote.etat["defaut_capteur"]
+    assert pilote.etat["regulation"] is False
+    assert pilote.regulation_active is False    # latché : pas de reprise seule
+    assert es.variateur[-1] == 0.0
+    assert es.run[-1] is False
+
+
+def test_temperature_aberrante_isolee_ne_declenche_pas():
+    """Un seul échantillon douteux ne doit pas arrêter un essai en cours :
+    le défaut n'est levé que sur une persistance (mêmes idiomes que les
+    autres défauts de la boucle)."""
+    pilote, es = _pilote_en_position("fc_3voies_0")
+    pilote.bas_re_actif = False
+    es.mesures["dp_iso_500"] = 200.0
+    pilote.definir_consigne(8000.0, "conduite")
+    pilote.demarrer_regulation()
+    pilote._cycle()
+    es.mesures["temperature"] = -300.0
+    pilote._cycle()
+    es.mesures["temperature"] = 20.0
+    pilote._cycle()
+    assert pilote.etat.get("defaut_capteur") is None
+    assert pilote.etat["regulation"] is True
+
+
+def test_dp_sature_plafonne_la_tension():
+    """RÉGRESSION : au-delà de la pleine échelle du capteur, le Re mesuré
+    plafonne mais le banc peut encore accélérer ; l'erreur ne se résorbait
+    jamais et le PI poussait le ventilateur en butée pour rien. La commande
+    doit être gelée à sa valeur du moment."""
+    pilote, es = _pilote_en_position("fc_3voies_0")
+    pilote.bas_re_actif = False
+    es.mesures["dp_iso_500"] = 495.0               # > 0,9 × 500 Pa dès le départ
+    pilote.definir_consigne(60000.0, "conduite")   # hors de portée du capteur
+    pilote.demarrer_regulation()
+    for _ in range(max(3, int(1.0 / pilote.periode)) + 1):
+        pilote._cycle()
+    assert pilote.etat["dp_sature"] is True
+    plafond = pilote.etat["plafond_u_sature"]
+    assert plafond is not None
+
+    for _ in range(60):                            # 12 s de plus
+        pilote._cycle()
+    assert pilote.etat["u_variateur"] < plafond    # la commande a reculé
+    assert pilote.etat["u_variateur"] < 10.0       # plus de butée à fond
+
+    # sortie de saturation : le plafond est LATCHÉ jusqu'à la consigne
+    # suivante. Le relâcher ici ferait repartir le PI vers la butée, donc
+    # un cycle limite autour de la pleine échelle du capteur.
+    es.mesures["dp_iso_500"] = 200.0
+    for _ in range(max(3, int(1.0 / pilote.periode)) + 2):
+        pilote._cycle()
+    assert pilote.etat["dp_sature"] is False
+    assert pilote.etat["plafond_u_sature"] is not None
+    assert pilote.etat["u_variateur"] <= pilote.etat["plafond_u_sature"] + 1e-9
+
+    # une nouvelle consigne rend toute sa course à la boucle
+    pilote.definir_consigne(8000.0, "conduite")
+    assert pilote._plafond_u_sature is None
+    assert pilote.pi.u_max == 10.0
+
+
+def test_defaut_vanne_acquitte_au_redemarrage():
+    """RÉGRESSION : defaut_vanne était positionné mais jamais effacé. Le banc
+    régulait normalement alors que l'IHM affichait un défaut périmé — qui
+    masquait de surcroît le défaut suivant (préfixe commun côté journal)."""
+    pilote, es = _pilote_en_position("fc_3voies_0")
+    pilote._demarrer_manoeuvre("test", t_course=0.01, angle_attendu="180")
+    time.sleep(0.1)
+    pilote._cycle()
+    assert pilote.etat["defaut_vanne"] is not None
+
+    pilote.demarrer_regulation()
+    assert pilote.etat["defaut_vanne"] is None
+    assert pilote.etat["defaut_capteur"] is None
+
+
+def test_motif_bas_re_indisponible_est_publie():
+    """Sans la séquence freq_min, u_min est inconnu, le seuil vaut 0 et la
+    stratégie bas-Re ne s'engage jamais — silencieusement jusqu'ici."""
+    pilote, es = _pilote_en_position("fc_3voies_0")
+    es.mesures["dp_iso_500"] = 200.0
+    pilote.u_min_ventilateur = None
+    pilote.table_gains = TableGains()
+    pilote._gain_re_par_volt = None
+    pilote.definir_consigne(8000.0, "conduite")
+    pilote.demarrer_regulation()
+    pilote._cycle()
+    assert "freq_min" in pilote.etat["bas_re_motif"]
+
+    pilote.bas_re_actif = False
+    pilote._cycle()
+    assert pilote.etat["bas_re_motif"] is None

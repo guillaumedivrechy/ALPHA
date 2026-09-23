@@ -17,6 +17,10 @@ import threading
 import time
 from pathlib import Path
 from bisect import bisect_left
+from collections import deque
+from statistics import fmean, pstdev
+
+from core.journal import JournalEssai
 
 
 class TableGains:
@@ -73,6 +77,13 @@ from core.regulation import RegulateurPI
 # Source unique du mapping : toute sélection de capteur doit passer par ici.
 CLE_DP = {"iso": "dp_iso_500", "miller": "dp_diaph_500"}
 
+# Fins de course auxiliaires de la vanne 3 voies (carte GF3), une par butée.
+# Câblage : FC2 ferme à 0°, FC1 ferme à 180°, FC3 est un contact NF qui
+# s'ouvre en position intermédiaire — déclaré "inverse" dans config.json pour
+# être lu comme une présence à 90°. Exactement une des trois doit être vraie ;
+# toute autre combinaison signale une rupture de fil ou un commun 24 V absent.
+FC_3VOIES = {"0": "fc_3voies_0", "90": "fc_3voies_90", "180": "fc_3voies_180"}
+
 
 class Pilote:
     def __init__(self, banc: Banc, es, cfg: dict):
@@ -98,6 +109,20 @@ class Pilote:
         # fraction de la pleine échelle du capteur ΔP au-delà de laquelle
         # la mesure est considérée saturée (drapeau dp_sature)
         self.saturation_dp = r.get("saturation_dp_relative", 0.9)
+        # fenêtre de moyennage du Re pour juger la convergence. Le bruit des
+        # capteurs ΔP est du même ordre que la tolérance : un critère sur
+        # échantillon isolé exige N tirages consécutifs dans la bande et
+        # retombe dès qu'un seul en sort, alors que le débit est stable.
+        self.fenetre_convergence = r.get("fenetre_convergence_s", 5.0)
+        # bornes de vraisemblance de la PT100. Une sonde coupée sature le
+        # module 750-450, et le coupleur Modbus n'a pas accès à ses octets de
+        # statut : ce test est la seule détection possible. Sans lui, un T
+        # aberrant fausse rho et mu, donc le Re, et le PI pousse le
+        # ventilateur à fond sans que rien ne le signale.
+        self.t_min_c = r.get("temperature_min_c", -40.0)
+        self.t_max_c = r.get("temperature_max_c", 80.0)
+        # vitesse de repli de la commande quand le capteur ΔP sature
+        self.recul_saturation = r.get("recul_saturation_v_par_s", 0.5)
         # mise en forme de référence : le PI suit une consigne interne
         # filtrée au 1er ordre (trajectoire réalisable par la plante) au
         # lieu de l'échelon brut -> supprime le coup de bélier du terme P
@@ -112,15 +137,24 @@ class Pilote:
         self.marge_manoeuvre = act.get("marge_apres_manoeuvre_s", 2.0)
         self.facteur_chien_garde = act.get("facteur_chien_garde", 1.5)
 
-        # correspondance diaphragme -> fin de course de la vanne 3 voies
-        # (voie 1 = ISO, voie 2 = Miller ; angles à confirmer sur site)
+        # quel diaphragme est alimenté à chaque butée de la vanne 3 voies.
+        # La position 180° n'est pas commandée : le constructeur ne la définit
+        # pas pour un boisseau en L, et la borne 2 (ordre O) n'est pas câblée.
         pos = cfg.get("modbus", {}).get("positions_vanne_3voies", {})
-        self._fc_par_diaphragme = {
-            "iso": pos.get("fc_iso", "fc_3voies_0"),
-            "miller": pos.get("fc_miller", "fc_3voies_90"),
-        }
+        d0 = pos.get("diaphragme_a_0deg", "iso")
+        d90 = pos.get("diaphragme_a_90deg", "miller")
+        self._diaphragme_par_angle = {"0": d0, "90": d90}
+        self._angle_par_diaphragme = {d0: "0", d90: "90"}
 
-        # manœuvre en cours : None ou dict {motif, fc_attendue, t_debut, t_max}
+        # ordres TOR maintenus, réaffirmés à chaque cycle (voir _cycle) : sur
+        # la carte GF3 l'actionneur est alimenté par ses bornes de commande,
+        # un relais retombé le laisse sans résistance anti-condensation.
+        self._diaphragme_commande: str | None = None
+        self._bypass_commande: bool | None = None
+        self._maintien_tor_suspendu = False
+
+        # manœuvre en cours : None ou dict {motif, fc_attendue | angle_attendu,
+        # t_debut, t_max}
         self._manoeuvre: dict | None = None
         self._t_fin_gel = 0.0              # petite marge après fin de course
 
@@ -185,8 +219,14 @@ class Pilote:
         self._preparation_faite = False
         self._position_initiale_lue = False
         self._cycles_incoherence = 0
-        self._cycles_convergee = 0         # cycles consécutifs dans la bande de tolérance
         self._cycles_dp_sature = 0         # cycles consécutifs ΔP proche de la pleine échelle
+        self._cycles_t_invalide = 0        # cycles consécutifs de PT100 hors bornes
+        self._derniere_T_valide = None     # tenue pendant un transitoire capteur
+        self._plafond_u_sature = None      # tension gelée quand le ΔP sature
+        # historique du Re pour la moyenne glissante (convergence + dispersion)
+        self._historique_re = deque(
+            maxlen=max(2, int(self.fenetre_convergence / self.periode)))
+        self._convergee_depuis = None      # instant d'entrée en convergence
         self._re_conduite_prec = None      # garde-fou anti-transitoire de l'apprentissage du gain
         self._echelon_depuis = None        # Re cible avant le dernier échelon de séquence
         self._re_cible_conduite = 0.0      # Re conduite équivalent de la consigne (calé à la préparation)
@@ -200,6 +240,14 @@ class Pilote:
         # fonctionnement -> pré-positionnement (feed-forward) des consignes.
         # Persisté sur disque pour que la première consigne d'une session
         # bénéficie du gain appris lors des sessions précédentes.
+        # journal CSV des conditions d'essai (une session = un fichier)
+        j = cfg.get("journal", {})
+        dossier_j = Path(j.get("dossier", "journaux"))
+        if not dossier_j.is_absolute():
+            dossier_j = Path(__file__).resolve().parent.parent / dossier_j
+        self.journal = JournalEssai(dossier_j, j.get("periode_s", 1.0)) \
+            if j.get("actif", True) else None
+
         self._chemin_etat = Path(cfg.get("fichier_etat", "etat_banc.json"))
         if not self._chemin_etat.is_absolute():
             # relatif au dossier du programme, pas au répertoire de lancement
@@ -229,6 +277,10 @@ class Pilote:
     # -------------------------------------------------------------- commandes
 
     def definir_consigne(self, re_cible: float, reference: str) -> None:
+        # nouvelle consigne : le plafond hérité d'une saturation précédente
+        # n'a plus lieu d'être (il était calé sur l'ancien point de marche)
+        self._plafond_u_sature = None
+        self.pi.u_max = 10.0
         with self._verrou:
             self.re_cible = re_cible
             self.reference = reference
@@ -238,7 +290,20 @@ class Pilote:
             # bas-Re et le split-range calés sur l'ancienne consigne
             self._preparation_faite = False
 
+    def _acquitter_defauts(self) -> None:
+        """Efface les défauts latchés. Appelé au (re)démarrage : l'opérateur
+        a vu l'alerte et relance en connaissance de cause. Sans cela un défaut
+        vanne resterait affiché indéfiniment sur un banc qui régule
+        normalement, et masquerait le défaut suivant."""
+        for cle in ("defaut_vanne", "defaut_capteur", "defaut_variateur"):
+            self.etat[cle] = None
+        self._cycles_t_invalide = 0
+        self._cycles_incoherence = 0
+        self._plafond_u_sature = None
+        self.pi.u_max = 10.0
+
     def demarrer_regulation(self) -> None:
+        self._acquitter_defauts()
         with self._verrou:
             self.mode_manuel = False
             self.regulation_active = True
@@ -246,6 +311,10 @@ class Pilote:
             self._preparation_faite = False
         self._echelon_depuis = None
         self.etat["sequence"] = None
+        self._historique_re.clear()
+        self._convergee_depuis = None
+        if self.journal is not None:
+            self.journal.ouvrir(time.monotonic())
 
     def demarrer_sequence(self, points: list, reference: str) -> str | None:
         """Suivi d'un profil (t_s, Re cible) : la consigne évolue par
@@ -254,6 +323,7 @@ class Pilote:
         Retourne un message d'erreur ou None."""
         if not points:
             return "Séquence vide."
+        self._acquitter_defauts()
         with self._verrou:
             self.mode_manuel = False
             self.tension_manuelle = 0.0
@@ -267,6 +337,10 @@ class Pilote:
             }
         self._preparation_faite = False
         self._echelon_depuis = None        # 1er échelon : préparation complète
+        self._historique_re.clear()
+        self._convergee_depuis = None
+        if self.journal is not None:
+            self.journal.ouvrir(time.monotonic())
         return None
 
     def arreter_regulation(self) -> None:
@@ -280,6 +354,10 @@ class Pilote:
             self._sequence = None
         self._echelon_depuis = None        # PI remis à zéro : ne pas conserver
         self.etat["sequence"] = None
+        self._historique_re.clear()
+        self._convergee_depuis = None
+        if self.journal is not None:
+            self.journal.fermer()
         self.es.ecrire_variateur(0.0)
         self.es.ecrire_variateur_run(False)
         self._run_actif = False
@@ -311,20 +389,25 @@ class Pilote:
             self.banc = banc
 
     def commander_vanne_perte_charge(self, volts: float) -> None:
-        """Consigne 0-10 V de la vanne proportionnelle. La position réelle
-        est lue sur la recopie 0-10 V (etat['pdc_position']) ; l'actionneur
-        met ~25 s pleine course."""
+        """Consigne 0-10 V de la vanne proportionnelle (carte P6, sens usine) :
+        0 V = FERMÉE, 10 V = grande ouverte. La position réelle est lue sur la
+        recopie 0-10 V (etat['pdc_position']) ; l'ER20 POSI met ~25 s pour 90°.
+
+        Ce sens est celui du constructeur et le plus sûr : sur rupture du câble
+        de consigne ou coupure du coffret, la sortie analogique retombe à 0 V
+        et la vanne étrangle le débit au lieu de l'ouvrir en grand."""
         self._pdc_consigne = min(max(volts, 0.0), 10.0)
         self.es.ecrire_vanne_perte_charge(self._pdc_consigne)
 
     def commander_vanne_perte_charge_pct(self, pct: float) -> None:
-        """Consigne en % : 0 % = 0 V = ouverte, 100 % = 10 V = fermée."""
+        """Consigne en % d'ouverture : 0 % = 0 V = fermée, 100 % = 10 V = ouverte."""
         self.commander_vanne_perte_charge(min(max(pct, 0.0), 100.0) / 10.0)
 
     def commander_bypass(self, ouverte: bool) -> None:
         """Vanne TOR bypass : régulation gelée jusqu'à la fin de course
         (fc_bypass_ouvert / fc_bypass_ferme), chien de garde sur le temps
         de course."""
+        self._bypass_commande = ouverte
         self.es.ecrire_vanne_bypass(ouverte)
         self._demarrer_manoeuvre(
             motif="manœuvre bypass " + ("(ouverture)" if ouverte
@@ -332,45 +415,63 @@ class Pilote:
             fc_attendue="fc_bypass_ouvert" if ouverte else "fc_bypass_ferme",
             t_course=self.t_vanne_bypass)
 
-    def commander_diaphragme(self, position: str) -> None:
-        """Vanne 3 voies vers "iso" (0°), "miller" (90°) ou "fermee" (180°).
+    def suspendre_maintien_tor(self) -> None:
+        """Relâche le maintien des ordres TOR. Les séquences d'apprentissage
+        manœuvrent les vannes directement pour chronométrer leurs courses ;
+        sans cette suspension, la réaffirmation faite à chaque cycle les
+        ramènerait aussitôt en place.
 
-        L'actionneur s'arrête automatiquement à 90° dans les deux sens :
-        un trajet 0° ↔ 180° demande une seconde impulsion relais, déclenchée
-        par la boucle à la détection de l'arrêt intermédiaire (fc_relance).
-        Régulation gelée jusqu'à la fin de course cible (chien de garde)."""
-        mesures = self.etat.get("mesures_brutes") or {}
-        fc_iso = self._fc_par_diaphragme["iso"]
-        fc_miller = self._fc_par_diaphragme["miller"]
-        fc_cible = {"iso": fc_iso, "miller": fc_miller,
-                    "fermee": "fc_3voies_180"}[position]
-        if mesures.get(fc_cible):              # déjà en position
-            self.etat["diaphragme"] = position
-            return
-        if position == "miller":
-            # depuis 180° on remonte (impulsion vers ISO), sinon on descend
-            vers_iso = bool(mesures.get("fc_3voies_180"))
-            relance = None
-        else:
-            vers_iso = (position == "iso")
-            # extrême → extrême : arrêt auto à 90°, puis 2e impulsion
-            relance = None if mesures.get(fc_miller) else fc_miller
-        self.es.ecrire_vanne_diaphragme(vers_iso)
+        C'est un état explicite et non la simple mise à None des ordres : la
+        relecture de position remet sinon le maintien en route au cycle
+        suivant, et la boucle se remettrait à contrarier la séquence."""
+        self._maintien_tor_suspendu = True
+        self._diaphragme_commande = None
+        self._bypass_commande = None
+
+    def reprendre_maintien_tor(self) -> None:
+        """Rend la main à la boucle. Le maintien de la vanne 3 voies se
+        rétablit au cycle suivant la relecture de position, que
+        l'apprentissage force en sortie de séquence."""
+        self._maintien_tor_suspendu = False
+
+    def commander_diaphragme(self, position: str) -> None:
+        """Vanne 3 voies vers "iso" ou "miller". La carte GF3 rejoint
+        directement la butée demandée depuis n'importe quelle position :
+        ordre F (borne 3) pour 0°, ordre I (borne 4) pour 90°.
+
+        L'ordre est mémorisé et réaffirmé à chaque cycle, y compris quand la
+        vanne est déjà en place — c'est lui qui alimente l'actionneur, donc sa
+        résistance anti-condensation. Régulation gelée jusqu'à la butée
+        (chien de garde)."""
+        angle = self._angle_par_diaphragme.get(position)
+        if angle is None:
+            raise ValueError(f"position de vanne 3 voies inconnue : {position}")
+        self._diaphragme_commande = angle
+        self.es.ecrire_vanne_diaphragme(angle == "0")
         self.etat["diaphragme"] = position
+        mesures = self.etat.get("mesures_brutes") or {}
+        if self._angle_vanne_3voies(mesures) == angle:
+            return                              # déjà en position
         self._demarrer_manoeuvre(
             motif=f"vanne 3 voies → {position}",
-            fc_attendue=fc_cible, t_course=self.t_vanne_3voies,
-            fc_relance=relance, vers_iso=vers_iso)
+            t_course=self.t_vanne_3voies, angle_attendu=angle)
 
-    def _demarrer_manoeuvre(self, motif: str, fc_attendue: str,
-                            t_course: float, fc_relance: str | None = None,
-                            vers_iso: bool | None = None) -> None:
+    @staticmethod
+    def _angle_vanne_3voies(mesures: dict) -> str | None:
+        """Butée occupée par la vanne 3 voies : "0", "90", "180", ou None si la
+        lecture est inexploitable. Les trois contacts forment un codage
+        un-parmi-trois : zéro ou plusieurs actifs = rupture de fil, commun 24 V
+        absent, ou vanne en cours de course."""
+        actifs = [angle for angle, cle in FC_3VOIES.items() if mesures.get(cle)]
+        return actifs[0] if len(actifs) == 1 else None
+
+    def _demarrer_manoeuvre(self, motif: str, t_course: float,
+                            fc_attendue: str | None = None,
+                            angle_attendu: str | None = None) -> None:
         self._manoeuvre = {
             "motif": motif,
-            "fc_attendue": fc_attendue,
-            "fc_relance": fc_relance,       # arrêt intermédiaire à relancer
-            "vers_iso": vers_iso,
-            "t_relance": None,
+            "fc_attendue": fc_attendue,      # vannes TOR : une fin de course
+            "angle_attendu": angle_attendu,  # vanne 3 voies : une butée
             "t_debut": time.monotonic(),
             "t_max": time.monotonic() + t_course * self.facteur_chien_garde,
         }
@@ -385,6 +486,8 @@ class Pilote:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=3.0)
+        if self.journal is not None:
+            self.journal.fermer()
         self.es.fermer()
         # persistance des grandeurs apprises pour les sessions suivantes
         # (mêmes clés que la relecture du __init__ : gain, table, u_min)
@@ -443,15 +546,63 @@ class Pilote:
         self.etat["mesures_brutes"] = dict(mesures)
         self.etat["cycles"] = self.etat.get("cycles", 0) + 1
 
+        # ---- vraisemblance de la PT100 -------------------------------------
+        # Hors bornes = sonde coupée ou module saturé. rho et mu en dépendent,
+        # donc le Re : sans ce test le PI poursuit une mesure fantaisiste et
+        # emmène le ventilateur en butée sans lever le moindre défaut.
+        if self.t_min_c <= T <= self.t_max_c:
+            self._cycles_t_invalide = 0
+            self._derniere_T_valide = T
+        else:
+            self._cycles_t_invalide += 1
+            persistant = self._cycles_t_invalide > max(3, int(2.0 / self.periode))
+            if not persistant and self._derniere_T_valide is not None:
+                # transitoire : tenir la dernière valeur valide plutôt que de
+                # propager l'aberration. La température de l'air varie
+                # lentement, la figer quelques secondes est sans conséquence ;
+                # en face, un T sous le zéro absolu fait rendre des grandeurs
+                # COMPLEXES aux équations de diaphragme (puissance 1,5 d'un
+                # nombre négatif), donc une exception au lieu d'un diagnostic.
+                T = self._derniere_T_valide
+                mesures["temperature"] = T
+                self.etat["mesures_brutes"] = dict(mesures)
+            else:
+                self.es.ecrire_variateur(0.0)
+                self.es.ecrire_variateur_run(False)
+                self._run_actif = False
+                with self._verrou:
+                    self.regulation_active = False
+                self.etat.update({
+                    "defaut_capteur": f"température invraisemblable ({T:.1f} °C, "
+                                      f"attendu {self.t_min_c:.0f} à "
+                                      f"{self.t_max_c:.0f} °C) — PT100 coupée "
+                                      "ou module saturé ; vérifier la sonde "
+                                      "puis relancer",
+                    "regulation": False, "u_variateur": 0.0,
+                    "convergee": False,
+                })
+                return
+
         # au premier cycle : position réelle de la vanne 3 voies lue sur les
         # fins de course (ne pas supposer la position au démarrage)
         if not self._position_initiale_lue:
-            for diaph_nom, fc in self._fc_par_diaphragme.items():
-                if mesures.get(fc):
-                    self.etat["diaphragme"] = diaph_nom
-            if mesures.get("fc_3voies_180"):
-                self.etat["diaphragme"] = "fermee"
+            angle = self._angle_vanne_3voies(mesures)
+            if angle in self._diaphragme_par_angle:
+                self.etat["diaphragme"] = self._diaphragme_par_angle[angle]
+                # reprendre l'ordre correspondant : sans lui l'actionneur
+                # resterait hors tension, donc sans anti-condensation
+                if not self._maintien_tor_suspendu:
+                    self._diaphragme_commande = angle
             self._position_initiale_lue = True
+
+        # réaffirmation des ordres TOR maintenus. io_banc/wago.py déduplique
+        # et ne réémet qu'au changement ou périodiquement ; c'est ce qui permet
+        # à un coupleur redémarré de retrouver l'état des relais.
+        if not self._maintien_tor_suspendu:
+            if self._diaphragme_commande is not None:
+                self.es.ecrire_vanne_diaphragme(self._diaphragme_commande == "0")
+            if self._bypass_commande is not None:
+                self.es.ecrire_vanne_bypass(self._bypass_commande)
 
         p_amont = mesures.get("p_amont_500", 0.0)
         # Chaque diaphragme a son propre capteur physique câblé sur ses prises
@@ -581,23 +732,17 @@ class Pilote:
         # défaut vanne si la fin de course n'arrive pas à temps.
         if self._manoeuvre is not None:
             m = self._manoeuvre
-            fc_atteinte = bool(mesures.get(m["fc_attendue"], False))
-            if fc_atteinte:
+            if m["angle_attendu"] is not None:
+                atteinte = (self._angle_vanne_3voies(mesures)
+                            == m["angle_attendu"])
+            else:
+                atteinte = bool(mesures.get(m["fc_attendue"], False))
+            if atteinte:
                 if self._t_fin_gel == 0.0:
                     self._t_fin_gel = maintenant + self.marge_manoeuvre
                 if maintenant >= self._t_fin_gel:
                     self._manoeuvre = None
                     self._t_fin_gel = 0.0
-            elif m.get("fc_relance") and mesures.get(m["fc_relance"]):
-                # arrêt intermédiaire à 90° : 2e impulsion relais après une
-                # courte pause, chien de garde réarmé pour la 2e demi-course
-                if m["t_relance"] is None:
-                    m["t_relance"] = maintenant + 0.5
-                elif maintenant >= m["t_relance"]:
-                    self.es.ecrire_vanne_diaphragme(m["vers_iso"])
-                    m["fc_relance"] = None
-                    m["t_max"] = maintenant \
-                        + self.t_vanne_3voies * self.facteur_chien_garde
             elif maintenant > m["t_max"]:
                 # DÉFAUT VANNE : fin de course jamais atteinte -> repli sûr
                 # (variateur 0 V ET ordre RUN retiré, comme sur défaut variateur)
@@ -606,9 +751,9 @@ class Pilote:
                 self._run_actif = False
                 with self._verrou:
                     self.regulation_active = False
+                cible = m["fc_attendue"] or f"butée {m['angle_attendu']}°"
                 self.etat.update({
-                    "defaut_vanne": f"{m['motif']} : fin de course "
-                                    f"{m['fc_attendue']} non atteinte "
+                    "defaut_vanne": f"{m['motif']} : {cible} non atteinte "
                                     f"(vanne bloquée ou câblage)",
                     "manoeuvre": None, "regulation": False,
                     "u_variateur": 0.0, "convergee": False,
@@ -621,18 +766,19 @@ class Pilote:
                     "temperature": T, "p_amont": p_amont, "dp": dp,
                     "manoeuvre": m["motif"],
                     "manoeuvre_restant_s": max(m["t_max"] - maintenant, 0.0),
-                    "fc_attendue": m["fc_attendue"],
+                    "fc_attendue": m["fc_attendue"] or m["angle_attendu"],
                     "convergee": False, "regulation": regul, "manuel": manuel,
                 })
                 return
         self.etat["manoeuvre"] = None
 
         # ---- cohérence position vanne 3 voies / diaphragme attendu ---------
-        # Hors manœuvre, la fin de course du diaphragme actif doit être
-        # présente. Sinon : mapping erroné, vanne déplacée à la main, ou
-        # défaut de fin de course.
-        fc_attendue = self._fc_par_diaphragme.get(diaph)   # None si "fermee"
-        if fc_attendue and fc_attendue in mesures and not mesures[fc_attendue]:
+        # Hors manœuvre, la butée lue doit être celle du diaphragme actif.
+        # Sinon : lecture invalide (rupture de fil, commun 24 V absent), vanne
+        # restée à 180° après une manœuvre manuelle, ou plomberie croisée.
+        angle_lu = self._angle_vanne_3voies(mesures)
+        angle_attendu = self._angle_par_diaphragme.get(diaph)
+        if FC_3VOIES["0"] in mesures and angle_lu != angle_attendu:
             self._cycles_incoherence += 1
         else:
             self._cycles_incoherence = 0
@@ -649,9 +795,10 @@ class Pilote:
             with self._verrou:
                 self.regulation_active = False
             self.etat.update({
-                "defaut_vanne": "position vanne 3 voies incohérente avec le "
-                                "diaphragme actif (fin de course absente) — "
-                                "vérifier la vanne puis relancer",
+                "defaut_vanne": "position vanne 3 voies inexploitable ou "
+                                "incohérente avec le diaphragme actif "
+                                f"(butée lue : {angle_lu or 'aucune'}) — "
+                                "vérifier la vanne et son câblage, puis relancer",
                 "regulation": False, "u_variateur": 0.0, "convergee": False,
             })
             return
@@ -675,21 +822,19 @@ class Pilote:
             else resultat["re_conduite"]
 
         # apprentissage du gain statique du banc (filtré), pour le
-        # pré-positionnement des prochaines consignes. Suspendu tant que le
-        # variateur n'a pas atteint sa fréquence de consigne (sortie
-        # multifonction 'fréquence atteinte' du 3G3MV, si câblée).
-        # Suspendu aussi en stratégie bas-Re / bypass ouvert : le Re y dépend
-        # de la vanne PdC et du bypass, pas seulement de la tension -> le
-        # rapport Re/volt n'est plus le gain du banc.
+        # pré-positionnement des prochaines consignes. Suspendu en stratégie
+        # bas-Re / bypass ouvert : le Re y dépend de la vanne PdC et du
+        # bypass, pas seulement de la tension -> le rapport Re/volt n'est
+        # plus le gain du banc.
         u_courant = self.etat.get("u_variateur", 0.0)
-        freq_ok = mesures.get("frequence_atteinte", True)
         re_cond = resultat["re_conduite"]
-        # garde-fou : n'apprendre que sur un régime établi. Sans la DI
-        # 'fréquence atteinte' (freq_ok défaut True), le Re en montée fausserait
-        # le gain ; on exige que le Re ait peu bougé depuis le cycle précédent.
+        # garde-fou : n'apprendre que sur un régime établi. Le 3G3MV ne
+        # remonte pas d'information 'fréquence atteinte' (P1/P2 non câblées,
+        # cf. plan de câblage) ; on exige donc que le Re ait peu bougé depuis
+        # le cycle précédent, sans quoi une montée fausserait le gain.
         etabli = (self._re_conduite_prec is not None and re_cond > 0
                   and abs(re_cond - self._re_conduite_prec) < 0.01 * re_cond)
-        if (freq_ok and etabli and u_courant > 0.3 and re_cond > 200
+        if (etabli and u_courant > 0.3 and re_cond > 200
                 and not self._mode_bas_re
                 and not mesures.get("fc_bypass_ouvert")):
             g = re_cond / u_courant
@@ -713,11 +858,12 @@ class Pilote:
         # ---- ordre RUN du variateur (3G3MV : S1, n003=1) --------------------
         # RUN dès qu'une tension > 0 doit être appliquée ; arrêt sinon.
         run_voulu = (manuel and u_manu > 0.05) or (regul and re_cible > 0)
-        if run_voulu != self._run_actif:
-            self.es.ecrire_variateur_run(run_voulu)
-            self._run_actif = run_voulu
+        self.es.ecrire_variateur_run(run_voulu)
+        self._run_actif = run_voulu
 
-        # défaut variateur remonté par le relais MA/MB (si câblé)
+        # défaut variateur remonté par le contact NF MB du 3G3MV. L'entrée est
+        # déclarée "inverse" en config : un fil coupé se lit donc comme un
+        # défaut, et non comme une absence de défaut.
         if mesures.get("defaut_variateur"):
             self.es.ecrire_variateur(0.0)
             self.es.ecrire_variateur_run(False)
@@ -732,6 +878,27 @@ class Pilote:
             })
             return
         self.etat["defaut_variateur"] = None
+
+        # ---- capteur ΔP saturé : ramener la commande au mesurable -------
+        # Au-delà de la pleine échelle du capteur, le Re mesuré plafonne alors
+        # que le banc peut encore accélérer : l'erreur ne se résorbe jamais et
+        # le PI pousse le ventilateur en butée pour rien. Geler la commande à
+        # sa valeur du moment ne suffit pas — le pré-positionnement
+        # feed-forward d'une consigne hors plage l'a déjà mise à 10 V. On la
+        # fait donc RECULER tant que la saturation dure, puis on maintient :
+        # le banc se stabilise juste sous la pleine échelle, au maximum
+        # réellement mesurable.
+        #
+        # Le plafond est latché jusqu'à la consigne suivante (definir_consigne
+        # ou redémarrage) : le relâcher dès la sortie de saturation ferait
+        # repartir le PI vers la butée, donc un cycle limite.
+        dp_sature = self._cycles_dp_sature >= max(3, int(1.0 / self.periode))
+        if regul and dp_sature:
+            depart = self._plafond_u_sature if self._plafond_u_sature is not None                 else max(self.etat.get("u_variateur", 0.0), 0.0)
+            self._plafond_u_sature = max(
+                depart - self.recul_saturation * self.periode, 0.0)
+        if self._plafond_u_sature is not None:
+            self.pi.u_max = self._plafond_u_sature
 
         # ---- décision stratégie bas-Re (mode automatique) ------------------
         # Seuil effectif : valeur de config si fixée, sinon dérivé de la
@@ -763,6 +930,17 @@ class Pilote:
             elif not besoin_bas_re and bypass_ouvert \
                     and self._manoeuvre is None:
                 self.commander_bypass(False)
+            # en régime normal la vanne PdC doit être grande ouverte. Si elle
+            # ne l'est pas (coupleur redémarré, sortie de bas-Re), on gèle la
+            # régulation le temps de la course : 25 s de circuit étranglé sous
+            # PI donneraient une montée faussée et un gain appris erroné.
+            if not besoin_bas_re and "fc_pdc_ouvert" in mesures \
+                    and not mesures["fc_pdc_ouvert"] and self._manoeuvre is None:
+                self.commander_vanne_perte_charge(10.0)
+                self._demarrer_manoeuvre(
+                    motif="ouverture vanne perte de charge",
+                    t_course=self.t_vanne_pdc_course,
+                    fc_attendue="fc_pdc_ouvert")
             self._mode_bas_re = besoin_bas_re
 
             if besoin_bas_re and not bypass_ouvert:
@@ -795,6 +973,8 @@ class Pilote:
                 # calés par _preparer_pi), répartie en split-range
                 cmd = self.pi.calculer(consigne_pi, re_mesure)  # 0..10 (V équiv.)
                 u, pdc_v = self._split_range(cmd, besoin_bas_re)
+            if self._plafond_u_sature is not None:
+                u = min(u, self._plafond_u_sature)
             self.es.ecrire_variateur(u)
             self.commander_vanne_perte_charge(pdc_v)
         else:
@@ -802,14 +982,50 @@ class Pilote:
             self.es.ecrire_variateur(u)
             self._mode_bas_re = False
 
-        dans_bande = regul and re_cible > 0 and \
-            abs(re_mesure - re_cible) / re_cible < self.tolerance
-        # anti-battement : le bruit de mesure est du même ordre que la
-        # tolérance -> convergence affichée après ~2 s consécutives en bande
-        self._cycles_convergee = self._cycles_convergee + 1 if dans_bande else 0
-        convergee = self._cycles_convergee >= max(3, int(2.0 / self.periode))
+        # ---- convergence jugée sur la MOYENNE, pas sur l'échantillon ----
+        # Le bruit des capteurs ΔP est du même ordre que la tolérance : exiger
+        # N échantillons consécutifs dans la bande fait retomber le voyant
+        # dès qu'un seul en sort, alors que le débit ne bouge pas. On moyenne
+        # sur une fenêtre et on publie la dispersion, qui est l'information
+        # dont l'opérateur a besoin pour chiffrer l'incertitude de ses relevés.
+        if regul and re_cible > 0:
+            self._historique_re.append(re_mesure)
+        else:
+            self._historique_re.clear()
+
+        fenetre_pleine = len(self._historique_re) == self._historique_re.maxlen
+        re_moyen = fmean(self._historique_re) if self._historique_re else None
+        re_sigma = pstdev(self._historique_re) \
+            if len(self._historique_re) > 1 else None
+
+        convergee = bool(
+            regul and re_cible > 0 and fenetre_pleine
+            and abs(re_moyen - re_cible) / re_cible < self.tolerance)
+        if convergee:
+            if self._convergee_depuis is None:
+                self._convergee_depuis = maintenant
+        else:
+            self._convergee_depuis = None
+
+        # motif d'indisponibilité de la stratégie bas-Re : sans la séquence
+        # freq_min, u_min n'est pas connu, le seuil vaut 0 et la stratégie ne
+        # s'engage jamais. Silencieux jusqu'ici : le bypass ne s'ouvrait pas
+        # sans que rien n'explique pourquoi.
+        bas_re_motif = None
+        if self.bas_re_actif and not seuil:
+            bas_re_motif = ("seuil bas-Re inconnu : lancer l'apprentissage "
+                            "« freq_min » (ou fixer strategie_bas_re.seuil_re)")
 
         self.etat.update({
+            "re_moyen": re_moyen,
+            "re_ecart_type": re_sigma,
+            "re_ecart_type_relatif": (re_sigma / re_moyen)
+                                     if re_sigma and re_moyen else None,
+            "convergee_depuis_s": (maintenant - self._convergee_depuis)
+                                  if self._convergee_depuis else None,
+            "fenetre_convergence_s": self.fenetre_convergence,
+            "bas_re_motif": bas_re_motif,
+            "plafond_u_sature": self._plafond_u_sature,
             "temperature": T, "p_amont": p_amont, "dp": dp,
             "qm": resultat["qm"], "qv": resultat.get("qv", 0.0),
             "re_conduite": resultat["re_conduite"],
@@ -822,8 +1038,19 @@ class Pilote:
             "pdc_consigne": self._pdc_consigne,
             "mode_bas_re": self._mode_bas_re,
             "seuil_bas_re_effectif": round(seuil) if seuil else None,
-            "dp_sature": self._cycles_dp_sature >= max(3, int(1.0 / self.periode)),
+            "dp_sature": dp_sature,
         })
+
+        # ---- journal des conditions d'essai --------------------------------
+        # écrit depuis le thread du pilote, après publication de l'état ; le
+        # module se désarme tout seul en cas d'erreur disque (voir journal.py)
+        if self.journal is not None and self.journal.ouvert:
+            self.journal.enregistrer(self.etat, maintenant)
+        if self.journal is not None:
+            self.etat["journal"] = str(self.journal.chemin) \
+                if self.journal.chemin else None
+            self.etat["journal_lignes"] = self.journal.lignes
+            self.etat["journal_erreur"] = self.journal.erreur
 
     def _seuil_bas_re(self) -> float:
         """Re en dessous duquel on bascule en stratégie bas-Re (bypass +
@@ -952,17 +1179,17 @@ class Pilote:
         """
         cmd = min(max(cmd, 0.0), 10.0)
         if not bas_re:
-            return cmd, 0.0                # variateur seul, vanne grande ouverte (0 V)
+            return cmd, 10.0               # variateur seul, vanne grande ouverte (10 V)
 
         u_min = self.u_min_ventilateur or 1.0
         sp = self.split_point
-        # Rappel convention : 0 V = ouvert, 10 V = fermé.
-        # segment bas (cmd ≤ sp) : variateur à u_min, PdC de fermée (10V) à ouverte (0V)
-        # segment haut (cmd > sp) : PdC grande ouverte (0V), variateur monte depuis u_min
+        # Rappel convention (carte P6, sens usine) : 0 V = fermé, 10 V = ouvert.
+        # segment bas (cmd ≤ sp) : variateur à u_min, PdC de fermée (0V) à ouverte (10V)
+        # segment haut (cmd > sp) : PdC grande ouverte (10V), variateur monte depuis u_min
         if cmd <= sp:
             u = u_min
-            pdc_v = 10.0 * (1.0 - cmd / sp)         # cmd=0 → 10V (fermé), cmd=sp → 0V (ouvert)
+            pdc_v = 10.0 * cmd / sp                 # cmd=0 → 0V (fermé), cmd=sp → 10V (ouvert)
         else:
-            pdc_v = 0.0                              # grande ouverte (0 V)
+            pdc_v = 10.0                             # grande ouverte (10 V)
             u = u_min + (cmd - sp) / (10.0 - sp) * (10.0 - u_min)
         return u, pdc_v

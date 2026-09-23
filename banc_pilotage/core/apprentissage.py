@@ -62,6 +62,9 @@ class Apprentissage:
         self._annule.set()
 
     def _executer(self, cible, params) -> None:
+        # les séquences manœuvrent les vannes en direct (es.*) pour mesurer
+        # leurs temps de course : la boucle ne doit pas réaffirmer ses ordres
+        self.pilote.suspendre_maintien_tor()
         try:
             cible(**params)
         except Exception as exc:
@@ -78,6 +81,7 @@ class Apprentissage:
             # on force la boucle à relire la position réelle sur les fins de
             # course au prochain cycle, pour ne pas réguler sur le mauvais capteur.
             self.pilote._position_initiale_lue = False
+            self.pilote.reprendre_maintien_tor()
             self.etat["en_cours"] = False
             self.etat["test"] = None
 
@@ -112,9 +116,9 @@ class Apprentissage:
                                      "fc_bypass_ferme", "fermeture bypass")
         if t is None:
             return False
-        self.pilote.commander_vanne_perte_charge_pct(0.0)   # 0 % = 0 V = ouverte
+        self.pilote.commander_vanne_perte_charge_pct(100.0)  # 100 % = 10 V = ouverte
         ok = self._attendre_pdc_extreme(
-            0.0, 90.0, "ouverture vanne perte de charge")
+            10.0, 90.0, "ouverture vanne perte de charge")
         return ok is not None
 
     # ------------------------------------------------- utilitaire recopie PdC
@@ -151,116 +155,58 @@ class Apprentissage:
                            timeout, f"course {sens}")
         return t
 
-    def _avancer_vanne_3voies(self, vers_iso: bool, fc_cible: str,
-                              label: str, timeout: float = 60.0) -> float | None:
-        """Conduit la vanne 3 voies vers fc_cible en gérant l'arrêt intermédiaire
-        automatique à 90° (Miller). Si la vanne part d'une extrémité (0° ou 180°)
-        et la cible est l'autre extrémité, deux impulsions relais sont nécessaires
-        (arrêt automatique à 90° entre les deux). Retourne la durée totale ou None.
-        """
-        es = self.pilote.es
-        fc_miller = self.pilote._fc_par_diaphragme["miller"]   # fc_3voies_90
-        t0 = time.monotonic()
-
-        # Déjà à la cible ?
-        if bool(self._brutes().get(fc_cible)):
+    def _avancer_vanne_3voies(self, vers_0deg: bool, label: str,
+                              timeout: float = 60.0) -> float | None:
+        """Conduit la vanne 3 voies vers une butée et chronomètre. La carte GF3
+        rejoint directement la position demandée, sans impulsion de relance :
+        l'ordre F mène à 0°, l'ordre I à 90°. Retourne la durée, ou None."""
+        angle = "0" if vers_0deg else "90"
+        if self.pilote._angle_vanne_3voies(self._brutes()) == angle:
             return 0.0
-
-        # Départ depuis la position intermédiaire (90°) : aller directement
-        starting_at_miller = bool(self._brutes().get(fc_miller))
-
-        for pulse in range(2):
-            restant = timeout - (time.monotonic() - t0)
-            if restant <= 0.0:
-                break
-
-            es.ecrire_vanne_diaphragme(vers_iso)
-
-            if starting_at_miller or pulse == 1:
-                # Depuis 90° ou 2e impulsion : attendre uniquement la cible
-                condition = lambda: bool(self._brutes().get(fc_cible))
-            else:
-                # 1re impulsion depuis une extrémité : peut s'arrêter à Miller
-                condition = lambda: (bool(self._brutes().get(fc_cible))
-                                     or bool(self._brutes().get(fc_miller)))
-
-            ok = self._attendre(condition, restant, label)
-            if ok is None:
-                return None
-
-            if bool(self._brutes().get(fc_cible)):
-                return time.monotonic() - t0
-
-            # Arrêt intermédiaire à Miller — courte pause avant 2e impulsion
-            time.sleep(0.3)
-            starting_at_miller = False
-
-        self.etat["statut"] = f"{label} : cible non atteinte"
-        return None
+        t0 = time.monotonic()
+        self.pilote.es.ecrire_vanne_diaphragme(vers_0deg)
+        ok = self._attendre(
+            lambda: self.pilote._angle_vanne_3voies(self._brutes()) == angle,
+            timeout, label)
+        return None if ok is None else time.monotonic() - t0
 
     def _test_vanne_3voies(self) -> None:
-        """Chrono en 4 temps depuis FC1 (fermeture complète, 180°).
-        L'actionneur 3 positions s'arrête automatiquement à 90° (Miller) dans
-        les deux sens : T1 et T2 (course complète) nécessitent 2 impulsions relais ;
-        T3 et T4 (demi-course) n'en nécessitent qu'une.
+        """Chrono des deux courses utiles de la vanne 3 voies. La position 180°
+        n'est pas commandée (borne O non câblée), il ne reste donc que le
+        va-et-vient entre les deux butées de travail :
 
-          T1 : FC1(180°) → FC2(ISO,0°)     — course complète, 2 impulsions
-          T2 : FC2(ISO,0°) → FC1(180°)     — course complète, 2 impulsions
-          T3 : FC1(180°) → FC3(Miller,90°) — demi-course, 1 impulsion
-          T4 : FC3(Miller,90°) → FC1(180°) — demi-course, 1 impulsion
+          T1 : 0° → 90°
+          T2 : 90° → 0°
+
+        Attendu sur un ER20 standard : environ 11 s dans chaque sens.
         """
-        fc_iso    = self.pilote._fc_par_diaphragme["iso"]    # fc_3voies_0
-        fc_miller = self.pilote._fc_par_diaphragme["miller"] # fc_3voies_90
-        fc_ferme  = "fc_3voies_180"
         res = {}
 
-        # Pré-positionnement à FC1 (180°, fermeture complète)
-        t = self._avancer_vanne_3voies(False, fc_ferme, "pré-pos fermeture complète")
+        # Pré-positionnement sur la butée 0°
+        t = self._avancer_vanne_3voies(True, "pré-pos butée 0°")
         if t is None:
             return
         time.sleep(0.5)
 
-        # T1 : FC1(180°) → FC2(ISO, 0°) — arrêt intermédiaire à 90° géré en interne
-        t = self._avancer_vanne_3voies(True, fc_iso, "T1 fermeture → ISO")
+        t = self._avancer_vanne_3voies(False, "T1 : 0° → 90°")
         if t is None:
             return
-        res["T1_fc1_to_iso_s"] = round(t, 2)
+        res["T1_0_vers_90_s"] = round(t, 2)
         time.sleep(0.5)
 
-        # T2 : FC2(0°) → FC1(180°) — arrêt intermédiaire à 90° géré en interne
-        t = self._avancer_vanne_3voies(False, fc_ferme, "T2 ISO → fermeture")
+        t = self._avancer_vanne_3voies(True, "T2 : 90° → 0°")
         if t is None:
             return
-        res["T2_iso_to_fc1_s"] = round(t, 2)
-        time.sleep(0.5)
-
-        # T3 : FC1(180°) → FC3(Miller, 90°) — demi-course, arrêt automatique à 90°
-        t = self._chronometrer_vanne(lambda: self.pilote.es.ecrire_vanne_diaphragme(True),
-                                     fc_miller, "T3 fermeture → Miller")
-        if t is None:
-            return
-        res["T3_fc1_to_miller_s"] = round(t, 2)
-        time.sleep(0.5)
-
-        # T4 : FC3(90°) → FC1(180°) — demi-course directe depuis Miller
-        t = self._chronometrer_vanne(lambda: self.pilote.es.ecrire_vanne_diaphragme(False),
-                                     fc_ferme, "T4 Miller → fermeture")
-        if t is None:
-            return
-        res["T4_miller_to_fc1_s"] = round(t, 2)
+        res["T2_90_vers_0_s"] = round(t, 2)
 
         res["max_s"] = max(res.values())
-
-        # Repositionnement en ISO pour la reprise normale
-        self._avancer_vanne_3voies(True, fc_iso, "retour ISO")
-        self.pilote.etat["diaphragme"] = "iso"
+        self.pilote.etat["diaphragme"] = \
+            self.pilote._diaphragme_par_angle["0"]
 
         self.resultats["vanne_3voies"] = res
         self.etat["statut"] = (
-            f"terminé : T1={res['T1_fc1_to_iso_s']} s  "
-            f"T2={res['T2_iso_to_fc1_s']} s  "
-            f"T3={res['T3_fc1_to_miller_s']} s  "
-            f"T4={res['T4_miller_to_fc1_s']} s")
+            f"terminé : T1={res['T1_0_vers_90_s']} s  "
+            f"T2={res['T2_90_vers_0_s']} s")
 
     def _test_vanne_bypass(self) -> None:
         es = self.pilote.es
@@ -296,7 +242,8 @@ class Apprentissage:
 
     def _test_calibration_pdc(self) -> None:
         """Mesure la recopie analogique aux deux butées physiques via les FC.
-        0 V → fc_pdc_ouvert → v_ouvert ; 10 V → fc_pdc_ferme → v_ferme."""
+        Sens usine de la carte P6 : 0 V → fc_pdc_ferme, 10 V → fc_pdc_ouvert.
+        Un échec ici est le symptôme d'une carte réglée en sens inverse."""
         dt = self.pilote.periode
         n = max(4, int(2.0 / dt))   # 2 s de mesure après déclenchement FC
 
@@ -315,11 +262,11 @@ class Apprentissage:
                 n * dt * 2 + 1.0, label + " mesure")
             return round(statistics.fmean(serie), 3) if serie else None
 
-        v_ouvert = _mesure_butee(0.0, "fc_pdc_ouvert", "butée ouverture (0 V)")
-        if v_ouvert is None:
-            return
-        v_ferme = _mesure_butee(10.0, "fc_pdc_ferme", "butée fermeture (10 V)")
+        v_ferme = _mesure_butee(0.0, "fc_pdc_ferme", "butée fermeture (0 V)")
         if v_ferme is None:
+            return
+        v_ouvert = _mesure_butee(10.0, "fc_pdc_ouvert", "butée ouverture (10 V)")
+        if v_ouvert is None:
             return
 
         plage = abs(v_ferme - v_ouvert)
@@ -329,51 +276,52 @@ class Apprentissage:
             return
 
         self.resultats["calibration_pdc"] = {
-            "v_min_recopie": v_ouvert,
-            "v_max_recopie": v_ferme,
+            "v_min_recopie": v_ferme,
+            "v_max_recopie": v_ouvert,
             "plage_v": round(plage, 3),
         }
-        self.pilote.pdc_recopie_min = v_ouvert
-        self.pilote.pdc_recopie_max = v_ferme
+        self.pilote.pdc_recopie_min = v_ferme
+        self.pilote.pdc_recopie_max = v_ouvert
         self.etat["statut"] = (
-            f"terminé : ouvert = {v_ouvert} V, fermé = {v_ferme} V "
+            f"terminé : fermé = {v_ferme} V, ouvert = {v_ouvert} V "
             f"(plage {plage:.3f} V)")
 
     def _test_vanne_pdc(self) -> None:
         """Chrono de la vanne perte de charge via ses deux fins de course.
-          Pré-pos : fermeture complète (fc_pdc_ferme).
+          Pré-pos : fermeture complète (0 V).
           T1 : fc_pdc_ferme → fc_pdc_ouvert  (ouverture_s)
           T2 : fc_pdc_ouvert → fc_pdc_ferme  (fermeture_s)
+        Attendu sur un ER20 POSI : environ 25 s dans chaque sens.
         """
         res = {}
 
-        # Pré-positionnement en fermeture complète (10 V = fermé)
-        self.pilote.commander_vanne_perte_charge(10.0)
+        # Pré-positionnement en fermeture complète (0 V = fermé)
+        self.pilote.commander_vanne_perte_charge(0.0)
         t = self._attendre(lambda: bool(self._brutes().get("fc_pdc_ferme")),
                            90.0, "pré-pos fermeture PdC")
         if t is None:
             return
-        self.pilote._pdc_position_estimee = 10.0
+        self.pilote._pdc_position_estimee = 0.0
         time.sleep(0.5)
 
-        # T1 : fermeture → ouverture complète (0 V = ouvert)
-        self.pilote.commander_vanne_perte_charge(0.0)
+        # T1 : fermeture → ouverture complète (10 V = ouvert)
+        self.pilote.commander_vanne_perte_charge(10.0)
         t = self._attendre(lambda: bool(self._brutes().get("fc_pdc_ouvert")),
                            90.0, "T1 fermeture → ouverture")
         if t is None:
             return
         res["ouverture_s"] = round(t, 2)
-        self.pilote._pdc_position_estimee = 0.0
+        self.pilote._pdc_position_estimee = 10.0
         time.sleep(0.5)
 
-        # T2 : ouverture → fermeture complète (10 V = fermé)
-        self.pilote.commander_vanne_perte_charge(10.0)
+        # T2 : ouverture → fermeture complète (0 V = fermé)
+        self.pilote.commander_vanne_perte_charge(0.0)
         t = self._attendre(lambda: bool(self._brutes().get("fc_pdc_ferme")),
                            90.0, "T2 ouverture → fermeture")
         if t is None:
             return
         res["fermeture_s"] = round(t, 2)
-        self.pilote._pdc_position_estimee = 10.0
+        self.pilote._pdc_position_estimee = 0.0
 
         res["max_s"] = max(res.values())
         self.resultats["vanne_pdc"] = res
@@ -473,25 +421,21 @@ class Apprentissage:
 
         # 2) vanne PdC : recopie suivie dans les deux sens
         #    (état final : grande ouverte = circuit de mesure normal)
-        self.pilote.commander_vanne_perte_charge(10.0)
-        ok = self._attendre_pdc_extreme(10.0, 90.0, "câblage PdC (fermeture)")
-        rapport["pdc_fermeture"] = ok is not None
         self.pilote.commander_vanne_perte_charge(0.0)
-        ok = self._attendre_pdc_extreme(0.0, 90.0, "câblage PdC (ouverture)")
+        ok = self._attendre_pdc_extreme(0.0, 90.0, "câblage PdC (fermeture)")
+        rapport["pdc_fermeture"] = ok is not None
+        self.pilote.commander_vanne_perte_charge(10.0)
+        ok = self._attendre_pdc_extreme(10.0, 90.0, "câblage PdC (ouverture)")
         rapport["pdc_ouverture"] = ok is not None
         if self._annule.is_set():
             return
 
         # 3) vanne 3 voies : les trois fins de course sont atteignables
         #    (fin du parcours : position ISO supposée, prête pour le point 4)
-        fc_iso = self.pilote._fc_par_diaphragme["iso"]
-        fc_miller = self.pilote._fc_par_diaphragme["miller"]
-        for vers_iso, fc, nom in ((False, "fc_3voies_180", "180°"),
-                                  (True, fc_miller, "90°"),
-                                  (True, fc_iso, "0°")):
-            t = self._avancer_vanne_3voies(vers_iso, fc,
+        for vers_0deg, nom in ((False, "90°"), (True, "0°")):
+            t = self._avancer_vanne_3voies(vers_0deg,
                                            f"câblage 3 voies ({nom})")
-            rapport[f"v3_{fc}"] = t is not None
+            rapport[f"v3_{nom}"] = t is not None
             if self._annule.is_set():
                 return
 
@@ -511,16 +455,16 @@ class Apprentissage:
 
         # 5) identification ISO/Miller par le capteur ΔP qui répond
         mapping = None
-        if rapport["variateur_repond"] and rapport.get(f"v3_{fc_iso}") \
-                and rapport.get(f"v3_{fc_miller}"):
+        if rapport["variateur_repond"] and rapport.get("v3_0°") \
+                and rapport.get("v3_90°"):
             if self._annule.wait(3.0):                 # établissement du flux
                 self.etat["statut"] = "annulé"
                 return
-            m1 = self._dp_moyens(4.0, "identification : position ISO supposée")
+            m1 = self._dp_moyens(4.0, "identification : butée 0°")
             if m1 is None:
                 return
-            t = self._avancer_vanne_3voies(False, fc_miller,
-                                           "identification : vers Miller supposé")
+            t = self._avancer_vanne_3voies(False,
+                                           "identification : vers butée 90°")
             if self._annule.is_set():
                 return
             if t is None:
@@ -531,8 +475,7 @@ class Apprentissage:
                 if self._annule.wait(2.0):
                     self.etat["statut"] = "annulé"
                     return
-                m2 = self._dp_moyens(
-                    4.0, "identification : position Miller supposée")
+                m2 = self._dp_moyens(4.0, "identification : butée 90°")
                 if m2 is None:
                     return
                 d1 = self._capteur_dominant(*m1)
@@ -544,20 +487,18 @@ class Apprentissage:
                 else:
                     mapping = "indetermine"
                 rapport["mapping_iso_miller"] = mapping
-                rapport["dp_position_iso"] = [round(m1[0], 1),
-                                              round(m1[1], 1)]
-                rapport["dp_position_miller"] = [round(m2[0], 1),
-                                                 round(m2[1], 1)]
+                rapport["dp_butee_0deg"] = [round(m1[0], 1), round(m1[1], 1)]
+                rapport["dp_butee_90deg"] = [round(m2[0], 1), round(m2[1], 1)]
         self.pilote.mode_manuel_tension(0.0)
 
         rapport["mapping_inverse"] = mapping == "inverse"
         defauts = [k for k, v in rapport.items()
                    if v is False and k != "mapping_inverse"]
         if mapping == "inverse":
-            resume = ("MAPPING ISO/MILLER INVERSÉ — la position dite ISO fait "
-                      "réagir le capteur Miller et inversement (vanne 3 voies "
-                      "ou capteurs intervertis) ; « Appliquer » corrige "
-                      "positions_vanne_3voies")
+            resume = ("MAPPING ISO/MILLER INVERSÉ — la butée 0° fait réagir le "
+                      "capteur Miller et la butée 90° le capteur ISO "
+                      "(plomberie croisée ou capteurs intervertis) ; "
+                      "« Appliquer » corrige positions_vanne_3voies")
         elif defauts:
             resume = "défauts : " + ", ".join(defauts)
         elif mapping == "indetermine":
@@ -839,11 +780,12 @@ class Apprentissage:
         if self.resultats.get("verif_cablage", {}).get("mapping_inverse"):
             pos = self.cfg.setdefault("modbus", {}).setdefault(
                 "positions_vanne_3voies", {})
-            pos["fc_iso"], pos["fc_miller"] = (
-                pos.get("fc_miller", "fc_3voies_90"),
-                pos.get("fc_iso", "fc_3voies_0"))
-            self.pilote._fc_par_diaphragme = {"iso": pos["fc_iso"],
-                                              "miller": pos["fc_miller"]}
+            pos["diaphragme_a_0deg"], pos["diaphragme_a_90deg"] = (
+                pos.get("diaphragme_a_90deg", "miller"),
+                pos.get("diaphragme_a_0deg", "iso"))
+            d0, d90 = pos["diaphragme_a_0deg"], pos["diaphragme_a_90deg"]
+            self.pilote._diaphragme_par_angle = {"0": d0, "90": d90}
+            self.pilote._angle_par_diaphragme = {d0: "0", d90: "90"}
             # la position réelle sera relue sur les fins de course
             self.pilote._position_initiale_lue = False
             lignes.append("mapping vanne 3 voies ISO/Miller interverti")
@@ -854,8 +796,8 @@ class Apprentissage:
             self.pilote.pdc_recopie_min = r["v_min_recopie"]
             self.pilote.pdc_recopie_max = r["v_max_recopie"]
             lignes.append(
-                f"PdC recopie : ouvert = {r['v_min_recopie']} V, "
-                f"fermé = {r['v_max_recopie']} V")
+                f"PdC recopie : fermé = {r['v_min_recopie']} V, "
+                f"ouvert = {r['v_max_recopie']} V")
         if "vanne_3voies" in self.resultats:
             v = round(self.resultats["vanne_3voies"]["max_s"] * 1.1, 1)
             act["vanne_3voies_temps_s"] = v

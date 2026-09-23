@@ -49,61 +49,53 @@ class _VanneTOR:
 
 
 class _Vanne3Voies:
-    """Actionneur 3 positions (0°=ISO, 90°=Miller, 180°=fermeture) avec arrêt
-    intermédiaire automatique à 90° dans les deux sens de commande.
-    Passer de 0°→180° ou 180°→0° nécessite 2 impulsions relais successives.
-    t_demi_course_s : temps de 0°→90° (ou 90°→180°).
+    """Actionneur 3 positions équipé de la carte GF3 : l'ordre amène la vanne
+    directement à la butée demandée, depuis n'importe quelle position — la
+    carte gère elle-même le sens grâce à ses deux fins de course
+    intermédiaires (FCIO / FCIF). Seules 0° et 90° sont commandées ; 180°
+    n'est atteignable qu'à la main, via le débrayage.
+
+    t_90deg_s : temps de course pour 90° (ER20 standard : 11 s).
+
+    Les trois propriétés fc_* reproduisent ce que le coupleur publie APRÈS
+    l'inversion déclarée en config pour FC3 : exactement une vraie à l'arrêt
+    sur une butée, aucune pendant la course.
     """
 
-    def __init__(self, t_demi_course_s: float, angle_initial: float = 0.0):
-        self._vitesse = 90.0 / max(t_demi_course_s, 0.1)   # °/s
+    def __init__(self, t_90deg_s: float, angle_initial: float = 0.0):
+        self._vitesse = 90.0 / max(t_90deg_s, 0.1)   # °/s
         self._angle = float(angle_initial)
-        self._direction = 0.0   # -1 = vers 0° (ISO), +1 = vers 180° (fermeture)
+        self._cible = float(angle_initial)
         self._t_prec = time.monotonic()
 
-    def commander(self, vers_iso: bool) -> None:
-        self._direction = -1.0 if vers_iso else +1.0
+    def commander(self, vers_0deg: bool) -> None:
+        self._cible = 0.0 if vers_0deg else 90.0
 
     def actualiser(self) -> None:
         t = time.monotonic()
         dt = t - self._t_prec
         self._t_prec = t
-        if self._direction == 0.0:
+        ecart = self._cible - self._angle
+        if abs(ecart) < 1e-9:
             return
-        old = self._angle
-        self._angle += self._direction * self._vitesse * dt
-        # Butées extrêmes
-        if self._angle <= 0.0:
-            self._angle = 0.0
-            self._direction = 0.0
-            return
-        if self._angle >= 180.0:
-            self._angle = 180.0
-            self._direction = 0.0
-            return
-        # Arrêt intermédiaire automatique à 90° (dans les deux sens)
-        if self._direction < 0 and old > 90.0 and self._angle <= 90.0:
-            self._angle = 90.0
-            self._direction = 0.0
-        elif self._direction > 0 and old < 90.0 and self._angle >= 90.0:
-            self._angle = 90.0
-            self._direction = 0.0
+        pas = min(abs(ecart), self._vitesse * dt)
+        self._angle += pas if ecart > 0 else -pas
 
     @property
     def en_course(self) -> bool:
-        return self._direction != 0.0
+        return abs(self._cible - self._angle) > 1e-9
 
     @property
     def fc_0(self) -> bool:
-        return self._angle < 1.0 and not self.en_course
+        return self._angle < 1.0
 
     @property
     def fc_90(self) -> bool:
-        return abs(self._angle - 90.0) < 1.0 and not self.en_course
+        return abs(self._angle - 90.0) < 1.0
 
     @property
     def fc_180(self) -> bool:
-        return self._angle > 179.0 and not self.en_course
+        return self._angle > 179.0
 
 
 class SimulateurBanc(EntreesSorties):
@@ -127,8 +119,8 @@ class SimulateurBanc(EntreesSorties):
         # vanne 3 voies : 3 positions (0°=ISO, 90°=Miller, 180°=fermeture)
         # t_course_3voies_s = demi-course (0°→90° ou 90°→180°)
         self._v3 = _Vanne3Voies(
-            t_demi_course_s=cfg_simu.get("t_course_3voies_s", 5.5),
-            angle_initial=0.0,   # départ ISO
+            t_90deg_s=cfg_simu.get("t_course_3voies_s", 11.0),
+            angle_initial=0.0,   # départ sur la butée 0°
         )
         # bypass : True = ouvert
         self._bypass = _VanneTOR(cfg_simu.get("t_course_bypass_s", 11.0),
@@ -139,8 +131,8 @@ class SimulateurBanc(EntreesSorties):
         self._pdc_position = 0.0
         self._pdc_t_prec = time.monotonic()
         # fractions de débit atteignant la veine (modèle de la PdC en série et
-        # du by-pass). PdC : 0 V = ouverte (pleine passe), 10 V = fermée
-        # (étranglée). Défauts choisis pour que le régime bas-Re soit pilotable.
+        # du by-pass). PdC (carte P6, sens usine) : 0 V = fermée (étranglée),
+        # 10 V = ouverte. Défauts choisis pour que le régime bas-Re soit pilotable.
         self.bypass_frac  = cfg_simu.get("bypass_frac_veine", 0.35)  # by-pass ouvert, PdC ouverte
         self.pdc_frac_min = cfg_simu.get("pdc_frac_min", 0.08)       # by-pass ouvert, PdC fermée
         self.pdc_serie_min = cfg_simu.get("pdc_serie_min", 0.05)     # by-pass fermé, PdC fermée
@@ -153,8 +145,8 @@ class SimulateurBanc(EntreesSorties):
     def ecrire_variateur_run(self, marche: bool) -> None:
         self._run = marche
 
-    def ecrire_vanne_diaphragme(self, vers_iso: bool) -> None:
-        self._v3.commander(vers_iso)   # True=vers 0°(ISO), False=vers 180°(fermeture)
+    def ecrire_vanne_diaphragme(self, vers_0deg: bool) -> None:
+        self._v3.commander(vers_0deg)   # True = butée 0°, False = butée 90°
 
     def ecrire_vanne_bypass(self, ouverte: bool) -> None:
         self._bypass.commander(ouverte)
@@ -186,9 +178,9 @@ class SimulateurBanc(EntreesSorties):
             qv_fan *= 0.25 * max(0.0, 1.0 + random.gauss(0.0, 0.6))
         # fraction atteignant la veine : la PdC (en série) l'étrangle en se
         # fermant, le by-pass (en parallèle) en dérive une part quand il est
-        # ouvert. PdC ouverte (0 V) -> ouv=1 -> pleine passe (régime normal
-        # inchangé) ; PdC fermée (10 V) -> ouv=0 -> débit mini.
-        ouv = 1.0 - min(max(self._pdc_position / 10.0, 0.0), 1.0)
+        # ouvert. PdC ouverte (10 V) -> ouv=1 -> pleine passe ; PdC fermée
+        # (0 V) -> ouv=0 -> débit mini.
+        ouv = min(max(self._pdc_position / 10.0, 0.0), 1.0)
         if self._bypass.position and not self._bypass.en_course:
             frac = self.pdc_frac_min + (self.bypass_frac - self.pdc_frac_min) * ouv
         else:
@@ -209,13 +201,15 @@ class SimulateurBanc(EntreesSorties):
         rho = self.banc.fluide.rho(p1_abs, T)
         qm = self._qv * rho
 
-        # diaphragme actif selon la position de la vanne 3 voies
+        # diaphragme actif selon la position de la vanne 3 voies. Le
+        # simulateur applique la correspondance par défaut de config.json
+        # (0° = ISO, 90° = Miller) ; une plomberie croisée ne se teste qu'au banc.
         if self._v3.fc_0:
             diaph = "iso"
         elif self._v3.fc_90:
             diaph = "miller"
         else:
-            diaph = "iso"      # en transit ou à 180° : flux indéterminé
+            diaph = "iso"      # en transit : flux indéterminé
         dp_actif = self.banc.dP_attendu(diaph, qm, T, self.p_amont_eff)
         if self._v3.en_course or self._v3.fc_180:
             dp_actif *= max(0.0, 1.0 + random.gauss(0.0, 0.5))  # flux indéterminé
@@ -239,12 +233,12 @@ class SimulateurBanc(EntreesSorties):
             "fc_3voies_180": self._v3.fc_180,
             "fc_bypass_ouvert": (not bp_en_course) and self._bypass.position,
             "fc_bypass_ferme": (not bp_en_course) and not self._bypass.position,
-            "fc_pdc_ouvert": self._pdc_position < 0.3,   # 0 V = ouvert
-            "fc_pdc_ferme": self._pdc_position > 9.7,    # 10 V = fermé
+            "fc_pdc_ouvert": self._pdc_position > 9.7,   # 10 V = grande ouverte
+            "fc_pdc_ferme": self._pdc_position < 0.3,    # 0 V = fermée
             "defaut_variateur": self.defaut_variateur,
-            "frequence_atteinte": self._run and abs(
-                self._qv - self.gain_qv * self._u_variateur)
-                < 0.03 * max(self.gain_qv * self._u_variateur, 1e-9),
+            "defaut_act_bypass": False,
+            "defaut_act_pdc": False,
+            "defaut_act_3voies": False,
             "frequence_variateur": (self._u_variateur if self._run else 0.0)
                                    + random.gauss(0.0, 0.02),
         }

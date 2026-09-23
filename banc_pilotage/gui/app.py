@@ -140,7 +140,7 @@ QPushButton#nav-btn {{
 QPushButton#nav-btn:hover {{ color:rgba(255,255,255,.85); }}
 QPushButton#nav-btn-active {{
     background:{COLORS['accent']}; border:none; border-radius:6px;
-    color:#FFFFFF; font-size:13px; font-weight:700;
+    color:{COLORS['text']}; font-size:13px; font-weight:700;
     padding:0 14px; min-width:0;
 }}
 
@@ -371,21 +371,37 @@ _ACTUATORS = [
 class Application(QMainWindow):
 
     ENTREES_ANALOGIQUES = [
-        ("dp_diaph_500",       "ΔP diaphragme (0-10 V / 0-500 Pa)",  "Pa",  "{:.2f}"),
-        ("p_amont_500",        "P amont (0-10 V / 0-500 Pa)",         "Pa",  "{:.2f}"),
-        ("dp_iso_500",         "ΔP diaphragme ISO — 500 Pa",          "Pa",  "{:.2f}"),
-        ("temperature",        "Température PT100",                    "°C",  "{:.2f}"),
         ("pdc_recopie",        "Recopie vanne perte de charge",        "V",   "{:.2f}"),
+        ("dp_iso_500",         "ΔP diaphragme ISO (0-10 V / 0-500 Pa)", "Pa",  "{:.2f}"),
+        ("dp_diaph_500",       "ΔP diaphragme Miller (0-10 V / 0-500 Pa)", "Pa", "{:.2f}"),
+        ("p_amont_500",        "P amont (0-10 V / 0-500 Pa)",          "Pa",  "{:.2f}"),
         ("frequence_variateur","Moniteur fréquence variateur (AM)",    "V",   "{:.2f}"),
+        ("temperature",        "Température PT100",                     "°C",  "{:.2f}"),
     ]
     FINS_DE_COURSE = [
-        ("fc_3voies_0",       "Vanne 3 voies — 0°   (voie 1 : ISO)"),
-        ("fc_3voies_90",      "Vanne 3 voies — 90°  (voie 2 : Miller)"),
-        ("fc_3voies_180",     "Vanne 3 voies — 180°"),
+        ("fc_3voies_0",       "Vanne 3 voies — butée 0°"),
+        ("fc_3voies_90",      "Vanne 3 voies — butée 90°"),
+        ("fc_3voies_180",     "Vanne 3 voies — butée 180° (hors usage)"),
         ("fc_bypass_ouvert",  "Bypass — ouvert"),
         ("fc_bypass_ferme",   "Bypass — fermé"),
-        ("defaut_variateur",  "Défaut variateur 3G3MV (MA/MB)"),
-        ("frequence_atteinte","Variateur — fréquence atteinte (P1/P2)"),
+        ("fc_pdc_ouvert",     "Perte de charge — ouverte"),
+        ("fc_pdc_ferme",      "Perte de charge — fermée"),
+        ("defaut_variateur",  "Défaut variateur 3G3MV (contact MB)"),
+        ("defaut_act_bypass", "Défaut actionneur — bypass"),
+        ("defaut_act_pdc",    "Défaut actionneur — perte de charge"),
+        ("defaut_act_3voies", "Défaut actionneur — 3 voies"),
+    ]
+    # alertes journalisées sur front montant (clé d'état -> libellé)
+    ALERTES = [
+        ("erreur_com",        "⚠ Communication"),
+        ("defaut_capteur",    "⚠ Défaut capteur"),
+        ("defaut_vanne",      "⚠ Défaut vanne"),
+        ("defaut_variateur",  "⚠ Défaut variateur"),
+        ("defaut_pdc",        "⚠ Défaut PdC"),
+        ("incoherence_vanne", "⚠ Vanne 3 voies incohérente"),
+        ("dp_sature",         "⚠ ΔP saturé — Re au-delà de la plage "
+                              "mesurable du capteur"),
+        ("bas_re_motif",      "ℹ Stratégie bas-Re indisponible"),
     ]
 
     def __init__(self, pilote: Pilote, mode: str, cfg: dict, chemin_cfg: Path):
@@ -400,6 +416,7 @@ class Application(QMainWindow):
         self._mode = "asservi"   # "manuel" | "asservi" | "sequence"
         self._ref_re = "conduite"   # référence de la consigne Re : conduite | veine
         self._recording = False
+        self._alertes_actives: set[str] = set()
         self._dirty: dict[str, bool] = {
             "re": False, "vman": False, "pdc": False,
         }
@@ -782,6 +799,15 @@ class Application(QMainWindow):
         re_u.setAlignment(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft)
         rcvl.addWidget(re_u)
         rcl.addWidget(rcv)
+
+        # dispersion et durée du palier : l'opérateur part mesurer sur le banc,
+        # il lui faut de quoi chiffrer l'incertitude du point, pas seulement
+        # un voyant binaire
+        self._lbl_re_sub = QLabel("")
+        self._lbl_re_sub.setStyleSheet(
+            "font-family:'IBM Plex Mono',monospace; font-size:10.5px;"
+            f" color:{COLORS['muted2']}; background:transparent;")
+        rcl.addWidget(self._lbl_re_sub)
         vl.addWidget(re_card)
 
         # Mode segmenté (Manuel | Asservi | Séquence)
@@ -846,7 +872,7 @@ class Application(QMainWindow):
         pdc_block = self._ctrl_slider_block(
             label="Vanne Perte de charge",
             dirty_key="pdc",
-            unit_lbl="%",
+            unit_lbl="% ouv.",
             slider_min=0, slider_max=100,
             default_slider=50,
             inp_width=56,
@@ -878,12 +904,10 @@ class Application(QMainWindow):
         dhl.addWidget(self._dot_diaph)
         dhl.addStretch()
         dvl.addWidget(dh)
-        diaph_seg, self._diaph_btns = self._seg(["Fermée", "ISO", "Miller"])
+        diaph_seg, self._diaph_btns = self._seg(["ISO", "Miller"])
         self._diaph_btns[0].clicked.connect(
-            lambda: self._cmd_diaph("fermee"))
-        self._diaph_btns[1].clicked.connect(
             lambda: self._cmd_diaph("iso"))
-        self._diaph_btns[2].clicked.connect(
+        self._diaph_btns[1].clicked.connect(
             lambda: self._cmd_diaph("miller"))
         dvl.addWidget(diaph_seg)
         vl.addWidget(diaph_outer)
@@ -1103,6 +1127,11 @@ class Application(QMainWindow):
         hl.addWidget(self._foot_samples)
 
         hl.addStretch()
+
+        self._foot_journal = QLabel()
+        self._foot_journal.setObjectName("foot-item")
+        self._foot_journal.setVisible(False)
+        hl.addWidget(self._foot_journal)
 
         self._foot_rec = QLabel()
         self._foot_rec.setObjectName("foot-item")
@@ -1706,6 +1735,13 @@ class Application(QMainWindow):
 
         self.champs: dict[tuple, tuple] = {}
 
+        # valeurs d'usine non calibrées (config.json : "A AJUSTER") — tant que
+        # le champ garde cette valeur, on suppose qu'il n'a pas été mesuré
+        VALEURS_A_AJUSTER = {
+            ("veine", "section_m2"): 0.04,
+            ("veine", "longueur_caracteristique_m"): 0.2,
+        }
+
         def _grp(titre: str, rows: list[tuple], col: int, row: int) -> None:
             """Groupe en carte : (chemin_tuple, libelle, unite, valeur_fmt, validation|None)."""
             card = QWidget()
@@ -1742,6 +1778,16 @@ class Application(QMainWindow):
                 ll = QLabel(libelle)
                 ll.setStyleSheet("font-size:12.5px; color:#3A4D60; background:transparent; border:none;")
                 rwl.addWidget(ll)
+                defaut = VALEURS_A_AJUSTER.get(chemin)
+                if defaut is not None and isinstance(raw, float) and abs(raw - defaut) < 1e-9:
+                    lw = QLabel("à ajuster")
+                    lw.setToolTip(
+                        "Valeur d'usine, non mesurée sur le banc réel — "
+                        "à renseigner avant un essai en référence Re veine.")
+                    lw.setStyleSheet(
+                        f"font-size:10px; font-weight:700; color:{COLORS['warn']};"
+                        " background:transparent; border:none;")
+                    rwl.addWidget(lw)
                 rwl.addStretch()
                 if validation is not None:
                     # champ éditable
@@ -1848,7 +1894,7 @@ class Application(QMainWindow):
             pdc_pct = round(max(0.0, min(pdc_v_courant * 10.0, 100.0)))
             self._slider_pdc.setValue(pdc_pct)
             self._inp_pdc.setText(str(pdc_pct))
-            self._lbl_pdc_v.setText(f"≙ {pdc_v_courant:.1f} V (0–10 V)")
+            self._lbl_pdc_v.setText(f"≙ {pdc_v_courant:.1f} V — 0 V = fermée")
         elif mode == "asservi":
             self.pilote.mode_asservi()
         elif mode == "sequence":
@@ -1918,7 +1964,7 @@ class Application(QMainWindow):
 
     def _quitter(self) -> None:
         self.pilote.arreter_regulation()
-        self.pilote.commander_vanne_perte_charge(0.0)    # PdC ouverte (0 V = ouverture complète)
+        self.pilote.commander_vanne_perte_charge(10.0)   # PdC grande ouverte (10 V)
         self.pilote.commander_bypass(False)              # bypass fermé
         self.pilote.commander_diaphragme("iso")          # diaphragme ISO
         self.close()
@@ -1954,13 +2000,13 @@ class Application(QMainWindow):
 
     def _on_pdc_slider(self, v: int) -> None:
         self._inp_pdc.setText(str(v))
-        self._lbl_pdc_v.setText(f"≙ {v / 10:.1f} V (0–10 V)")
+        self._lbl_pdc_v.setText(f"≙ {v / 10:.1f} V — 0 V = fermée")
         self._mark_dirty("pdc")
 
     def _on_pdc_input(self, text: str) -> None:
         try:
             v = float(text.replace(",", "."))
-            self._lbl_pdc_v.setText(f"≙ {v / 10:.1f} V (0–10 V)")
+            self._lbl_pdc_v.setText(f"≙ {v / 10:.1f} V — 0 V = fermée")
         except ValueError:
             pass
         self._mark_dirty("pdc")
@@ -2145,7 +2191,7 @@ class Application(QMainWindow):
                                             f"{u:.2f} V".replace(".", ","))
 
         d = e.get("diaphragme", "")
-        d_txt = {"iso": "ISO", "miller": "Miller", "fermee": "Fermée"}.get(d, "—")
+        d_txt = {"iso": "ISO", "miller": "Miller"}.get(d, "—")
         self._act_vals["vanne3"].setText(d_txt)
         self._act_dots["vanne3"].setStyleSheet(
             f"color:{'#FF9900' if d in ('iso','miller') else '#DBE5EA'};"
@@ -2184,6 +2230,27 @@ class Application(QMainWindow):
     def _tick_right(self, e: dict) -> None:
         re = e.get("re_mesure")
         self._lbl_re_big.setText(f"{re:.0f}" if re is not None else "—")
+
+        # « ± 28  (0,5 %)  ·  60 s » : dispersion du Re sur la fenêtre de
+        # convergence et durée du palier courant
+        moyen = e.get("re_moyen")
+        sigma = e.get("re_ecart_type")
+        sigma_rel = e.get("re_ecart_type_relatif")
+        depuis = e.get("convergee_depuis_s")
+        morceaux = []
+        if moyen is not None:
+            # le grand chiffre est la mesure instantanée ; la dispersion ne
+            # veut rien dire sans la valeur à laquelle elle se rapporte
+            morceaux.append(f"moy. {moyen:.0f}")
+        if sigma is not None:
+            txt_s = f"± {sigma:.0f}"
+            if sigma_rel is not None:
+                txt_s += f" ({sigma_rel * 100:.1f} %)".replace(".", ",")
+            morceaux.append(txt_s)
+        if depuis is not None:
+            morceaux.append(f"{depuis:.0f} s" if depuis < 120
+                            else f"{depuis / 60:.0f} min")
+        self._lbl_re_sub.setText("  ·  ".join(morceaux))
 
         # State badge
         if e.get("manoeuvre"):
@@ -2228,7 +2295,7 @@ class Application(QMainWindow):
 
         # Diaphragme segmenté
         d = e.get("diaphragme", "")
-        dmap = {"iso": 1, "miller": 2, "fermee": 0}
+        dmap = {"iso": 0, "miller": 1}
         self._seg_set(self._diaph_btns, dmap.get(d, -1))
 
         # Bypass segmenté
@@ -2252,21 +2319,21 @@ class Application(QMainWindow):
                 dot_lbl.setStyleSheet("color:#DBE5EA; font-size:9px; background:transparent;")
                 msg_lbl.setText("")
 
-        # Alertes dans le log
-        for key, msg in [
-            ("erreur_com",       "⚠ Communication"),
-            ("defaut_vanne",     "⚠ Défaut vanne"),
-            ("defaut_variateur", "⚠ Défaut variateur"),
-            ("defaut_pdc",       "⚠ Défaut PdC"),
-            ("incoherence_vanne","⚠ Vanne 3 voies incohérente"),
-            ("dp_sature",        "⚠ ΔP saturé — Re au-delà de la plage "
-                                 "mesurable du capteur"),
-        ]:
-            if e.get(key) and not any(
-                    d.get("msg", "").startswith(msg[:6])
-                    for d in list(self._action_log)[:3]):
-                self._log(f"{msg}: {e[key]}" if isinstance(e[key], str) else msg,
+        # Alertes : journalisées sur FRONT MONTANT.
+        # L'ancienne déduplication comparait les 6 premiers caractères sur les
+        # 3 dernières lignes : « ⚠ Défa » étant commun aux défauts vanne,
+        # variateur et PdC, un défaut pouvait en masquer un autre — et un
+        # défaut persistant se re-journalisait sans fin dès qu'il sortait de
+        # la fenêtre de 3 lignes.
+        actives = {cle for cle, _ in self.ALERTES if e.get(cle)}
+        for cle, msg in self.ALERTES:
+            if cle in actives and cle not in self._alertes_actives:
+                self._log(f"{msg} : {e[cle]}" if isinstance(e[cle], str) else msg,
                           COLORS["error"])
+        for cle, msg in self.ALERTES:
+            if cle in self._alertes_actives and cle not in actives:
+                self._log(f"{msg} — rétabli", COLORS["ok"])
+        self._alertes_actives = actives
 
     def _tick_footer(self, e: dict) -> None:
         ok = not bool(e.get("erreur_com"))
@@ -2299,6 +2366,25 @@ class Application(QMainWindow):
                 cycle_txt += " ⚠"
         self._foot_samples.setText(
             f"Échantillons : {e.get('cycles', 0)}{cycle_txt}")
+
+        journal = e.get("journal")
+        erreur_j = e.get("journal_erreur")
+        if erreur_j:
+            self._foot_journal.setVisible(True)
+            self._foot_journal.setText(f"⚠ {erreur_j}")
+            self._foot_journal.setStyleSheet(
+                f"color:{COLORS['error']}; font-family:'IBM Plex Mono',"
+                "monospace; font-size:11px; background:transparent;")
+        elif journal:
+            from pathlib import Path as _P
+            self._foot_journal.setVisible(True)
+            self._foot_journal.setText(
+                f"⏺ {_P(journal).name} · {e.get('journal_lignes', 0)} l.")
+            self._foot_journal.setStyleSheet(
+                f"color:{COLORS['muted2']}; font-family:'IBM Plex Mono',"
+                "monospace; font-size:11px; background:transparent;")
+        else:
+            self._foot_journal.setVisible(False)
 
         if self._recording:
             self._foot_rec.setVisible(True)
