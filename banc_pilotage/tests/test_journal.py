@@ -7,6 +7,7 @@ de dire dans quelles conditions un point a été relevé et si elles ont tenu.
 """
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -151,34 +152,82 @@ class _StubES:
         pass
 
 
-def test_pilote_ouvre_et_ferme_le_journal(tmp_path):
-    """Une session de régulation = un fichier, ouvert au démarrage et fermé
-    à l'arrêt, avec le chemin publié dans l'état pour l'IHM."""
+def _pilote_journalisant(tmp_path, periode_journal=0.0):
     cfg = json.loads(json.dumps(CFG))
     cfg["journal"] = {"actif": True, "dossier": str(tmp_path),
-                      "periode_s": 0.0}
+                      "periode_s": periode_journal}
+    cfg["regulation"]["periode_s"] = 0.05           # essais rapides
     pilote = Pilote(Banc(cfg), _StubES(), cfg)
     pilote.bas_re_actif = False
+    return pilote
+
+
+def test_pilote_ouvre_et_ferme_le_journal(tmp_path):
+    """Une session de régulation = un fichier, ouvert au démarrage et fermé
+    à l'arrêt, avec le chemin publié dans l'état pour l'IHM.
+
+    Passe par la vraie boucle : le journal est écrit dans _boucle, pas dans
+    _cycle, précisément pour survivre aux sorties anticipées de celui-ci."""
+    pilote = _pilote_journalisant(tmp_path)
     pilote.definir_consigne(8000.0, "conduite")
     pilote.demarrer_regulation()
-    for _ in range(5):
-        pilote._cycle()
+    pilote.demarrer()
+    try:
+        time.sleep(0.6)
+        chemin = Path(pilote.etat["journal"])
+        assert chemin.exists()
+        assert pilote.etat["journal_lignes"] >= 5
+        assert pilote.etat["journal_erreur"] is None
 
-    chemin = Path(pilote.etat["journal"])
-    assert chemin.exists()
-    assert pilote.etat["journal_lignes"] >= 5
-    assert pilote.etat["journal_erreur"] is None
+        pilote.arreter_regulation()
+        assert not pilote.journal.ouvert
+        lignes = chemin.read_text(encoding="utf-8-sig").splitlines()
+        assert len(lignes) >= 6                      # en-tête + cycles
+        assert "Re mesure" in lignes[0]
 
-    pilote.arreter_regulation()
-    assert not pilote.journal.ouvert
-    lignes = chemin.read_text(encoding="utf-8-sig").splitlines()
-    assert len(lignes) >= 6                          # en-tête + cycles
-    assert "Re mesure" in lignes[0]
+        # une seconde session écrit un AUTRE fichier
+        pilote.demarrer_regulation()
+        time.sleep(0.3)
+        assert Path(pilote.etat["journal"]) != chemin
+    finally:
+        pilote.arreter()
 
-    # une seconde session écrit un AUTRE fichier
+
+def test_journal_enregistre_pendant_manoeuvre_et_sur_defaut(tmp_path):
+    """RÉGRESSION : le journal était écrit en fin de _cycle, donc après les
+    cinq sorties anticipées. Il se taisait pendant les manœuvres de vannes
+    et sur défaut — exactement les moments que l'opérateur cherchera au
+    dépouillement — et sa colonne « defauts » ne pouvait jamais se remplir."""
+    pilote = _pilote_journalisant(tmp_path)
+    es = pilote.es
+    pilote.definir_consigne(8000.0, "conduite")
     pilote.demarrer_regulation()
-    pilote._cycle()
-    assert Path(pilote.etat["journal"]) != chemin
+    pilote.demarrer()
+    try:
+        time.sleep(0.3)
+        # une manœuvre gèle la boucle et fait sortir _cycle par le haut
+        pilote._demarrer_manoeuvre("essai", t_course=1.0, angle_attendu="90")
+        n_avant = pilote.etat["journal_lignes"]
+        time.sleep(0.5)
+        assert pilote.etat["journal_lignes"] > n_avant,             "rien n'a été journalisé pendant la manœuvre"
+
+        # puis un défaut capteur, autre sortie anticipée. Le défaut n'est
+        # levé qu'après ~2 s de persistance (garde anti-transitoire), et le
+        # chien de garde de la manœuvre ci-dessus a lui aussi pu poser un
+        # défaut vanne : les deux sont des sorties anticipées de _cycle.
+        es.mesures["temperature"] = 3276.7
+        time.sleep(3.0)
+        chemin = Path(pilote.etat["journal"])
+        lignes = chemin.read_text(encoding="utf-8-sig").splitlines()
+        colonnes = lignes[0].split(";")
+        i_def = colonnes.index("defauts")
+        motifs = [l.split(";")[i_def] for l in lignes[1:]
+                  if l.split(";")[i_def]]
+        assert motifs, "la colonne « defauts » n'est jamais renseignée"
+        assert any("température" in m or "vanne" in m or "butée" in m
+                   for m in motifs), motifs[:3]
+    finally:
+        pilote.arreter()
 
 
 def test_journal_desactivable(tmp_path):

@@ -599,6 +599,12 @@ class Pilote:
                 # tout seul dès que la communication revient.
                 with self._verrou:
                     self.regulation_active = False
+                # l'état publié doit dire la vérité : le cycle ayant échoué
+                # avant sa mise à jour, l'IHM continuait d'afficher
+                # « RÉGULATION » et une tension d'avant la coupure, alors
+                # que le banc venait d'être arrêté et verrouillé.
+                self.etat.update({"regulation": False, "convergee": False,
+                                  "u_variateur": 0.0, "manoeuvre": None})
                 try:
                     self.es.ecrire_variateur(0.0)
                 except Exception:
@@ -608,6 +614,25 @@ class Pilote:
                     self._run_actif = False
                 except Exception:
                     pass
+            # ---- journal des conditions d'essai ------------------------
+            # Écrit ICI et non en fin de _cycle : le cycle a cinq sorties
+            # anticipées (manœuvre en cours, défaut capteur, défaut vanne,
+            # défaut variateur, incohérence de position) et une erreur
+            # Modbus le fait sortir par l'exception. Depuis _cycle, le
+            # journal se taisait donc exactement quand l'opérateur a besoin
+            # de savoir — pendant les manœuvres et sur défaut — et sa
+            # colonne « defauts » ne pouvait jamais se remplir.
+            if self.journal is not None:
+                if self.journal.ouvert:
+                    try:
+                        self.journal.enregistrer(self.etat, time.monotonic())
+                    except Exception:          # noqa: BLE001
+                        pass                   # jamais au détriment de la boucle
+                self.etat["journal"] = str(self.journal.chemin) \
+                    if self.journal.chemin else None
+                self.etat["journal_lignes"] = self.journal.lignes
+                self.etat["journal_erreur"] = self.journal.erreur
+
             # durée réelle du cycle publiée : un dépassement durable de la
             # période signale une communication lente (le dt du PI est fixe)
             duree = time.monotonic() - debut
@@ -1125,16 +1150,6 @@ class Pilote:
             "dp_sature": dp_sature,
         })
 
-        # ---- journal des conditions d'essai --------------------------------
-        # écrit depuis le thread du pilote, après publication de l'état ; le
-        # module se désarme tout seul en cas d'erreur disque (voir journal.py)
-        if self.journal is not None and self.journal.ouvert:
-            self.journal.enregistrer(self.etat, maintenant)
-        if self.journal is not None:
-            self.etat["journal"] = str(self.journal.chemin) \
-                if self.journal.chemin else None
-            self.etat["journal_lignes"] = self.journal.lignes
-            self.etat["journal_erreur"] = self.journal.erreur
 
     def _seuil_bas_re(self) -> float:
         """Re en dessous duquel on bascule en stratégie bas-Re (bypass +

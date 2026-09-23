@@ -35,6 +35,20 @@ class Apprentissage:
             return "Une séquence est déjà en cours."
         if self.pilote.etat.get("regulation"):
             return "Arrêtez la régulation avant de lancer un apprentissage."
+        # Le ventilateur peut tourner en mode manuel (commandes de l'IHM ou
+        # page de mise en service) sans que « regulation » soit vrai. Toute
+        # séquence part d'un état connu : sans cela verif_cablage voit un
+        # écoulement dès son premier instant et conclut « variateur répond »
+        # alors que la référence 0-10 V pourrait n'être pas raccordée, et
+        # zero_capteurs relèverait un zéro pollué par le débit résiduel.
+        # On interroge l'état AUTORITAIRE du pilote, pas etat["u_variateur"]
+        # qui n'est publié qu'au cycle suivant : enchaîner deux séquences
+        # ferait sinon refuser la seconde sur une valeur périmée.
+        if (self.pilote.mode_manuel and self.pilote.tension_manuelle > 0.05) \
+                or self.pilote._run_actif:
+            return ("Arrêtez le ventilateur avant de lancer un apprentissage "
+                    "(bouton ARRÊT VARIATEUR) : les séquences doivent partir "
+                    "d'un banc à l'arrêt.")
         cible = {"calibration_pdc": self._test_calibration_pdc,
                  "vanne_3voies": self._test_vanne_3voies,
                  "vanne_bypass": self._test_vanne_bypass,
@@ -96,7 +110,23 @@ class Apprentissage:
         t0 = time.monotonic()
         while time.monotonic() - t0 < timeout:
             if self._annule.is_set():
-                self.etat["statut"] = "annulé"
+                # ne pas écraser un motif d'abandon déjà posé (perte de
+                # communication), qui renseigne mieux que « annulé »
+                if not self.etat["statut"].startswith("communication perdue"):
+                    self.etat["statut"] = "annulé"
+                return None
+            # La boucle publie ses mesures dans pilote.etat ; sur erreur
+            # Modbus elle ne les met plus à jour et les séquences liraient
+            # des valeurs figées. Sans ce contrôle, une coupure en pleine
+            # course faisait attendre tout le chien de garde puis conclure
+            # « délai dépassé » — l'opérateur allait vérifier une vanne
+            # parfaitement saine. On abandonne la séquence entière : la
+            # poursuivre à l'aveugle donnerait des temps de course et des
+            # gains faux, qui seraient ensuite écrits en configuration.
+            err = self.pilote.etat.get("erreur_com")
+            if err:
+                self.etat["statut"] = f"communication perdue : {err}"
+                self._annule.set()
                 return None
             if condition():
                 return time.monotonic() - t0

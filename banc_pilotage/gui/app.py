@@ -8,6 +8,7 @@ footer 30px (blanc, IBM Plex Mono)
 
 from __future__ import annotations
 import json
+import math
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -418,6 +419,7 @@ class Application(QMainWindow):
         self._ref_re = "conduite"   # référence de la consigne Re : conduite | veine
         self._recording = False
         self._alertes_actives: set[str] = set()
+        self._sections_en_defaut: set[str] = set()
         self._dirty: dict[str, bool] = {
             "re": False, "vman": False, "pdc": False,
         }
@@ -2641,28 +2643,53 @@ class Application(QMainWindow):
 
     # ══════════════════════════════════════════════════════════ RAFRAÎCHISSEMENT
 
+    def _section(self, nom: str, fonction, *args) -> None:
+        """Rafraîchit une section d'affichage en l'isolant des autres.
+
+        Sans cela, une seule exception dans un formateur arrête le QTimer et
+        fige l'IHM ENTIÈRE — mesures, états de vannes et alertes de sécurité
+        comprises. C'est arrivé : une clé renommée côté cœur levait un
+        KeyError à chaque tick. Une section fautive doit dégrader son propre
+        panneau, pas emporter la supervision.
+
+        Le motif n'est journalisé qu'une fois par section : à 5 Hz, une
+        panne permanente noierait le journal d'action en quelques secondes.
+        """
+        try:
+            fonction(*args)
+        except Exception as exc:                 # noqa: BLE001
+            cle = f"{nom}:{type(exc).__name__}:{exc}"
+            if cle not in self._sections_en_defaut:
+                self._sections_en_defaut.add(cle)
+                self._log(f"Affichage « {nom} » indisponible : "
+                          f"{type(exc).__name__} {exc}", COLORS["error"])
+
     def _tick(self) -> None:
         e = self.pilote.etat
-        self._tick_left(e)
-        self._tick_right(e)
-        self._tick_footer(e)
-        self._tick_entrees(e)
-        self._tick_apprentissage()
-        self._tick_sequence(e)
-        try:
-            self._tick_mise_en_service(e)
-        except Exception as exc:                 # noqa: BLE001
-            # page de diagnostic : elle ne doit en aucun cas figer le QTimer,
-            # donc ni les mesures ni les alertes de securite
-            self._log(f"Mise en service : affichage indisponible ({exc})",
-                      COLORS["error"])
+        self._section("mesures", self._tick_left, e)
+        self._section("supervision", self._tick_right, e)
+        self._section("pied de page", self._tick_footer, e)
+        self._section("voies", self._tick_entrees, e)
+        self._section("apprentissage", self._tick_apprentissage)
+        self._section("séquence", self._tick_sequence, e)
+        self._section("mise en service", self._tick_mise_en_service, e)
+        self._section("courbe", self._historiser, e)
+
+    def _historiser(self, e: dict) -> None:
+        """Alimente la courbe. Isolé comme les autres sections : pyqtgraph
+        lève sur une valeur non finie ou non numérique, et cette exception
+        remontait jusqu'au QTimer."""
         re = e.get("re_mesure")
-        if re is not None:
-            if self._t0_acq is None:
-                self._t0_acq = datetime.now()
-            self._hist_re.append(re)
-            self._hist_cible.append(e.get("re_cible", 0.0))
-            self._tracer()
+        if not isinstance(re, (int, float)) or not math.isfinite(re):
+            return
+        cible = e.get("re_cible", 0.0)
+        if not isinstance(cible, (int, float)) or not math.isfinite(cible):
+            cible = 0.0
+        if self._t0_acq is None:
+            self._t0_acq = datetime.now()
+        self._hist_re.append(re)
+        self._hist_cible.append(cible)
+        self._tracer()
 
     def _tick_left(self, e: dict) -> None:
         brutes = e.get("mesures_brutes") or {}

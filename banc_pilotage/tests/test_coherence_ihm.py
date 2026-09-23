@@ -168,7 +168,7 @@ def test_page_mise_en_service_branchee():
     donnerait une page figée sans que rien ne le signale."""
     assert "_build_mise_en_service" in SRC_GUI
     assert "self._stack.addWidget(self._build_mise_en_service())" in SRC_GUI
-    assert "self._tick_mise_en_service(e)" in SRC_GUI
+    assert "self._tick_mise_en_service" in SRC_GUI
     assert "Mise en service" in SRC_GUI.split("_NAV_LABELS")[1][:200]
     # l'index teste dans le tick doit correspondre a la position d'empilement
     ordre = re.findall(r'self\._stack\.addWidget\(self\._build_(\w+)\(\)\)',
@@ -313,3 +313,25 @@ def test_fenetre_de_convergence_lue_par_reference_locale():
     assert "fenetre = self._historique_re" in corps
     assert "len(fenetre) == fenetre.maxlen" in corps
     assert "fmean(self._historique_re)" not in corps
+
+
+def test_chaque_section_daffichage_est_isolee():
+    """RÉGRESSION : les fonctions de rafraîchissement étaient appelées à la
+    file depuis _tick. Une seule exception arrêtait le QTimer et figeait
+    l'IHM entière — mesures, états de vannes et alertes de sécurité
+    comprises. C'est exactement ce qu'a produit le formateur désynchronisé
+    de la vanne 3 voies. Chacune doit désormais passer par _section()."""
+    deb = SRC_GUI.find("def _tick(self)")
+    fin = SRC_GUI.find("\n    def ", deb + 10)
+    corps = SRC_GUI[deb:fin]
+    appels_directs = re.findall(r'self\.(_tick_\w+)\(', corps)
+    assert not appels_directs, (
+        "appels non isolés depuis _tick : " + ", ".join(appels_directs))
+    assert corps.count("self._section(") >= 7, \
+        "toutes les sections doivent passer par _section()"
+    # et _section doit journaliser une fois, pas a chaque tick
+    d2 = SRC_GUI.find("def _section(")
+    f2 = SRC_GUI.find("\n    def ", d2 + 10)
+    sect = SRC_GUI[d2:f2]
+    assert "_sections_en_defaut" in sect
+    assert "self._log(" in sect

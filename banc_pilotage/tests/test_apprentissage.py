@@ -103,3 +103,35 @@ def test_capteur_dominant():
     assert Apprentissage._capteur_dominant(1.5, 30.0) == "miller"
     assert Apprentissage._capteur_dominant(1.0, 2.0) is None      # trop faible
     assert Apprentissage._capteur_dominant(20.0, 15.0) is None    # ambigu
+
+
+def test_sequence_refusee_si_le_ventilateur_tourne(tmp_path):
+    """RÉGRESSION : demarrer() ne refusait que si « regulation » était vrai.
+    Le ventilateur peut tourner en mode MANUEL — la page de mise en service
+    le rend facile. verif_cablage voyait alors un écoulement dès son premier
+    instant et concluait « variateur répond » même si la référence 0-10 V
+    n'était pas raccordée ; zero_capteurs aurait relevé un zéro pollué par
+    le débit résiduel, puis soustrait cet offset de toutes les mesures."""
+    app, pilote = _app(tmp_path)
+
+    # banc a l'arret : accepte
+    assert app.demarrer("zero_capteurs") is None
+    app.annuler()
+    app._thread.join(timeout=5.0)
+
+    # ventilateur en marche : refuse, avec le geste a faire
+    pilote.mode_manuel_tension(4.0)
+    err = app.demarrer("verif_cablage")
+    assert err is not None
+    assert "ventilateur" in err.lower()
+    assert app.etat["en_cours"] is False
+
+    # l'ordre RUN seul suffit a refuser, meme a tension nulle
+    pilote.arreter_regulation()
+    pilote._run_actif = True
+    assert app.demarrer("verif_cablage") is not None
+
+    pilote._run_actif = False
+    assert app.demarrer("zero_capteurs") is None
+    app.annuler()
+    app._thread.join(timeout=5.0)
