@@ -343,7 +343,8 @@ QComboBox QAbstractItemView {{
 """
 
 
-_NAV_LABELS = ["Graphique", "Voies", "Séquence", "Apprentissage", "Configuration"]
+_NAV_LABELS = ["Graphique", "Voies", "Séquence", "Apprentissage",
+               "Configuration", "Mise en service"]
 
 # (clé etat/brutes, nom affiché, max barre, format, couleur barre)
 # Les clés "dp_iso" et "dp_miller" sont résolues dans _tick_left via mesures_brutes
@@ -454,6 +455,7 @@ class Application(QMainWindow):
         self._stack.addWidget(self._build_sequence())   # 2
         self._stack.addWidget(self._build_apprentissage())  # 3
         self._stack.addWidget(self._build_configuration())  # 4
+        self._stack.addWidget(self._build_mise_en_service())  # 5
         bhl.addWidget(self._stack, 1)
 
         bhl.addWidget(self._build_right_rail())
@@ -1098,6 +1100,443 @@ class Application(QMainWindow):
         return outer
 
     # ══════════════════════════════════════════════════════════════ FOOTER
+
+
+    # ═══════════════════════════════════════════════════ MISE EN SERVICE
+
+    def _mes_carte(self, titre: str, sous_titre: str = "") -> tuple:
+        """Carte de la page de mise en service. Retourne (widget, layout)."""
+        carte = QWidget()
+        carte.setObjectName("cv-panel")
+        vl = QVBoxLayout(carte)
+        vl.setContentsMargins(16, 13, 16, 14)
+        vl.setSpacing(8)
+        t = QLabel(titre)
+        t.setStyleSheet(
+            "font-size:11px; font-weight:700; letter-spacing:.09em;"
+            f" color:{COLORS['text']}; background:transparent;")
+        vl.addWidget(t)
+        if sous_titre:
+            st = QLabel(sous_titre)
+            st.setWordWrap(True)
+            st.setStyleSheet(
+                f"font-size:11px; color:{COLORS['muted2']};"
+                " background:transparent;")
+            vl.addWidget(st)
+        return carte, vl
+
+    def _mes_bouton(self, libelle: str, slot) -> QPushButton:
+        b = QPushButton(libelle)
+        b.setMinimumHeight(34)
+        b.clicked.connect(slot)
+        self._mes_actionneurs.append(b)
+        return b
+
+    def _build_mise_en_service(self) -> QWidget:
+        """Diagnostic organe par organe, pour le cablage et apres un defaut.
+
+        Ne caracterise rien : les chronos, zeros et gains restent du ressort
+        de l'onglet Apprentissage. Ici on isole -- un organe, un bouton, une
+        reponse immediate. Tout ce qui se lit sans rien bouger est affiche en
+        permanence ; les commandes passent par les methodes publiques du
+        pilote (jamais d'ecriture directe es.*) et sont verrouillees tant que
+        la regulation tourne.
+        """
+        page = QWidget()
+        exte = QVBoxLayout(page)
+        exte.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        exte.addWidget(scroll)
+        hote = QWidget()
+        scroll.setWidget(hote)
+        vl = QVBoxLayout(hote)
+        vl.setContentsMargins(16, 16, 16, 24)
+        vl.setSpacing(12)
+
+        self._mes_actionneurs: list = []
+        self._mes_run_arme = False
+        self._mes_lbl: dict[str, QLabel] = {}
+
+        def val(cle: str, largeur: int = 0) -> QLabel:
+            l = QLabel("—")
+            l.setObjectName("mono")
+            if largeur:
+                l.setMinimumWidth(largeur)
+            self._mes_lbl[cle] = l
+            return l
+
+        # bandeau de verrouillage
+        self._mes_lbl_verrou = QLabel("")
+        self._mes_lbl_verrou.setWordWrap(True)
+        self._mes_lbl_verrou.setStyleSheet(
+            f"background:#FFF3E0; color:{COLORS['warn']};"
+            " font-size:11.5px; font-weight:600; padding:9px 13px;"
+            " border-radius:6px;")
+        self._mes_lbl_verrou.setVisible(False)
+        vl.addWidget(self._mes_lbl_verrou)
+
+        # ── 1. image process ──────────────────────────────────────────
+        c, cl = self._mes_carte(
+            "ADRESSAGE MODBUS",
+            "Registres bruts tels que le coupleur les presente, en regard du "
+            "nom attendu par config.json. Une voie mal adressee donne souvent "
+            "une valeur plausible : c'est le brut qui trahit le decalage. "
+            "Lecture seule, rien n'est commande.")
+        self._mes_tbl_mots = QLabel("—")
+        self._mes_tbl_mots.setObjectName("mono")
+        self._mes_tbl_mots.setTextFormat(Qt.TextFormat.RichText)
+        cl.addWidget(self._mes_tbl_mots)
+        cl.addWidget(_hsep())
+        self._mes_tbl_bits = QLabel("—")
+        self._mes_tbl_bits.setObjectName("mono")
+        self._mes_tbl_bits.setTextFormat(Qt.TextFormat.RichText)
+        cl.addWidget(self._mes_tbl_bits)
+        vl.addWidget(c)
+
+        # ── 2. PT100 ──────────────────────────────────────────────────
+        c, cl = self._mes_carte(
+            "PT100 — temperature",
+            "rho et mu en dependent, donc le Reynolds : 1 K d'erreur vaut "
+            "0,42 % sur le Re. Le coupleur Modbus n'a pas acces aux octets "
+            "de statut du 750-450 ; la vraisemblance de la valeur est la "
+            "seule detection possible.")
+        h = QHBoxLayout(); h.setSpacing(18)
+        h.addWidget(val("pt100_valeur", 110))
+        h.addWidget(val("pt100_verdict"))
+        h.addStretch()
+        cl.addLayout(h)
+        vl.addWidget(c)
+
+        # ── 3. FCO432 ─────────────────────────────────────────────────
+        c, cl = self._mes_carte(
+            "FCO432 — les 3 voies de pression",
+            "Souffler doucement sur un piquage doit faire reagir une voie et "
+            "une seule : c'est ainsi qu'on identifie laquelle est laquelle. "
+            "Le zero se releve soufflerie a l'arret.")
+        for cle, nom in (("dp_iso_500", "dP diaphragme ISO"),
+                         ("dp_diaph_500", "dP diaphragme Miller"),
+                         ("p_amont_500", "P amont")):
+            h = QHBoxLayout(); h.setSpacing(12)
+            n = QLabel(nom)
+            n.setMinimumWidth(190)
+            n.setStyleSheet("background:transparent;")
+            h.addWidget(n)
+            h.addWidget(val("fco_" + cle, 150))
+            h.addWidget(val("fcoz_" + cle))
+            h.addStretch()
+            cl.addLayout(h)
+        cl.addWidget(self._mes_bouton(
+            "Relever le zero des capteurs (soufflerie arretee)",
+            lambda: self._lancer_test("zero_capteurs")))
+        vl.addWidget(c)
+
+        # ── 4. vanne 3 voies ──────────────────────────────────────────
+        c, cl = self._mes_carte(
+            "VANNE 3 VOIES — carte GF3",
+            "Exactement une des trois butees doit etre vraie. Toute autre "
+            "combinaison signale une rupture de fil ou un 24 V commun absent. "
+            "Premiere mise sous tension : commander F d'abord — la vanne "
+            "sortant d'usine a 0°, elle ne doit PAS bouger, ce qui valide le "
+            "relais sans aucun mouvement.")
+        h = QHBoxLayout(); h.setSpacing(10)
+        h.addWidget(self._mes_bouton(
+            "Ordre F → 0° (ISO)", lambda: self._mes_diaphragme("iso")))
+        h.addWidget(self._mes_bouton(
+            "Ordre I → 90° (Miller)", lambda: self._mes_diaphragme("miller")))
+        h.addStretch()
+        cl.addLayout(h)
+        cl.addWidget(val("v3_etat"))
+        vl.addWidget(c)
+
+        # ── 5. bypass ─────────────────────────────────────────────────
+        c, cl = self._mes_carte(
+            "VANNE BYPASS",
+            "Les deux fins de course doivent commuter, et aucune ne doit "
+            "rester active pendant la course.")
+        h = QHBoxLayout(); h.setSpacing(10)
+        h.addWidget(self._mes_bouton("Ouvrir",
+                                     lambda: self._mes_bypass(True)))
+        h.addWidget(self._mes_bouton("Fermer",
+                                     lambda: self._mes_bypass(False)))
+        h.addStretch()
+        cl.addLayout(h)
+        cl.addWidget(val("bypass_etat"))
+        vl.addWidget(c)
+
+        # ── 6. vanne perte de charge ──────────────────────────────────
+        c, cl = self._mes_carte(
+            "VANNE PERTE DE CHARGE — carte POSI P6",
+            "Sens usine : 0 V = fermee, 10 V = grande ouverte. La recopie "
+            "doit suivre la consigne ; un ecart durable revele une carte en "
+            "sens inverse ou une recopie non cablee.")
+        h = QHBoxLayout(); h.setSpacing(10)
+        h.addWidget(self._mes_bouton("0 V — fermer",
+                                     lambda: self._mes_pdc(0.0)))
+        h.addWidget(self._mes_bouton("5 V — mi-course",
+                                     lambda: self._mes_pdc(5.0)))
+        h.addWidget(self._mes_bouton("10 V — ouvrir",
+                                     lambda: self._mes_pdc(10.0)))
+        h.addStretch()
+        cl.addLayout(h)
+        cl.addWidget(val("pdc_etat"))
+        vl.addWidget(c)
+
+        # ── 7. variateur ──────────────────────────────────────────────
+        c, cl = self._mes_carte(
+            "VARIATEUR 3G3MV + moteur SD42",
+            "Le retour « consigne atteinte » vient de la sortie moniteur AM "
+            "(image 0-10 V de la frequence reelle), la DI « frequence "
+            "atteinte » n'etant pas cablee. Verifier n004 = 2 et "
+            "n011 = 50,0 Hz avant tout essai.")
+        h = QHBoxLayout(); h.setSpacing(10)
+        h.addWidget(self._mes_bouton("RUN", self._mes_run))
+        b_stop = QPushButton("ARRET")
+        b_stop.setMinimumHeight(34)
+        b_stop.setStyleSheet(
+            f"background:{COLORS['error']}; color:#FFFFFF; font-weight:700;")
+        b_stop.clicked.connect(self._mes_arret)
+        h.addWidget(b_stop)                    # jamais desactive
+        h.addStretch()
+        cl.addLayout(h)
+
+        hs = QHBoxLayout(); hs.setSpacing(12)
+        self._mes_slider = QSlider(Qt.Orientation.Horizontal)
+        self._mes_slider.setRange(0, 1000)
+        self._mes_slider.setEnabled(False)
+        self._mes_slider.valueChanged.connect(self._mes_tension)
+        self._mes_actionneurs.append(self._mes_slider)
+        hs.addWidget(self._mes_slider, 1)
+        hs.addWidget(val("var_consigne", 165))
+        cl.addLayout(hs)
+        cl.addWidget(val("var_mesure"))
+        cl.addWidget(val("var_defaut"))
+        vl.addWidget(c)
+
+        vl.addStretch(1)
+        return page
+
+    # ----- actions de la page (toutes via les methodes publiques du pilote)
+
+    def _mes_prepare(self) -> None:
+        """Relache le maintien des ordres TOR : sans cela la boucle
+        ramenerait aussitot la vanne en place. Meme mecanique que pour les
+        sequences d'apprentissage. Repris en quittant la page."""
+        self.pilote.suspendre_maintien_tor()
+
+    def _mes_diaphragme(self, position: str) -> None:
+        self._mes_prepare()
+        self.pilote.commander_diaphragme(position)
+        self._log(f"Mise en service : vanne 3 voies → {position}",
+                  COLORS["accentText"])
+
+    def _mes_bypass(self, ouverte: bool) -> None:
+        self._mes_prepare()
+        self.pilote.commander_bypass(ouverte)
+        self._log("Mise en service : bypass → "
+                  + ("ouvert" if ouverte else "ferme"), COLORS["accentText"])
+
+    def _mes_pdc(self, volts: float) -> None:
+        self.pilote.commander_vanne_perte_charge(volts)
+        self._log(f"Mise en service : vanne PdC → {volts:.0f} V",
+                  COLORS["accentText"])
+
+    def _mes_run(self) -> None:
+        if QMessageBox.question(
+                self, "Demarrer le ventilateur",
+                "La soufflerie va tourner.\n\nVerifier que n004 = 2 et "
+                "n011 = 50,0 Hz sont regles sur le variateur, et que la "
+                "veine est degagee.\n\nDemarrer ?") \
+                != QMessageBox.StandardButton.Yes:
+            return
+        self._mes_slider.setValue(0)
+        self.pilote.mode_manuel_tension(0.0)
+        self._mes_run_arme = True
+        self._log("Mise en service : RUN variateur (0 V)", COLORS["warn"])
+
+    def _mes_tension(self, valeur: int) -> None:
+        if not self._mes_run_arme:
+            return                     # deplacement programme, pas operateur
+        self.pilote.mode_manuel_tension(valeur / 100.0)
+
+    def _mes_arret(self) -> None:
+        """Arret total, y compris si la page n'a rien demarre : c'est le
+        bouton de repli de cette page."""
+        self._mes_run_arme = False
+        self._mes_slider.setValue(0)
+        self.pilote.arreter_regulation()
+        self.pilote.reprendre_maintien_tor()
+        self._log("Mise en service : ARRET", COLORS["error"])
+
+    # ----- rafraichissement -----------------------------------------------
+
+    def _tick_mise_en_service(self, e: dict) -> None:
+        if self._stack.currentIndex() != 5:
+            return
+        brutes = e.get("mesures_brutes") or {}
+        img = e.get("image_process")
+        mb = self.cfg.get("modbus", {})
+
+        # verrou : pas d'actionnement pendant une regulation ou une sequence
+        occupe = bool(e.get("regulation")) or self.apprentissage.etat["en_cours"]
+        for w in self._mes_actionneurs:
+            w.setEnabled(not occupe and (w is not self._mes_slider
+                                         or self._mes_run_arme))
+        self._mes_lbl_verrou.setVisible(occupe)
+        if occupe:
+            self._mes_lbl_verrou.setText(
+                "Commandes verrouillees : une regulation ou une sequence "
+                "d'apprentissage est en cours. Utiliser ARRET pour reprendre "
+                "la main.")
+
+        def mets(cle, txt, couleur=None):
+            l = self._mes_lbl.get(cle)
+            if l is None:
+                return
+            l.setText(txt)
+            l.setStyleSheet(
+                f"color:{couleur or COLORS['text']}; background:transparent;")
+
+        # -- image process --
+        if not img:
+            self._mes_tbl_mots.setText(
+                "<i>image process indisponible "
+                "(simulateur sans configuration Modbus)</i>")
+            self._mes_tbl_bits.setText("")
+        else:
+            noms = {v["adresse"]: n for n, v in mb.get("entrees", {}).items()
+                    if not n.startswith("_")}
+            lignes = ["<b>mot&nbsp; nom attendu&nbsp; &nbsp; &nbsp; &nbsp;"
+                      "&nbsp; &nbsp; brut&nbsp; &nbsp; &nbsp; valeur</b>"]
+            for a in sorted(img["mots"]):
+                nom = noms.get(a, "?")
+                v = brutes.get(nom)
+                txt = f"{v:,.2f}".replace(",", " ") if isinstance(v, float) \
+                    else "—"
+                lignes.append(
+                    f"{a:>3}&nbsp; &nbsp;{nom:<22}".replace(" ", "&nbsp;")
+                    + f"{img['mots'][a]:>7}&nbsp; &nbsp; &nbsp;{txt}")
+            self._mes_tbl_mots.setText("<br>".join(lignes))
+
+            nomst = {v["adresse"]: (n, v.get("inverse", False))
+                     for n, v in mb.get("entrees_tor", {}).items()
+                     if not n.startswith("_")}
+            lignes = ["<b>bit&nbsp; nom attendu&nbsp; &nbsp; &nbsp; &nbsp;"
+                      "&nbsp; &nbsp; brut&nbsp; &nbsp; interprete</b>"]
+            for a in sorted(img["bits"]):
+                nom, inv = nomst.get(a, ("?", False))
+                etat = "●" if brutes.get(nom) else "○"
+                suffixe = "&nbsp; <i>(contact NF)</i>" if inv else ""
+                lignes.append(
+                    f"{a:>3}&nbsp; &nbsp;{nom:<22}".replace(" ", "&nbsp;")
+                    + f"&nbsp; &nbsp;{1 if img['bits'][a] else 0}"
+                    + f"&nbsp; &nbsp; &nbsp;{etat}{suffixe}")
+            self._mes_tbl_bits.setText("<br>".join(lignes))
+
+        # -- PT100 --
+        T = brutes.get("temperature")
+        r = self.cfg.get("regulation", {})
+        tmin = r.get("temperature_min_c", 2.0)
+        tmax = r.get("temperature_max_c", 45.0)
+        if T is None:
+            mets("pt100_valeur", "—")
+            mets("pt100_verdict", "voie absente", COLORS["error"])
+        else:
+            mets("pt100_valeur", f"{T:.2f} °C".replace(".", ","))
+            if tmin <= T <= tmax:
+                mets("pt100_verdict",
+                     f"plausible (bornes {tmin:.0f} à {tmax:.0f} °C)",
+                     COLORS["ok"])
+            else:
+                mets("pt100_verdict",
+                     f"HORS BORNES {tmin:.0f}–{tmax:.0f} °C — sonde coupee, "
+                     "module sature ou voie mal adressee", COLORS["error"])
+
+        # -- FCO432 --
+        zeros = self.cfg.get("zero_capteurs", {})
+        for cle in ("dp_iso_500", "dp_diaph_500", "p_amont_500"):
+            v = brutes.get(cle)
+            mets("fco_" + cle,
+                 f"{v:.2f} Pa".replace(".", ",") if v is not None else "—")
+            z = zeros.get(cle)
+            mets("fcoz_" + cle,
+                 f"zero appris {z:+.2f} Pa".replace(".", ",")
+                 if isinstance(z, (int, float)) else "zero non releve",
+                 COLORS["muted2"])
+
+        # -- vanne 3 voies : decodage un-parmi-trois --
+        actifs = [nom for nom in ("fc_3voies_0", "fc_3voies_90",
+                                  "fc_3voies_180") if brutes.get(nom)]
+        if len(actifs) == 1:
+            angle = actifs[0].rsplit("_", 1)[1]
+            diaph = e.get("diaphragme") or "?"
+            mets("v3_etat", f"butee {angle}° — un parmi trois ✓"
+                 + (f"  ({diaph})" if angle in ("0", "90") else ""),
+                 COLORS["ok"])
+        elif e.get("manoeuvre"):
+            mets("v3_etat", f"en course — {e['manoeuvre']}", COLORS["warn"])
+        else:
+            mets("v3_etat",
+                 f"combinaison invalide : {actifs or 'aucune butee'} — "
+                 "rupture de fil ou 24 V commun absent", COLORS["error"])
+
+        # -- bypass --
+        o, f = brutes.get("fc_bypass_ouvert"), brutes.get("fc_bypass_ferme")
+        if o and f:
+            mets("bypass_etat", "les deux fins de course actives — cablage",
+                 COLORS["error"])
+        elif o:
+            mets("bypass_etat", "ouvert", COLORS["ok"])
+        elif f:
+            mets("bypass_etat", "ferme", COLORS["ok"])
+        else:
+            mets("bypass_etat", "en course (aucune fin de course)",
+                 COLORS["warn"])
+
+        # -- vanne PdC --
+        cons = e.get("pdc_consigne")
+        rec = brutes.get("pdc_recopie")
+        bits = []
+        if cons is not None:
+            bits.append(f"consigne {cons:.2f} V".replace(".", ","))
+        if rec is not None:
+            bits.append(f"recopie {rec:.2f} V".replace(".", ","))
+        if brutes.get("fc_pdc_ferme"):
+            bits.append("FC fermee")
+        if brutes.get("fc_pdc_ouvert"):
+            bits.append("FC ouverte")
+        # le diagnostic de divergence est deja fait par la boucle
+        # (modele de course + hysteresis) : ne pas re-inventer un seuil ici,
+        # la vanne met 25 s a parcourir sa course et tout ecart instantane
+        # serait un faux positif
+        if e.get("defaut_pdc"):
+            bits.append("recopie incoherente avec la consigne")
+        mets("pdc_etat", "   ·   ".join(bits) or "—",
+             COLORS["error"] if e.get("defaut_pdc") else COLORS["text"])
+
+        # -- variateur --
+        fmax = self.cfg.get("variateur", {}).get("frequence_max_hz", 50.0)
+        tol = self.cfg.get("variateur", {}).get("tolerance_consigne_v", 0.15)
+        u = e.get("u_variateur") or 0.0
+        am = brutes.get("frequence_variateur")
+        mets("var_consigne",
+             f"{u:.2f} V  =  {fmax * u / 10.0:.1f} Hz".replace(".", ","))
+        if am is None:
+            mets("var_mesure", "moniteur AM absent — voie non cablee ?",
+                 COLORS["error"])
+        else:
+            hz = fmax * am / 10.0
+            atteinte = abs(am - u) <= tol
+            mets("var_mesure",
+                 f"moniteur AM {am:.2f} V  =  {hz:.1f} Hz".replace(".", ",")
+                 + ("   ✓ consigne atteinte" if atteinte
+                    else "   … en rampe"),
+                 COLORS["ok"] if atteinte else COLORS["accentText"])
+        d = e.get("defaut_variateur")
+        mets("var_defaut", f"DEFAUT : {d}" if d
+             else "contact MB : pas de defaut signale",
+             COLORS["error"] if d else COLORS["ok"])
 
     def _build_footer(self, mode: str) -> QWidget:
         foot = QWidget()
@@ -2150,6 +2589,13 @@ class Application(QMainWindow):
         self._tick_entrees(e)
         self._tick_apprentissage()
         self._tick_sequence(e)
+        try:
+            self._tick_mise_en_service(e)
+        except Exception as exc:                 # noqa: BLE001
+            # page de diagnostic : elle ne doit en aucun cas figer le QTimer,
+            # donc ni les mesures ni les alertes de securite
+            self._log(f"Mise en service : affichage indisponible ({exc})",
+                      COLORS["error"])
         re = e.get("re_mesure")
         if re is not None:
             if self._t0_acq is None:

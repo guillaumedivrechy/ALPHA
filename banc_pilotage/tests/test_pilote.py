@@ -563,3 +563,54 @@ def test_motif_bas_re_indisponible_est_publie():
     pilote.bas_re_actif = False
     pilote._cycle()
     assert pilote.etat["bas_re_motif"] is None
+
+
+def test_image_process_reconstituee_par_le_simulateur():
+    """Le simulateur reproduit la couche Modbus quand on lui donne la config,
+    pour que la page de mise en service soit exercable sans materiel. Sans
+    config modbus il n'invente pas d'adresses."""
+    from io_banc.simulateur import SimulateurBanc
+
+    sans = SimulateurBanc(Banc(CFG), CFG.get("simulation"))
+    sans.lire_mesures()
+    assert sans.image_process is None
+
+    es = SimulateurBanc(Banc(CFG), CFG.get("simulation"), CFG["modbus"])
+    mesures = es.lire_mesures()
+    img = es.image_process
+    entrees = {n: v for n, v in CFG["modbus"]["entrees"].items()
+               if not n.startswith("_")}
+    assert set(img["mots"]) == {v["adresse"] for v in entrees.values()}
+
+    # aller-retour : le brut remis a l'echelle redonne la grandeur physique
+    t_addr = entrees["temperature"]["adresse"]
+    assert img["mots"][t_addr] * 0.1 == pytest.approx(mesures["temperature"],
+                                                      abs=0.06)
+    voie = entrees["dp_iso_500"]
+    brut = img["mots"][voie["adresse"]]
+    volts = brut / 32767 * voie["pleine_echelle_v"]
+    attendu = voie["valeur_min"] + (volts - voie["volts_min"]) \
+        / (voie["volts_max"] - voie["volts_min"]) \
+        * (voie["valeur_max"] - voie["valeur_min"])
+    assert attendu == pytest.approx(mesures["dp_iso_500"], abs=0.05)
+
+    # les bits portent l'etat electrique, avant inversion
+    for nom, v in CFG["modbus"]["entrees_tor"].items():
+        if nom.startswith("_"):
+            continue
+        assert (img["bits"][v["adresse"]] != v.get("inverse", False)) \
+            is bool(mesures[nom]), nom
+
+
+def test_image_process_publiee_meme_sur_defaut():
+    """La page de mise en service sert justement quand quelque chose ne va
+    pas : l'image doit etre publiee avant les retours anticipes du cycle."""
+    pilote, es = _pilote_en_position("fc_3voies_0")
+    es.mesures["temperature"] = 3276.7            # PT100 saturee -> defaut
+    pilote.definir_consigne(8000.0, "conduite")
+    pilote.demarrer_regulation()
+    for _ in range(max(3, int(2.0 / pilote.periode)) + 2):
+        pilote._cycle()
+    assert pilote.etat["defaut_capteur"] is not None
+    assert "image_process" in pilote.etat        # publiee malgre le return
+    assert pilote.etat["mesures_brutes"]["temperature"] == 3276.7

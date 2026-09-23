@@ -36,6 +36,13 @@ except ImportError:  # le mode simulation fonctionne sans pymodbus
 class EntreesSorties:
     """Interface abstraite commune au matériel réel et au simulateur."""
 
+    #: Dernière image process Modbus telle que lue, AVANT mise à l'échelle :
+    #: {"mots": {adresse: brut}, "bits": {adresse: booleen}}. Sert à la page
+    #: de mise en service, où l'on veut voir le registre et pas seulement la
+    #: grandeur physique : une voie mal adressée donne souvent une valeur
+    #: plausible. None si l'implémentation ne la fournit pas.
+    image_process: dict | None = None
+
     def lire_mesures(self) -> dict:
         """Retourne : dp_diaph_500, dp_diaph_50, p_amont_500, p_amont_50,
         dp_iso_500, temperature  (unités physiques : Pa, °C)."""
@@ -168,6 +175,7 @@ class WagoModbus(EntreesSorties):
             # FC3 de la vanne 3 voies). Une rupture de fil produit alors
             # l'état actif, ce qui rend le défaut détectable.
             mesures[nom] = bits[voie["adresse"]] != voie.get("inverse", False)
+        self.image_process = {"mots": dict(registres), "bits": dict(bits)}
         return mesures
 
     # ------------------------------------------------------------- écritures

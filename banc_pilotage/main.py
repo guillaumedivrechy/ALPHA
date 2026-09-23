@@ -41,7 +41,7 @@ def main() -> None:
 
     if args.simulation:
         from io_banc.simulateur import SimulateurBanc
-        es = SimulateurBanc(banc, cfg.get("simulation"))
+        es = SimulateurBanc(banc, cfg.get("simulation"), cfg.get("modbus"))
         mode = "simulation"
     else:
         from io_banc.wago import WagoModbus

@@ -207,6 +207,11 @@
     "split_range_point": 5.0,
     "gain_scale": 1.0
   },
+  "variateur": {
+    "_commentaire": "Grandeurs du 3G3MV necessaires a l'affichage, pas au calcul : la boucle regule un Reynolds et ne raisonne jamais en Hz. frequence_max_hz = parametre n011 du variateur (fFrequence atteinte a 10 V) ; le defaut usine est 60,0 alors que le moteur SD42 est un 50 Hz, 2800 min-1. Suppose les gains d'entree usine n060=100 et n061=0, soit f = FMAX x V/10. tolerance_consigne_v = ecart entre la consigne et la recopie AM (sortie moniteur, image 0-10 V de la frequence de sortie) en deca duquel la consigne est declaree atteinte ; remplace la DI 'frequence atteinte' du variateur, non cablee (P1/P2 laissees libres, PC etant le 0V de l'optocoupleur).",
+    "frequence_max_hz": 50.0,
+    "tolerance_consigne_v": 0.15
+  },
   "journal": {
     "_commentaire": "Journal CSV des conditions d'essai : un fichier par session de regulation, ecrit par le thread du pilote. Repond apres coup a 'dans quelles conditions ce point a-t-il ete releve, et ont-elles tenu pendant la mesure ?'. dossier relatif = par rapport au dossier du programme. periode_s = intervalle entre deux lignes.",
     "actif": true,

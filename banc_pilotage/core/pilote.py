@@ -544,6 +544,7 @@ class Pilote:
         # mesures brutes publiées telles quelles pour la supervision
         # (onglet lecture seule de l'IHM)
         self.etat["mesures_brutes"] = dict(mesures)
+        self.etat["image_process"] = getattr(self.es, "image_process", None)
         self.etat["cycles"] = self.etat.get("cycles", 0) + 1
 
         # ---- vraisemblance de la PT100 -------------------------------------

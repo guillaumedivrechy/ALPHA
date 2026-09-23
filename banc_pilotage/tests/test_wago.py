@@ -139,3 +139,56 @@ def test_ecriture_ao_refusee_non_cachee(wago):
     wago.client.erreur_ecriture = False
     wago.ecrire_variateur(0.0)              # retentée -> réellement écrite
     assert wago.client.ecritures == 2
+
+
+# ── image process brute (page de mise en service) ─────────────────────────
+
+def test_image_process_expose_les_registres_bruts():
+    """La page de mise en service doit voir le REGISTRE, pas seulement la
+    grandeur physique : une voie mal adressée donne souvent une valeur
+    plausible, c'est le brut qui trahit le décalage."""
+    es = WagoModbus.__new__(WagoModbus)
+    es.cfg = CFG_MODBUS
+    es.client = _FauxClient()
+    es._verrou = threading.Lock()
+    assert es.image_process is None            # rien avant la 1re lecture
+
+    mesures = es.lire_mesures()
+    img = es.image_process
+    assert set(img) == {"mots", "bits"}
+
+    # chaque voie déclarée en config a son mot, à la bonne adresse
+    for nom, voie in CFG_MODBUS["entrees"].items():
+        if nom.startswith("_"):
+            continue
+        assert voie["adresse"] in img["mots"], nom
+    t_addr = CFG_MODBUS["entrees"]["temperature"]["adresse"]
+    assert img["mots"][t_addr] == 205                  # brut, pas 20,5
+    assert mesures["temperature"] == pytest.approx(20.5)
+
+    # les bits sont l'état ÉLECTRIQUE, avant inversion des contacts NF
+    for nom, voie in CFG_MODBUS["entrees_tor"].items():
+        if nom.startswith("_"):
+            continue
+        adresse = voie["adresse"]
+        assert adresse in img["bits"], nom
+        attendu = img["bits"][adresse] != voie.get("inverse", False)
+        assert mesures[nom] is attendu, nom
+
+
+def test_image_process_distingue_un_contact_inverse():
+    """Un contact NF doit apparaitre ferme electriquement alors que la
+    grandeur logique est fausse : c'est tout l'interet de voir le brut."""
+    es = WagoModbus.__new__(WagoModbus)
+    es.cfg = CFG_MODBUS
+    es.client = _FauxClient()                  # tous les bits a True
+    es._verrou = threading.Lock()
+    mesures = es.lire_mesures()
+
+    inverses = [n for n, v in CFG_MODBUS["entrees_tor"].items()
+                if not n.startswith("_") and v.get("inverse")]
+    assert inverses, "config sans contact inverse : test a revoir"
+    for nom in inverses:
+        adresse = CFG_MODBUS["entrees_tor"][nom]["adresse"]
+        assert es.image_process["bits"][adresse] is True   # contact ferme
+        assert mesures[nom] is False                       # donc pas actif

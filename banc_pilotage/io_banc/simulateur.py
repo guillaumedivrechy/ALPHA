@@ -99,8 +99,14 @@ class _Vanne3Voies:
 
 
 class SimulateurBanc(EntreesSorties):
-    def __init__(self, banc: Banc, cfg_simu: dict | None = None):
+    def __init__(self, banc: Banc, cfg_simu: dict | None = None,
+                 cfg_modbus: dict | None = None):
         cfg_simu = cfg_simu or {}
+        # facultatif : permet de reconstituer l'image process (registres
+        # bruts) que le coupleur fournirait, pour que la page de mise en
+        # service soit utilisable en simulation. Sans lui, image_process
+        # reste None plutôt que d'inventer des adresses.
+        self.cfg_modbus = cfg_modbus
         self.banc = banc
         self.gain_qv = cfg_simu.get("gain_qv_m3s_par_volt", 0.0035)
         self.tau_s = cfg_simu.get("constante_temps_s", 2.0)
@@ -222,7 +228,7 @@ class SimulateurBanc(EntreesSorties):
         dp_iso    = min(dp_actif if diaph == "iso"    else 0.0, 500.0)
 
         bp_en_course = self._bypass.en_course
-        return {
+        mesures = {
             "dp_diaph_500": dp_miller,   # capteur Miller (adresse Wago 0)
             "p_amont_500": self.p_amont_eff * (1 + random.gauss(0, 0.005)),
             "dp_iso_500": dp_iso,        # capteur ISO (adresse Wago 4)
@@ -242,3 +248,45 @@ class SimulateurBanc(EntreesSorties):
             "frequence_variateur": (self._u_variateur if self._run else 0.0)
                                    + random.gauss(0.0, 0.02),
         }
+        self.image_process = self._image_process(mesures)
+        return mesures
+
+    # ----- image process reconstituee ---------------------------------------
+
+    PLEINE_ECHELLE = 32767
+
+    def _image_process(self, mesures: dict) -> dict | None:
+        """Registres bruts que le coupleur aurait presentes, reconstitues en
+        inversant la mise a l'echelle de config.json.
+
+        Le simulateur reproduit deja la physique du banc ; il reproduit ici
+        la couche Modbus, pour que la page de mise en service soit exercable
+        sans materiel. Sans configuration modbus fournie, on ne devine pas
+        d'adresses : l'image reste absente.
+        """
+        if not self.cfg_modbus:
+            return None
+        mots, bits = {}, {}
+        for nom, voie in self.cfg_modbus.get("entrees", {}).items():
+            if nom.startswith("_") or nom not in mesures:
+                continue
+            valeur = mesures[nom]
+            if nom == "temperature":                 # module RTD : 0,1 degC
+                brut = int(round(valeur / voie.get("facteur", 0.1)))
+            else:
+                if "valeur_min" in voie:             # capteur mis a l'echelle
+                    v0, v1 = voie["volts_min"], voie["volts_max"]
+                    u0, u1 = voie["valeur_min"], voie["valeur_max"]
+                    volts = v0 + (valeur - u0) / (u1 - u0) * (v1 - v0)
+                else:                                # recopie brute en volts
+                    volts = valeur
+                pe = voie.get("pleine_echelle_v", 10.0)
+                brut = int(round(volts / pe * self.PLEINE_ECHELLE))
+            mots[voie["adresse"]] = max(-32768, min(32767, brut))
+        for nom, voie in self.cfg_modbus.get("entrees_tor", {}).items():
+            if nom.startswith("_") or nom not in mesures:
+                continue
+            # le bit physique, avant l'inversion des contacts NF
+            bits[voie["adresse"]] = bool(mesures[nom]) != voie.get("inverse",
+                                                                   False)
+        return {"mots": mots, "bits": bits}

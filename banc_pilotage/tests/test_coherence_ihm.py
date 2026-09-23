@@ -112,3 +112,78 @@ def test_entrees_analogiques_et_fins_de_course_collent_a_la_config():
 
     assert tables.get("ENTREES_ANALOGIQUES") == attendues_ai
     assert tables.get("FINS_DE_COURSE") == attendues_tor
+
+
+# ── clés d'état lues par l'IHM ────────────────────────────────────────────
+
+SRC_PILOTE = (RACINE / "core" / "pilote.py").read_text(encoding="utf-8")
+
+
+def _cles_publiees_par_le_pilote() -> set:
+    """Toutes les clés que core/pilote.py écrit dans self.etat, relevées
+    statiquement : self.etat["x"] = …, self.etat.update({"x": …}) et le
+    dictionnaire initial. Statique plutôt qu'à l'exécution, pour couvrir
+    aussi les branches de défaut qu'un cycle nominal n'atteint pas."""
+    cles = set(re.findall(r'self\.etat\[\s*"(\w+)"\s*\]\s*=', SRC_PILOTE))
+    cles |= set(re.findall(r'"(\w+)"\s*:', SRC_PILOTE[
+        SRC_PILOTE.find("self.etat = {"):SRC_PILOTE.find("self.etat = {") + 400]))
+    for m in re.finditer(r'self\.etat\.update\(\{', SRC_PILOTE):
+        bloc = SRC_PILOTE[m.end():m.end() + 1600]
+        fin = bloc.find("\n        })")
+        cles |= set(re.findall(r'"(\w+)"\s*:', bloc[:fin if fin > 0 else 1600]))
+    return cles
+
+
+def _cles_detat_lues_par_lihm() -> set:
+    """Clés lues sur le dict d'état dans gui/app.py (variable `e`)."""
+    cles = set(re.findall(r'\be\.get\(\s*[\'"](\w+)[\'"]', SRC_GUI))
+    cles |= set(re.findall(r'\be\[\s*[\'"](\w+)[\'"]\s*\]', SRC_GUI))
+    bloc = re.search(r'ALERTES = \[(.*?)\n    \]', SRC_GUI, re.S)
+    if bloc:
+        cles |= set(re.findall(r'\(\s*"(\w+)"', bloc.group(1)))
+    return cles
+
+
+def test_toute_cle_detat_lue_par_lihm_est_publiee():
+    """C'est la cause racine de l'IHM figée : gui/app.py allait chercher des
+    clés que core/pilote.py ne produisait plus. Une clé jamais publiée vaut
+    silencieusement None — au mieux un affichage vide, au pire un KeyError."""
+    lues = _cles_detat_lues_par_lihm()
+    publiees = _cles_publiees_par_le_pilote()
+    assert publiees, "aucune clé détectée dans pilote.py (regex à revoir)"
+
+    # publiées ailleurs que dans pilote.py, légitimement
+    hors_pilote = {
+        "sequence",      # écrit par la boucle de suivi de profil
+        "duree_cycle_s",  # écrit par _boucle, hors _cycle
+    }
+    manquantes = lues - publiees - hors_pilote
+    assert not manquantes, (
+        f"gui/app.py lit {sorted(manquantes)} sur pilote.etat, "
+        "que core/pilote.py ne publie jamais")
+
+
+def test_page_mise_en_service_branchee():
+    """La page doit être construite, empilée et rafraîchie : oublier le tick
+    donnerait une page figée sans que rien ne le signale."""
+    assert "_build_mise_en_service" in SRC_GUI
+    assert "self._stack.addWidget(self._build_mise_en_service())" in SRC_GUI
+    assert "self._tick_mise_en_service(e)" in SRC_GUI
+    assert "Mise en service" in SRC_GUI.split("_NAV_LABELS")[1][:200]
+    # l'index teste dans le tick doit correspondre a la position d'empilement
+    ordre = re.findall(r'self\._stack\.addWidget\(self\._build_(\w+)\(\)\)',
+                       SRC_GUI)
+    assert ordre.index("mise_en_service") == 5
+    assert "self._stack.currentIndex() != 5" in SRC_GUI
+
+
+def test_page_mise_en_service_ne_commande_pas_le_materiel_en_direct():
+    """Règle d'architecture : toute commande passe par une méthode publique
+    du pilote. Une page de diagnostic est justement l'endroit où l'on serait
+    tenté d'écrire directement sur les E/S."""
+    debut = SRC_GUI.find("def _build_mise_en_service")
+    fin = SRC_GUI.find("def _build_footer")
+    assert 0 < debut < fin
+    page = SRC_GUI[debut:fin]
+    assert "self.pilote.es" not in page
+    assert not re.search(r'\bes\.(ecrire|lire)_', page)
