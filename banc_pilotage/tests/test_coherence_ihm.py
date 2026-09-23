@@ -192,11 +192,20 @@ def test_page_mise_en_service_ne_commande_pas_le_materiel_en_direct():
 # ── les champs de l'onglet Configuration doivent agir ─────────────────────
 
 def _champs_exposes_par_lihm() -> set:
-    """Couples (section, cle) editables depuis l'onglet Configuration."""
+    """Chemins editables depuis l'onglet Configuration, sous forme de tuples.
+
+    Les chemins ont une ou deux composantes : `patm_pa` est a la racine de
+    config.json, les autres sont dans une section. Ne reconnaitre que les
+    couples laissait justement patm_pa hors de toute verification.
+    """
     debut = SRC_GUI.find("def _build_configuration")
     fin = SRC_GUI.find("def _update_controls_enabled", debut)
     bloc = SRC_GUI[debut:fin if fin > debut else debut + 9000]
-    return set(re.findall(r'\(\(\s*"(\w+)"\s*,\s*"(\w+)"\s*\)', bloc))
+    champs = {(a, b) for a, b in
+              re.findall(r'\(\(\s*"(\w+)"\s*,\s*"(\w+)"\s*\)', bloc)}
+    champs |= {(a,) for a in
+               re.findall(r'\(\(\s*"(\w+)"\s*,\s*\)', bloc)}
+    return champs
 
 
 def test_tout_champ_editable_est_repris_a_chaud():
@@ -217,12 +226,13 @@ def test_tout_champ_editable_est_repris_a_chaud():
     affichage = {("variateur", "frequence_max_hz")}
 
     inertes = []
-    for section, cle in sorted(_champs_exposes_par_lihm()):
-        if (section, cle) in hors_chaud or (section, cle) in affichage:
+    for chemin in sorted(_champs_exposes_par_lihm()):
+        if chemin in hors_chaud or chemin in affichage:
             continue
+        cle = chemin[-1]
         if f'"{cle}"' in corps or f'"{cle}"' in src_banc:
             continue
-        inertes.append(f"{section}.{cle}")
+        inertes.append(".".join(chemin))
     assert not inertes, (
         "champs editables sans effet avant redemarrage : " + ", ".join(inertes))
 
@@ -231,6 +241,16 @@ def test_champs_exposes_existent_dans_la_config():
     """Un champ pointant sur une clé absente de config.json afficherait un
     blanc et écrirait une clé morte."""
     cfg = json.loads((RACINE / "config.json").read_text(encoding="utf-8"))
-    for section, cle in sorted(_champs_exposes_par_lihm()):
-        assert section in cfg, f"section « {section} » absente de config.json"
-        assert cle in cfg[section], f"« {section}.{cle} » absent de config.json"
+    champs = _champs_exposes_par_lihm()
+    assert ("patm_pa",) in champs, (
+        "la pression atmospherique doit rester saisissable : les deux "
+        "classeurs de reference la portent en cellule d'entree (ISO "
+        "« Calcul de qm » D6, Miller « Interface utilisateur » D6), et le "
+        "banc n'a aucun capteur de pression absolue pour la mesurer")
+    for chemin in sorted(champs):
+        noeud, lu = cfg, []
+        for cle in chemin:
+            lu.append(cle)
+            assert isinstance(noeud, dict) and cle in noeud, (
+                "« %s » absent de config.json" % ".".join(lu))
+            noeud = noeud[cle]
