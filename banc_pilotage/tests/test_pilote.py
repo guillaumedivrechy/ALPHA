@@ -614,3 +614,65 @@ def test_image_process_publiee_meme_sur_defaut():
     assert pilote.etat["defaut_capteur"] is not None
     assert "image_process" in pilote.etat        # publiee malgre le return
     assert pilote.etat["mesures_brutes"]["temperature"] == 3276.7
+
+
+def test_appliquer_config_reprend_les_reglages_a_chaud():
+    """RÉGRESSION : l'onglet Configuration écrivait dans config.json et
+    n'appliquait que le Banc. Gains, tolérances, chiens de garde et bornes
+    capteurs restaient sur les valeurs du démarrage — l'opérateur croyait
+    avoir réglé quelque chose."""
+    import json as _json
+    cfg = _json.loads(_json.dumps(CFG))
+    pilote, es = _pilote_en_position("fc_3voies_0")
+
+    cfg["regulation"].update(kp=9.99, ki=8.88, rampe_v_par_s=3.3,
+                             tolerance_convergence_relative=0.05,
+                             temperature_min_c=-10.0, temperature_max_c=99.0,
+                             recul_saturation_v_par_s=1.25,
+                             fenetre_convergence_s=20.0)
+    cfg["actionneurs"].update(vanne_3voies_temps_s=33.0,
+                              facteur_chien_garde=2.5)
+    cfg["strategie_bas_re"].update(split_range_point=7.0, gain_scale=0.5)
+
+    pilote.appliquer_config(cfg)
+
+    assert pilote.pi.kp == 9.99
+    assert pilote.pi.ki == 8.88
+    assert pilote.pi.rampe == 3.3
+    assert pilote.tolerance == 0.05
+    assert (pilote.t_min_c, pilote.t_max_c) == (-10.0, 99.0)
+    assert pilote.recul_saturation == 1.25
+    assert pilote.t_vanne_3voies == 33.0
+    assert pilote.facteur_chien_garde == 2.5
+    assert pilote.split_point == 7.0
+    assert pilote.bas_re_scale == 0.5
+    # la fenêtre est un nombre d'échantillons : elle doit être reconstruite
+    assert pilote.fenetre_convergence == 20.0
+    assert pilote._historique_re.maxlen == int(20.0 / pilote.periode)
+
+
+def test_appliquer_config_ne_touche_pas_aux_grandeurs_apprises():
+    """Le gain, la table et u_min viennent de l'apprentissage, pas de la
+    saisie : une édition de configuration ne doit pas les effacer."""
+    import json as _json
+    pilote, es = _pilote_en_position("fc_3voies_0")
+    pilote._gain_re_par_volt = 3600.0
+    pilote.table_gains = TableGains([(2.0, 7000.0), (8.0, 28000.0)])
+    pilote.u_min_ventilateur = 1.5
+
+    pilote.appliquer_config(_json.loads(_json.dumps(CFG)))
+
+    assert pilote._gain_re_par_volt == 3600.0
+    assert pilote.table_gains.est_valide()
+    assert pilote.u_min_ventilateur == 1.5
+
+
+def test_appliquer_config_ignore_les_cles_commentaire():
+    """Règle 6 de CLAUDE.md : les clés « _ » de config.json sont des
+    commentaires et ne doivent jamais devenir des offsets de capteur."""
+    import json as _json
+    cfg = _json.loads(_json.dumps(CFG))
+    cfg["zero_capteurs"] = {"_commentaire": "texte", "dp_iso_500": 1.5}
+    pilote, es = _pilote_en_position("fc_3voies_0")
+    pilote.appliquer_config(cfg)
+    assert pilote.zero_capteurs == {"dp_iso_500": 1.5}

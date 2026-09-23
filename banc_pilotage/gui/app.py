@@ -2305,11 +2305,26 @@ class Application(QMainWindow):
             (("actionneurs","facteur_chien_garde"),        "Chien de garde",   "×",  "{:.1f}", _positif),
         ], col=1, row=1)
 
+        _grp("Surveillance et replis", [
+            (("regulation","fenetre_convergence_s"),   "Fenêtre convergence", "s",
+             "{:.1f}", _positif),
+            (("regulation","temperature_min_c"),       "PT100 mini",       "°C",
+             "{:.1f}", None),
+            (("regulation","temperature_max_c"),       "PT100 maxi",       "°C",
+             "{:.1f}", None),
+            (("regulation","saturation_dp_relative"),  "Seuil ΔP saturé",  "×",
+             "{:.2f}", _positif),
+            (("regulation","recul_saturation_v_par_s"),"Recul si saturé", "V/s",
+             "{:.2f}", _positif),
+        ], col=1, row=2)
+
         _grp("Communication Modbus", [
             (("modbus","ip"),         "Adresse IP",  "",    "{}",     None),
             (("modbus","port"),       "Port",        "",    "{}",     None),
             (("modbus","timeout_s"),  "Timeout",     "s",   "{:.1f}", None),
-        ], col=1, row=2)
+            (("variateur","frequence_max_hz"), "Variateur n011", "Hz",
+             "{:.1f}", _positif),
+        ], col=1, row=3)
 
         scroll.setWidget(corps)
         vl.addWidget(scroll, 1)
@@ -2575,6 +2590,11 @@ class Application(QMainWindow):
             QMessageBox.critical(self, "Écriture impossible", str(exc))
             return
         self.pilote.appliquer_banc(Banc(self.cfg))
+        # le Banc ne porte que les geometries et les seuils de selection ;
+        # gains, tolerances, chiens de garde et bornes capteurs sont mis en
+        # cache par le pilote et doivent etre relus, sinon la saisie
+        # n'agirait qu'au redemarrage suivant
+        self.pilote.appliquer_config(self.cfg)
         self.chk_unlock.setChecked(False)
         self.lbl_cfg_statut.setStyleSheet(f"color:{COLORS['ok']};")
         self.lbl_cfg_statut.setText("✓ configuration enregistrée et appliquée")

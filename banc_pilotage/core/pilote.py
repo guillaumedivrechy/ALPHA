@@ -388,6 +388,84 @@ class Pilote:
         with self._verrou:
             self.banc = banc
 
+    def appliquer_config(self, cfg: dict) -> None:
+        """Relit les réglages mis en cache au démarrage, après une édition
+        depuis l'IHM. À appeler régulation arrêtée.
+
+        Sans cela, la moitié des champs de l'onglet Configuration étaient
+        écrits dans config.json et n'agissaient qu'au redémarrage suivant :
+        kp, ki, rampe, tolérance, chiens de garde, bornes PT100… Un réglage
+        accessible qui ne fait rien est pire qu'un réglage absent, parce
+        qu'on croit avoir agi. Le seuil de bascule et l'hystérésis, eux,
+        vivent sur le Banc et étaient déjà repris par appliquer_banc().
+
+        Les grandeurs APPRISES (gain, table, u_min) ne sont pas touchées :
+        elles ne viennent pas de la saisie utilisateur.
+        """
+        with self._verrou:
+            r = cfg.get("regulation", {})
+            self.periode = r.get("periode_s", self.periode)
+            self.tolerance = r.get("tolerance_convergence_relative",
+                                   self.tolerance)
+            self.pi.kp = r.get("kp", self.pi.kp)
+            self.pi.ki = r.get("ki", self.pi.ki)
+            self.pi.dt = self.periode
+            self.pi.rampe = r.get("rampe_v_par_s", self.pi.rampe)
+            self._rampe_nominale = self.pi.rampe
+            self.pi.bande_morte = r.get("bande_morte_relative",
+                                        self.pi.bande_morte)
+            self.echelon_reinit_ff = r.get("echelon_reinit_ff_relatif",
+                                           self.echelon_reinit_ff)
+            self.gain_scheduling = r.get("gain_scheduling_actif",
+                                         self.gain_scheduling)
+            self.saturation_dp = r.get("saturation_dp_relative",
+                                       self.saturation_dp)
+            self.tau_consigne = r.get("tau_consigne_s", self.tau_consigne)
+            self.t_min_c = r.get("temperature_min_c", self.t_min_c)
+            self.t_max_c = r.get("temperature_max_c", self.t_max_c)
+            self.recul_saturation = r.get("recul_saturation_v_par_s",
+                                          self.recul_saturation)
+            # la fenêtre est un nombre d'échantillons : la reconstruire à
+            # chaque fois (la période a pu changer aussi), et repartir d'un
+            # historique vide plutôt que de mélanger deux profondeurs de
+            # moyennage dans une même moyenne
+            self.fenetre_convergence = r.get("fenetre_convergence_s",
+                                             self.fenetre_convergence)
+            self._historique_re = deque(
+                maxlen=max(2, int(self.fenetre_convergence / self.periode)))
+            self._convergee_depuis = None
+
+            act = cfg.get("actionneurs", {})
+            self.t_vanne_3voies = act.get("vanne_3voies_temps_s",
+                                          self.t_vanne_3voies)
+            self.t_vanne_bypass = act.get("vanne_bypass_temps_s",
+                                          self.t_vanne_bypass)
+            self.t_vanne_pdc_course = act.get("vanne_perte_charge_course_s",
+                                              self.t_vanne_pdc_course)
+            self.marge_manoeuvre = act.get("marge_apres_manoeuvre_s",
+                                           self.marge_manoeuvre)
+            self.facteur_chien_garde = act.get("facteur_chien_garde",
+                                               self.facteur_chien_garde)
+            self.pdc_recopie_min = act.get("pdc_recopie_min_v",
+                                           self.pdc_recopie_min)
+            self.pdc_recopie_max = act.get("pdc_recopie_max_v",
+                                           self.pdc_recopie_max)
+
+            sr = cfg.get("strategie_bas_re", {})
+            self.bas_re_actif = sr.get("actif", self.bas_re_actif)
+            self.seuil_bas_re = sr.get("seuil_re", self.seuil_bas_re)
+            self.marge_seuil_bas_re = sr.get("marge_seuil",
+                                             self.marge_seuil_bas_re)
+            self.split_point = min(max(sr.get("split_range_point",
+                                              self.split_point), 0.1), 9.9)
+            self.bas_re_scale = min(max(sr.get("gain_scale",
+                                               self.bas_re_scale), 0.05), 1.0)
+
+            # règle 6 de CLAUDE.md : les clés « _ » sont des commentaires
+            self.zero_capteurs = {k: v for k, v
+                                  in cfg.get("zero_capteurs", {}).items()
+                                  if not k.startswith("_")}
+
     def commander_vanne_perte_charge(self, volts: float) -> None:
         """Consigne 0-10 V de la vanne proportionnelle (carte P6, sens usine) :
         0 V = FERMÉE, 10 V = grande ouverte. La position réelle est lue sur la

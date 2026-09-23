@@ -187,3 +187,50 @@ def test_page_mise_en_service_ne_commande_pas_le_materiel_en_direct():
     page = SRC_GUI[debut:fin]
     assert "self.pilote.es" not in page
     assert not re.search(r'\bes\.(ecrire|lire)_', page)
+
+
+# ── les champs de l'onglet Configuration doivent agir ─────────────────────
+
+def _champs_exposes_par_lihm() -> set:
+    """Couples (section, cle) editables depuis l'onglet Configuration."""
+    debut = SRC_GUI.find("def _build_configuration")
+    fin = SRC_GUI.find("def _update_controls_enabled", debut)
+    bloc = SRC_GUI[debut:fin if fin > debut else debut + 9000]
+    return set(re.findall(r'\(\(\s*"(\w+)"\s*,\s*"(\w+)"\s*\)', bloc))
+
+
+def test_tout_champ_editable_est_repris_a_chaud():
+    """Un réglage accessible qui n'agit qu'au redémarrage est pire qu'un
+    réglage absent : on croit avoir agi. Chaque champ exposé doit être relu
+    soit par Banc (géométries, seuils de sélection), soit par
+    Pilote.appliquer_config (gains, tolérances, chiens de garde, bornes)."""
+    src_banc = (RACINE / "core" / "banc.py").read_text(encoding="utf-8")
+    deb = SRC_PILOTE.find("def appliquer_config")
+    fin = SRC_PILOTE.find("\n    def ", deb + 10)
+    corps = SRC_PILOTE[deb:fin if fin > deb else deb + 6000]
+    assert "appliquer_config" in SRC_GUI, \
+        "l'IHM n'appelle pas appliquer_config : la moitié des champs seraient inertes"
+
+    # champs de pure communication : relus a la (re)connexion, pas a chaud
+    hors_chaud = {("modbus", "ip"), ("modbus", "port"), ("modbus", "timeout_s")}
+    # purement affichage, aucun effet sur la boucle
+    affichage = {("variateur", "frequence_max_hz")}
+
+    inertes = []
+    for section, cle in sorted(_champs_exposes_par_lihm()):
+        if (section, cle) in hors_chaud or (section, cle) in affichage:
+            continue
+        if f'"{cle}"' in corps or f'"{cle}"' in src_banc:
+            continue
+        inertes.append(f"{section}.{cle}")
+    assert not inertes, (
+        "champs editables sans effet avant redemarrage : " + ", ".join(inertes))
+
+
+def test_champs_exposes_existent_dans_la_config():
+    """Un champ pointant sur une clé absente de config.json afficherait un
+    blanc et écrirait une clé morte."""
+    cfg = json.loads((RACINE / "config.json").read_text(encoding="utf-8"))
+    for section, cle in sorted(_champs_exposes_par_lihm()):
+        assert section in cfg, f"section « {section} » absente de config.json"
+        assert cle in cfg[section], f"« {section}.{cle} » absent de config.json"
