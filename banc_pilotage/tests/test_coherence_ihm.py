@@ -174,7 +174,12 @@ def test_page_mise_en_service_branchee():
     ordre = re.findall(r'self\._stack\.addWidget\(self\._build_(\w+)\(\)\)',
                        SRC_GUI)
     assert ordre.index("mise_en_service") == 5
-    assert "self._stack.currentIndex() != 5" in SRC_GUI
+    assert "PAGE_MISE_EN_SERVICE = 5" in SRC_GUI
+    assert "self._stack.currentIndex() != self.PAGE_MISE_EN_SERVICE" in SRC_GUI
+    # quitter la page doit rendre la main a la boucle : sinon le maintien
+    # des ordres TOR, suspendu par les commandes de vannes, le reste
+    assert "self.pilote.reprendre_maintien_tor()" in SRC_GUI.split(
+        "def _nav(")[1][:900]
 
 
 def test_page_mise_en_service_ne_commande_pas_le_materiel_en_direct():

@@ -552,8 +552,21 @@ class Application(QMainWindow):
 
         return bar
 
+    PAGE_MISE_EN_SERVICE = 5
+
     def _nav(self, idx: int) -> None:
+        precedent = self._stack.currentIndex()
         self._stack.setCurrentIndex(idx)
+        # Quitter la page de mise en service rend la main a la boucle. Ses
+        # commandes de vannes suspendent le maintien des ordres TOR ; sans
+        # ce retablissement il restait suspendu indefiniment, et sur carte
+        # GF3 un ordre non reaffirme laisse l'actionneur hors tension, donc
+        # sans resistance anti-condensation. On ne touche a rien si une
+        # sequence d'apprentissage tourne : c'est elle qui a la main.
+        if (precedent == self.PAGE_MISE_EN_SERVICE
+                and idx != self.PAGE_MISE_EN_SERVICE
+                and not self.apprentissage.etat["en_cours"]):
+            self.pilote.reprendre_maintien_tor()
         for i, btn in enumerate(self._nav_btns):
             name = "nav-btn-active" if i == idx else "nav-btn"
             if btn.objectName() != name:
@@ -1372,7 +1385,7 @@ class Application(QMainWindow):
     # ----- rafraichissement -----------------------------------------------
 
     def _tick_mise_en_service(self, e: dict) -> None:
-        if self._stack.currentIndex() != 5:
+        if self._stack.currentIndex() != self.PAGE_MISE_EN_SERVICE:
             return
         brutes = e.get("mesures_brutes") or {}
         img = e.get("image_process")
