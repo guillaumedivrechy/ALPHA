@@ -47,12 +47,24 @@ _DEFAUTS = ("erreur_com", "defaut_capteur", "defaut_vanne",
             "defaut_variateur", "defaut_pdc", "incoherence_vanne")
 
 
-def _fmt(valeur) -> str:
+# colonnes arrondies à l'unité. Un Reynolds est un nombre sans dimension de
+# quelques milliers : ses décimales n'ont aucun sens physique et encombrent le
+# dépouillement. L'écart-type en fait partie, il s'exprime dans la même unité.
+# L'arrondi est une pure mise en forme : l'état du pilote et la boucle
+# continuent de travailler en flottant.
+COLONNES_ENTIERES = frozenset((
+    "re_cible", "re_mesure", "re_moyen", "re_ecart_type",
+))
+
+
+def _fmt(valeur, entier: bool = False) -> str:
     """Rend une valeur en texte CSV francophone."""
     if valeur is None:
         return ""
     if isinstance(valeur, bool):
         return "1" if valeur else "0"
+    if entier and isinstance(valeur, (int, float)):
+        return f"{valeur:.0f}"
     if isinstance(valeur, float):
         return f"{valeur:.6g}".replace(".", ",")
     return str(valeur).replace(";", ",")
@@ -137,7 +149,8 @@ class JournalEssai:
         valeurs["defauts"] = defauts
         try:
             self._f.write(
-                ";".join(_fmt(valeurs.get(cle)) for cle, _ in COLONNES) + "\n")
+                ";".join(_fmt(valeurs.get(cle), cle in COLONNES_ENTIERES)
+                         for cle, _ in COLONNES) + "\n")
             self._f.flush()          # un arrêt brutal ne doit rien perdre
         except OSError as exc:
             # ne jamais faire tomber la boucle de régulation pour un disque

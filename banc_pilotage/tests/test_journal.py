@@ -44,8 +44,18 @@ def test_entete_et_ligne(tmp_path):
     # virgule décimale et séparateur « ; » : lecture directe dans Excel FR,
     # même convention qu'en lecture de séquence (core/sequence.py)
     assert champs["T [degC]"] == "21,7"
-    assert champs["Re consigne"] == "6000"
     assert champs["convergee"] == "1"
+    # Reynolds arrondis a l'unite : les decimales d'un nombre sans dimension
+    # de quelques milliers n'ont pas de sens physique. Le pilote, lui, garde
+    # ses flottants.
+    assert champs["Re consigne"] == "6000"
+    assert champs["Re mesure"] == "5987"        # 5987,3
+    assert champs["Re moyen"] == "5998"         # 5998,1
+    assert champs["Re ecart-type"] == "28"      # 28,4
+    for col in ("Re consigne", "Re mesure", "Re moyen", "Re ecart-type"):
+        assert "," not in champs[col], col
+    # les autres colonnes gardent leurs decimales
+    assert champs["dP [Pa]"] == "204,15"
     assert champs["diaphragme"] == "iso"
     assert champs["defauts"] == ""
 
