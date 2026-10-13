@@ -8,6 +8,7 @@ footer 30px (blanc, IBM Plex Mono)
 
 from __future__ import annotations
 import json
+import logging
 import math
 from collections import deque
 from datetime import datetime
@@ -18,7 +19,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QGridLayout,
     QGroupBox, QLabel, QLineEdit, QPushButton,
     QCheckBox, QSlider, QMessageBox, QFileDialog,
-    QFrame, QProgressBar,
+    QFrame, QProgressBar, QProgressDialog,
+    QSpinBox, QDoubleSpinBox,
 )
 from PySide6.QtGui import QPixmap
 from PySide6.QtCore import Qt, QTimer
@@ -33,6 +35,8 @@ PERIODE_IHM_MS = 250
 HISTORIQUE_PTS = 600
 
 _LOGO_PATH = Path(__file__).parent.parent / "ui" / "NEW_LOGO_IMT_NordRF_KitCom_Blanc-01.png"
+
+log = logging.getLogger(__name__)
 
 # ── validation ────────────────────────────────────────────────────────────────
 
@@ -345,15 +349,15 @@ QComboBox QAbstractItemView {{
 
 
 _NAV_LABELS = ["Graphique", "Voies", "Séquence", "Apprentissage",
-               "Configuration", "Mise en service"]
+               "Configuration", "Maintenance"]
 
 # (clé etat/brutes, nom affiché, max barre, format, couleur barre)
 # Les clés "dp_iso" et "dp_miller" sont résolues dans _tick_left via mesures_brutes
 _CHANNELS = [
-    ("re_mesure",   "Re mesuré",                 25000, "{:.0f}", "#00B8DE"),
-    ("p_amont",     "P amont [Pa]",              500,   "{:.1f}", "#FF9900"),
-    ("dp_iso",      "ΔP ISO [Pa]",    500,   "{:.1f}", "#1E8FB0"),
-    ("dp_miller",   "ΔP Miller [Pa]", 500,   "{:.1f}", "#FF9900"),
+    ("re_mesure",   "Re calculé",                 25000, "{:.0f}", "#00B8DE"),
+    ("p_amont",     "P amont [Pa]",              500,   "{:.2f}", "#FF9900"),
+    ("dp_iso",      "ΔP ISO [Pa]",    500,   "{:.2f}", "#1E8FB0"),
+    ("dp_miller",   "ΔP Miller [Pa]", 500,   "{:.2f}", "#FF9900"),
     ("temperature", "Température [°C]",          50,    "{:.1f}", "#FF9900"),
     ("u_variateur", "Recopie variateur [V]",     10,    "{:.2f}", "#00B8DE"),
 ]
@@ -424,6 +428,18 @@ class Application(QMainWindow):
             "re": False, "vman": False, "pdc": False,
         }
 
+        # Limites physiques de la vanne PDC pour affichage
+        act = cfg.get("actionneurs", {})
+        self._pdc_umin = act.get("pdc_recopie_min_v", 0.0)
+        self._pdc_umax = act.get("pdc_recopie_max_v", 10.0)
+
+        # Validation des limites PDC
+        if self._pdc_umax <= self._pdc_umin:
+            log.warning(
+                f"Configuration PDC invalide: Umax ({self._pdc_umax}V) <= Umin ({self._pdc_umin}V). "
+                "L'affichage du pourcentage sera désactivé (toujours 0%)."
+            )
+
         pg.setConfigOption("background", "#FFFFFF")
         pg.setConfigOption("foreground", COLORS["text"])
         pg.setConfigOptions(antialias=True)
@@ -472,6 +488,28 @@ class Application(QMainWindow):
         self._timer.timeout.connect(self._tick)
         self._timer.start(PERIODE_IHM_MS)
 
+        # Initialisation des vannes au démarrage (position de repos)
+        self._initialiser_vannes_demarrage()
+
+    def _pdc_v_vers_pct(self, volts: float | None) -> int:
+        """Convertit tension PDC [Umin, Umax] en pourcentage de FERMETURE [0%, 100%].
+
+        Convention vanne perte de charge:
+        - 0% = vanne ouverte (Umax = débit max)
+        - 100% = vanne fermée (Umin = débit min)
+        """
+        if volts is None:
+            return 0
+        if self._pdc_umax <= self._pdc_umin:
+            log.warning(
+                f"Conversion PDC impossible: Umax ({self._pdc_umax}V) <= Umin ({self._pdc_umin}V). "
+                "Retour 0% par défaut."
+            )
+            return 0
+        # Inverser: 100% = fermée (Umin), 0% = ouverte (Umax)
+        pct = (self._pdc_umax - volts) / (self._pdc_umax - self._pdc_umin) * 100
+        return int(max(0, min(100, pct)))
+
     def closeEvent(self, event):
         """Fermeture par la croix, Alt-F4 ou fin de session.
 
@@ -492,6 +530,110 @@ class Application(QMainWindow):
         self.pilote.arreter()
         event.accept()
 
+    def _initialiser_vannes_demarrage(self) -> None:
+        """Initialise les vannes en position de repos au démarrage :
+        - Vanne 3 voies sur Miller (90°)
+        - Bypass ouvert
+        - Perte de charge ouverte (100%)
+
+        Affiche un popup modal pendant le positionnement des vannes.
+        Utilise QTimer.singleShot pour ne pas bloquer l'affichage initial.
+        """
+        # Retarder l'initialisation de 100ms pour laisser l'interface se dessiner
+        QTimer.singleShot(100, self._lancer_initialisation_vannes)
+
+    def _lancer_initialisation_vannes(self) -> None:
+        """Lance effectivement l'initialisation des vannes (appelé par timer)."""
+        # Créer le dialog d'attente
+        self._dialog_init = QProgressDialog(
+            "Initialisation des vannes en cours...\n\n"
+            "• Vanne 3 voies → Miller (90°)\n"
+            "• Bypass → Ouvert\n"
+            "• Perte de charge → Ouverte",
+            None,  # Pas de bouton Cancel
+            0, 0,  # Range 0-0 = mode indéterminé (busy indicator)
+            self
+        )
+        self._dialog_init.setWindowTitle("Initialisation du banc")
+        self._dialog_init.setWindowModality(Qt.WindowModality.ApplicationModal)
+        self._dialog_init.setMinimumDuration(0)  # Afficher immédiatement
+        self._dialog_init.setCancelButton(None)  # Pas de bouton annuler
+        self._dialog_init.setAutoClose(False)
+        self._dialog_init.setAutoReset(False)
+        # Arrêter le timer si l'utilisateur ferme manuellement le dialog
+        self._dialog_init.rejected.connect(self._annuler_init_vannes)
+        self._dialog_init.show()
+
+        # Vérifier que le pilote est bien démarré
+        if not self.pilote._thread or not self.pilote._thread.is_alive():
+            self._dialog_init.close()
+            self._log("⚠ Pilote non démarré : initialisation annulée", COLORS["error"])
+            return
+
+        # Lancer les commandes de vannes
+        try:
+            self.pilote.commander_diaphragme("miller")
+            self.pilote.commander_bypass(True)
+            self.pilote.commander_vanne_perte_charge_pct(100.0)  # 100% ouverture (0% fermeture)
+        except Exception:  # noqa: BLE001
+            self._dialog_init.close()
+            return
+
+        # Timer pour vérifier l'avancement et fermer le dialog
+        self._temps_ecoule_init = 0.0
+        # Timeout basé sur les temps de course réels + marge de sécurité
+        act = self.cfg.get("actionneurs", {})
+        t_max_vanne = max(
+            act.get("vanne_3voies_temps_s", 11.0),
+            act.get("vanne_bypass_temps_s", 11.0),
+            act.get("vanne_perte_charge_course_s", 25.0)
+        )
+        self._timeout_max_init_s = t_max_vanne * 1.5  # Facteur 1.5 pour marge
+
+        # Créer le timer de vérification
+        self._timer_verif_init = QTimer(self)
+        self._timer_verif_init.timeout.connect(self._verifier_vannes_init)
+        self._timer_verif_init.start(200)  # Vérifier toutes les 200ms
+
+    def _verifier_vannes_init(self) -> None:
+        """Vérifie si les vannes sont en place et ferme le dialog."""
+        self._temps_ecoule_init += 0.2  # Timer tick tous les 200ms
+
+        # Lire l'état des vannes
+        etat = self.pilote.etat
+
+        # Vérifier si toutes les vannes sont en position
+        miller_ok = etat.get("fc_3voies_90", False)
+        bypass_ok = etat.get("fc_bypass_ouvert", False)
+        # PDC doit être ouverte (fermeture <= 10%, soit >= 90% de la plage vers Umax)
+        pdc_90pct_v = self._pdc_umin + 0.9 * (self._pdc_umax - self._pdc_umin)
+        pdc_ok = etat.get("pdc_position", 0.0) >= pdc_90pct_v
+
+        # Mettre à jour le message
+        status = []
+        status.append("✓ Vanne 3 voies → Miller" if miller_ok else "⏳ Vanne 3 voies...")
+        status.append("✓ Bypass → Ouvert" if bypass_ok else "⏳ Bypass...")
+        status.append("✓ Perte de charge → Ouverte" if pdc_ok else "⏳ Perte de charge...")
+
+        self._dialog_init.setLabelText(
+            "Initialisation des vannes en cours...\n\n" + "\n".join(status)
+        )
+
+        # Fermer si toutes les vannes sont en place ou timeout
+        if (miller_ok and bypass_ok and pdc_ok) or self._temps_ecoule_init >= self._timeout_max_init_s:
+            self._timer_verif_init.stop()
+            self._dialog_init.close()
+            if self._temps_ecoule_init >= self._timeout_max_init_s:
+                self._log("⚠ Initialisation vannes : timeout atteint", COLORS["error"])
+            else:
+                self._log("✓ Vannes initialisées (position de repos)", COLORS["ok"])
+
+    def _annuler_init_vannes(self) -> None:
+        """Arrête le timer d'initialisation si le dialog est fermé manuellement."""
+        if hasattr(self, '_timer_verif_init') and self._timer_verif_init.isActive():
+            self._timer_verif_init.stop()
+            self._log("Initialisation vannes annulée", COLORS["warning"])
+
     # ══════════════════════════════════════════════════════════════ HEADER
 
     def _build_header(self, mode: str) -> QWidget:
@@ -505,10 +647,13 @@ class Application(QMainWindow):
         # Logo IMT
         if _LOGO_PATH.exists():
             lbl_logo = QLabel()
-            px = QPixmap(str(_LOGO_PATH)).scaledToHeight(
-                56, Qt.TransformationMode.SmoothTransformation)
+            # Charger l'image haute résolution et redimensionner avec qualité
+            px = QPixmap(str(_LOGO_PATH))
+            # Redimensionner à une hauteur légèrement inférieure pour laisser du padding
+            px = px.scaledToHeight(48, Qt.TransformationMode.SmoothTransformation)
             lbl_logo.setPixmap(px)
-            lbl_logo.setStyleSheet("background:transparent;")
+            lbl_logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl_logo.setStyleSheet("background:transparent; padding: 4px 0px;")
             hl.addWidget(lbl_logo)
         else:
             lbl_logo = QLabel("IMT Nord Europe")
@@ -569,19 +714,23 @@ class Application(QMainWindow):
 
         return bar
 
-    PAGE_MISE_EN_SERVICE = 5
+    PAGE_MAINTENANCE = 5
 
     def _nav(self, idx: int) -> None:
         precedent = self._stack.currentIndex()
         self._stack.setCurrentIndex(idx)
-        # Quitter la page de mise en service rend la main a la boucle. Ses
+
+        if idx == self.PAGE_MAINTENANCE and precedent != self.PAGE_MAINTENANCE:
+            self._mes_reg_charger()
+
+        # Quitter la page de maintenance rend la main a la boucle. Ses
         # commandes de vannes suspendent le maintien des ordres TOR ; sans
         # ce retablissement il restait suspendu indefiniment, et sur carte
         # GF3 un ordre non reaffirme laisse l'actionneur hors tension, donc
         # sans resistance anti-condensation. On ne touche a rien si une
         # sequence d'apprentissage tourne : c'est elle qui a la main.
-        if (precedent == self.PAGE_MISE_EN_SERVICE
-                and idx != self.PAGE_MISE_EN_SERVICE
+        if (precedent == self.PAGE_MAINTENANCE
+                and idx != self.PAGE_MAINTENANCE
                 and not self.apprentissage.etat["en_cours"]):
             self.pilote.reprendre_maintien_tor()
         for i, btn in enumerate(self._nav_btns):
@@ -904,9 +1053,9 @@ class Application(QMainWindow):
         pdc_block = self._ctrl_slider_block(
             label="Vanne Perte de charge",
             dirty_key="pdc",
-            unit_lbl="% ouv.",
+            unit_lbl="% ferm.",  # % fermeture (0=ouverte, 100=fermée)
             slider_min=0, slider_max=100,
-            default_slider=50,
+            default_slider=0,  # Défaut: ouverte (0% fermeture)
             inp_width=56,
             on_slider=self._on_pdc_slider,
             on_input=self._on_pdc_input,
@@ -1132,10 +1281,10 @@ class Application(QMainWindow):
     # ══════════════════════════════════════════════════════════════ FOOTER
 
 
-    # ═══════════════════════════════════════════════════ MISE EN SERVICE
+    # ═══════════════════════════════════════════════════ MAINTENANCE
 
     def _mes_carte(self, titre: str, sous_titre: str = "") -> tuple:
-        """Carte de la page de mise en service. Retourne (widget, layout)."""
+        """Carte de la page de maintenance. Retourne (widget, layout)."""
         carte = QWidget()
         carte.setObjectName("cv-panel")
         vl = QVBoxLayout(carte)
@@ -1344,6 +1493,136 @@ class Application(QMainWindow):
         cl.addWidget(val("var_defaut"))
         vl.addWidget(c)
 
+        # ── 8. paramètres de régulation ───────────────────────────────
+        c, cl = self._mes_carte(
+            "PARAMÈTRES DE RÉGULATION",
+            "Ajustement en temps réel des gains PI, rampe, tau_consigne et "
+            "stratégie bas-Re. Les modifications sont appliquées immédiatement "
+            "et sauvegardées dans config.json.")
+
+        # Conteneur pour les spinbox
+        self._mes_reg_widgets = {}
+
+        def spin_double(key: str, mini: float, maxi: float, decimales: int = 2, suffix: str = "") -> QDoubleSpinBox:
+            s = QDoubleSpinBox()
+            s.setRange(mini, maxi)
+            s.setDecimals(decimales)
+            s.setSingleStep(10 ** (-decimales))
+            if suffix:
+                s.setSuffix(suffix)
+            s.setMinimumWidth(100)
+            s.setStyleSheet("background:#2A2A2A; color:#E0E0E0; border:1px solid #404040; padding:4px;")
+            self._mes_reg_widgets[key] = s
+            self._mes_actionneurs.append(s)
+            return s
+
+        def spin_int(key: str, mini: int, maxi: int, suffix: str = "") -> QSpinBox:
+            s = QSpinBox()
+            s.setRange(mini, maxi)
+            if suffix:
+                s.setSuffix(suffix)
+            s.setMinimumWidth(100)
+            s.setStyleSheet("background:#2A2A2A; color:#E0E0E0; border:1px solid #404040; padding:4px;")
+            self._mes_reg_widgets[key] = s
+            self._mes_actionneurs.append(s)
+            return s
+
+        def label_info(texte: str) -> QLabel:
+            """Label d'information grisé pour les explications."""
+            l = QLabel(texte)
+            l.setStyleSheet(f"font-size:10px; color:{COLORS['muted2']}; background:transparent; font-style:italic;")
+            return l
+
+        # Gains PI
+        h = QHBoxLayout(); h.setSpacing(18)
+        h.addWidget(QLabel("Kp (gain proportionnel)"))
+        h.addWidget(spin_double("kp", 0.0, 5.0, 2))
+        h.addWidget(label_info("par défaut : 0.30 | ↑ = réaction plus rapide mais risque oscillations"))
+        h.addStretch()
+        cl.addLayout(h)
+
+        h = QHBoxLayout(); h.setSpacing(18)
+        h.addWidget(QLabel("Ki (gain intégral)"))
+        h.addWidget(spin_double("ki", 0.0, 2.0, 3))
+        h.addWidget(label_info("par défaut : 0.15 | ↑ = élimine erreur statique mais risque overshoot"))
+        h.addStretch()
+        cl.addLayout(h)
+
+        # Rampe et tau_consigne
+        h = QHBoxLayout(); h.setSpacing(18)
+        h.addWidget(QLabel("Rampe PI"))
+        h.addWidget(spin_double("rampe_v_par_s", 0.0, 10.0, 2, " V/s"))
+        h.addWidget(label_info("par défaut : 2.0 V/s | ↑ = montée plus rapide, ↓ = plus douce (évite à-coups)"))
+        h.addStretch()
+        cl.addLayout(h)
+
+        h = QHBoxLayout(); h.setSpacing(18)
+        h.addWidget(QLabel("Tau consigne"))
+        h.addWidget(spin_double("tau_consigne_s", 0.0, 2.0, 2, " s"))
+        h.addWidget(label_info("par défaut : 0.0 s | ↑ = filtre la consigne (évite saut brutal), 0 = pas de filtre"))
+        h.addStretch()
+        cl.addLayout(h)
+
+        # Gain scheduling
+        h = QHBoxLayout(); h.setSpacing(18)
+        self._mes_reg_gain_scheduling = QCheckBox("Gain scheduling actif")
+        self._mes_reg_gain_scheduling.setStyleSheet("background:transparent; color:#E0E0E0;")
+        self._mes_actionneurs.append(self._mes_reg_gain_scheduling)
+        h.addWidget(self._mes_reg_gain_scheduling)
+        h.addWidget(label_info("par défaut : désactivé | Adapte les gains selon le point de fonctionnement"))
+        h.addStretch()
+        cl.addLayout(h)
+
+        cl.addWidget(_hsep())
+
+        # Stratégie bas-Re
+        h = QHBoxLayout(); h.setSpacing(18)
+        h.addWidget(QLabel("Seuil bas-Re"))
+        h.addWidget(spin_int("seuil_re", 0, 10000, " Re"))
+        h.addWidget(label_info("par défaut : 5000 Re | En dessous : bypass ouvert + Miller. 0 = auto depuis table"))
+        h.addStretch()
+        cl.addLayout(h)
+
+        h = QHBoxLayout(); h.setSpacing(18)
+        h.addWidget(QLabel("Split-range point"))
+        h.addWidget(spin_double("split_range_point", 0.1, 9.9, 1, " V"))
+        h.addWidget(label_info("par défaut : 5.0 V | Point de bascule PDC/variateur en mode bas-Re"))
+        h.addStretch()
+        cl.addLayout(h)
+
+        h = QHBoxLayout(); h.setSpacing(18)
+        h.addWidget(QLabel("Facteur gains bas-Re"))
+        h.addWidget(spin_double("gain_scale", 0.05, 1.0, 2))
+        h.addWidget(label_info("par défaut : 0.20 | ↓ = régulation plus douce en mode PDC (vanne lente)"))
+        h.addStretch()
+        cl.addLayout(h)
+
+        h = QHBoxLayout(); h.setSpacing(18)
+        h.addWidget(QLabel("Marge seuil"))
+        h.addWidget(spin_double("marge_seuil", 1.0, 2.0, 2))
+        h.addWidget(label_info("par défaut : 1.30 | Marge (×) appliquée à u_min pour dériver le seuil auto"))
+        h.addStretch()
+        cl.addLayout(h)
+
+        # Boutons
+        h = QHBoxLayout(); h.setSpacing(10)
+        h.addWidget(self._mes_bouton(
+            "Recharger depuis config.json",
+            self._mes_reg_charger))
+        h.addWidget(self._mes_bouton(
+            "Appliquer et sauvegarder",
+            self._mes_reg_appliquer))
+        h.addStretch()
+        cl.addLayout(h)
+
+        self._mes_lbl_reg_status = QLabel("")
+        self._mes_lbl_reg_status.setWordWrap(True)
+        self._mes_lbl_reg_status.setStyleSheet(
+            f"font-size:11px; color:{COLORS['muted2']}; background:transparent;")
+        cl.addWidget(self._mes_lbl_reg_status)
+
+        vl.addWidget(c)
+
         vl.addStretch(1)
         return page
 
@@ -1397,12 +1676,84 @@ class Application(QMainWindow):
         self._mes_slider.setValue(0)
         self.pilote.arreter_regulation()
         self.pilote.reprendre_maintien_tor()
-        self._log("Mise en service : ARRET", COLORS["error"])
+        self._log("Maintenance : ARRET", COLORS["error"])
+
+    def _mes_reg_charger(self) -> None:
+        """Recharge les paramètres de régulation depuis config.json."""
+        try:
+            cfg_path = Path(__file__).resolve().parent.parent / "config.json"
+            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+            reg = cfg.get("regulation", {})
+            sr = cfg.get("strategie_bas_re", {})
+
+            # Charger les valeurs dans les widgets
+            self._mes_reg_widgets["kp"].setValue(reg.get("kp", 0.5))
+            self._mes_reg_widgets["ki"].setValue(reg.get("ki", 0.15))
+            self._mes_reg_widgets["rampe_v_par_s"].setValue(reg.get("rampe_v_par_s", 2.0))
+            self._mes_reg_widgets["tau_consigne_s"].setValue(reg.get("tau_consigne_s", 0.0))
+            self._mes_reg_gain_scheduling.setChecked(reg.get("gain_scheduling_actif", False))
+
+            self._mes_reg_widgets["seuil_re"].setValue(sr.get("seuil_re", 5000))
+            self._mes_reg_widgets["split_range_point"].setValue(sr.get("split_range_point", 5.0))
+            self._mes_reg_widgets["gain_scale"].setValue(sr.get("gain_scale", 0.2))
+            self._mes_reg_widgets["marge_seuil"].setValue(sr.get("marge_seuil", 1.3))
+
+            self._mes_lbl_reg_status.setText(f"✓ Paramètres rechargés depuis config.json")
+            self._mes_lbl_reg_status.setStyleSheet(f"font-size:11px; color:{COLORS['success']}; background:transparent;")
+            self._log("Maintenance : paramètres de régulation rechargés", COLORS["accentText"])
+        except Exception as e:
+            self._mes_lbl_reg_status.setText(f"✗ Erreur : {str(e)}")
+            self._mes_lbl_reg_status.setStyleSheet(f"font-size:11px; color:{COLORS['error']}; background:transparent;")
+            self._log(f"Erreur rechargement paramètres : {e}", COLORS["error"])
+
+    def _mes_reg_appliquer(self) -> None:
+        """Applique les paramètres de régulation et les sauvegarde dans config.json."""
+        try:
+            # Lire config actuelle
+            cfg_path = Path(__file__).resolve().parent.parent / "config.json"
+            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+
+            # Mettre à jour les valeurs
+            if "regulation" not in cfg:
+                cfg["regulation"] = {}
+            if "strategie_bas_re" not in cfg:
+                cfg["strategie_bas_re"] = {}
+
+            cfg["regulation"]["kp"] = self._mes_reg_widgets["kp"].value()
+            cfg["regulation"]["ki"] = self._mes_reg_widgets["ki"].value()
+            cfg["regulation"]["rampe_v_par_s"] = self._mes_reg_widgets["rampe_v_par_s"].value()
+            cfg["regulation"]["tau_consigne_s"] = self._mes_reg_widgets["tau_consigne_s"].value()
+            cfg["regulation"]["gain_scheduling_actif"] = self._mes_reg_gain_scheduling.isChecked()
+
+            cfg["strategie_bas_re"]["seuil_re"] = self._mes_reg_widgets["seuil_re"].value()
+            cfg["strategie_bas_re"]["split_range_point"] = self._mes_reg_widgets["split_range_point"].value()
+            cfg["strategie_bas_re"]["gain_scale"] = self._mes_reg_widgets["gain_scale"].value()
+            cfg["strategie_bas_re"]["marge_seuil"] = self._mes_reg_widgets["marge_seuil"].value()
+
+            # Sauvegarder config.json
+            cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+
+            # Appliquer immédiatement au pilote via recharger_config
+            self.pilote.recharger_config(cfg)
+
+            self._mes_lbl_reg_status.setText(
+                f"✓ Paramètres appliqués et sauvegardés | "
+                f"Kp={cfg['regulation']['kp']:.2f}, Ki={cfg['regulation']['ki']:.3f}, "
+                f"Rampe={cfg['regulation']['rampe_v_par_s']:.1f} V/s")
+            self._mes_lbl_reg_status.setStyleSheet(f"font-size:11px; color:{COLORS['success']}; background:transparent;")
+            self._log(
+                f"Maintenance : paramètres appliqués - "
+                f"Kp={cfg['regulation']['kp']:.2f}, Ki={cfg['regulation']['ki']:.3f}",
+                COLORS["success"])
+        except Exception as e:
+            self._mes_lbl_reg_status.setText(f"✗ Erreur : {str(e)}")
+            self._mes_lbl_reg_status.setStyleSheet(f"font-size:11px; color:{COLORS['error']}; background:transparent;")
+            self._log(f"Erreur application paramètres : {e}", COLORS["error"])
 
     # ----- rafraichissement -----------------------------------------------
 
     def _tick_mise_en_service(self, e: dict) -> None:
-        if self._stack.currentIndex() != self.PAGE_MISE_EN_SERVICE:
+        if self._stack.currentIndex() != self.PAGE_MAINTENANCE:
             return
         brutes = e.get("mesures_brutes") or {}
         img = e.get("image_process")
@@ -1437,32 +1788,35 @@ class Application(QMainWindow):
         else:
             noms = {v["adresse"]: n for n, v in mb.get("entrees", {}).items()
                     if not n.startswith("_")}
-            lignes = ["<b>mot&nbsp; nom attendu&nbsp; &nbsp; &nbsp; &nbsp;"
-                      "&nbsp; &nbsp; brut&nbsp; &nbsp; &nbsp; valeur</b>"]
+            entete = (f"{'mot':>3}  {'nom attendu':<22}"
+                      + f"{'brut':>7}    {'valeur'}")
+            lignes = [f"<b>{entete}</b>"]
             for a in sorted(img["mots"]):
                 nom = noms.get(a, "?")
                 v = brutes.get(nom)
                 txt = f"{v:,.2f}".replace(",", " ") if isinstance(v, float) \
                     else "—"
-                lignes.append(
-                    f"{a:>3}&nbsp; &nbsp;{nom:<22}".replace(" ", "&nbsp;")
-                    + f"{img['mots'][a]:>7}&nbsp; &nbsp; &nbsp;{txt}")
-            self._mes_tbl_mots.setText("<br>".join(lignes))
+                ligne = (f"{a:>3}  {nom:<22}"
+                         + f"{img['mots'][a]:>7}    {txt}")
+                lignes.append(ligne)
+            html = "<pre>" + "\n".join(lignes) + "</pre>"
+            self._mes_tbl_mots.setText(html)
 
             nomst = {v["adresse"]: (n, v.get("inverse", False))
                      for n, v in mb.get("entrees_tor", {}).items()
                      if not n.startswith("_")}
-            lignes = ["<b>bit&nbsp; nom attendu&nbsp; &nbsp; &nbsp; &nbsp;"
-                      "&nbsp; &nbsp; brut&nbsp; &nbsp; interprete</b>"]
+            entete = (f"{'bit':>3}  {'nom attendu':<22}"
+                      + f"{'brut':>5}  {'interprete'}")
+            lignes = [f"<b>{entete}</b>"]
             for a in sorted(img["bits"]):
                 nom, inv = nomst.get(a, ("?", False))
                 etat = "●" if brutes.get(nom) else "○"
-                suffixe = "&nbsp; <i>(contact NF)</i>" if inv else ""
-                lignes.append(
-                    f"{a:>3}&nbsp; &nbsp;{nom:<22}".replace(" ", "&nbsp;")
-                    + f"&nbsp; &nbsp;{1 if img['bits'][a] else 0}"
-                    + f"&nbsp; &nbsp; &nbsp;{etat}{suffixe}")
-            self._mes_tbl_bits.setText("<br>".join(lignes))
+                suffixe = " <i>(contact NF)</i>" if inv else ""
+                ligne = (f"{a:>3}  {nom:<22}"
+                         + f"{1 if img['bits'][a] else 0:>5}  {etat}{suffixe}")
+                lignes.append(ligne)
+            html = "<pre>" + "\n".join(lignes) + "</pre>"
+            self._mes_tbl_bits.setText(html)
 
         # -- PT100 --
         T = brutes.get("temperature")
@@ -1512,17 +1866,17 @@ class Application(QMainWindow):
                  "rupture de fil ou 24 V commun absent", COLORS["error"])
 
         # -- bypass --
-        o, f = brutes.get("fc_bypass_ouvert"), brutes.get("fc_bypass_ferme")
-        if o and f:
-            mets("bypass_etat", "les deux fins de course actives — cablage",
-                 COLORS["error"])
-        elif o:
-            mets("bypass_etat", "ouvert", COLORS["ok"])
-        elif f:
-            mets("bypass_etat", "ferme", COLORS["ok"])
+        fc1_bypass = brutes.get("fc_bypass_ouvert")
+        fc2_bypass = brutes.get("fc_bypass_ferme")
+        bits_bypass = []
+        bits_bypass.append(f"FC1 (DI1) : {'fermé' if fc1_bypass else 'ouvert'}")
+        bits_bypass.append(f"FC2 (DI2) : {'fermé' if fc2_bypass else 'ouvert'}")
+        # Détection d'anomalie : les deux fins de course actives simultanément
+        if fc1_bypass and fc2_bypass:
+            bits_bypass.append("ANOMALIE : les deux FC actives")
+            mets("bypass_etat", "   ·   ".join(bits_bypass), COLORS["error"])
         else:
-            mets("bypass_etat", "en course (aucune fin de course)",
-                 COLORS["warn"])
+            mets("bypass_etat", "   ·   ".join(bits_bypass), COLORS["text"])
 
         # -- vanne PdC --
         cons = e.get("pdc_consigne")
@@ -1532,10 +1886,11 @@ class Application(QMainWindow):
             bits.append(f"consigne {cons:.2f} V".replace(".", ","))
         if rec is not None:
             bits.append(f"recopie {rec:.2f} V".replace(".", ","))
-        if brutes.get("fc_pdc_ferme"):
-            bits.append("FC fermee")
-        if brutes.get("fc_pdc_ouvert"):
-            bits.append("FC ouverte")
+        # Affichage systématique des fins de course avec leurs identifiants
+        fc1_ouvert = brutes.get("fc_pdc_ouvert")
+        fc2_ferme = brutes.get("fc_pdc_ferme")
+        bits.append(f"FC1 (DI3) : {'fermé' if fc1_ouvert else 'ouvert'}")
+        bits.append(f"FC2 (DI4) : {'fermé' if fc2_ferme else 'ouvert'}")
         # le diagnostic de divergence est deja fait par la boucle
         # (modele de course + hysteresis) : ne pas re-inventer un seuil ici,
         # la vanne met 25 s a parcourir sa course et tout ecart instantane
@@ -1675,7 +2030,7 @@ class Application(QMainWindow):
             pen=pg.mkPen("#FF9900", width=2,
                          style=Qt.PenStyle.DashLine), name="Consigne")
         self._curve_re = self._plot_re.plot(
-            pen=pg.mkPen(COLORS["accent"], width=2.5), name="Re mesuré")
+            pen=pg.mkPen(COLORS["accent"], width=2.5), name="Re calculé")
         pvl.addWidget(self._plot_re, 1)
 
         vl.addWidget(panel, 1)
@@ -1969,23 +2324,25 @@ class Application(QMainWindow):
         self._lbls_vanne: dict[str, tuple] = {}
 
         entries = [
-            ("▶  Zéro capteurs ΔP", "zero_capteurs",
-             lambda r: "  ".join(f"{v.replace('_500', '')} = {o} Pa"
+            # ORDRE CHRONOLOGIQUE : séquence à suivre pour la mise en service
+            ("▶  1. Zéro capteurs ΔP", "zero_capteurs",
+             lambda r: "  ".join(f"{v.replace('_500', '')} = {o:.2f} Pa"
                                  for v, o in r.items())),
-            ("▶  Contrôle câblage E/S", "verif_cablage",
-             lambda r: r["resume"]),
             None,
-            ("▶  Calibration recopie vanne perte de charge", "calibration_pdc",
+            ("▶  2. Calibration recopie vanne perte de charge", "calibration_pdc",
              lambda r: (f"0% = {r['v_min_recopie']} V  "
                         f"100% = {r['v_max_recopie']} V")),
             None,
-            ("▶  Vanne 3 voies", "vanne_3voies",
+            ("▶  3. Vanne 3 voies", "vanne_3voies",
              lambda r: (f"T1={r['T1_0_vers_90_s']} s  "
                         f"T2={r['T2_90_vers_0_s']} s")),
-            ("▶  Vanne bypass", "vanne_bypass",
+            ("▶  4. Vanne bypass", "vanne_bypass",
              lambda r: f"T1={r['ouverture_s']} s  T2={r['fermeture_s']} s"),
-            ("▶  Vanne perte de charge", "vanne_pdc",
+            ("▶  5. Vanne perte de charge", "vanne_pdc",
              lambda r: f"T1={r['ouverture_s']} s  T2={r['fermeture_s']} s"),
+            None,
+            ("▶  6. Contrôle câblage E/S (vérification finale)", "verif_cablage",
+             lambda r: r["resume"]),
         ]
         gr = 0
         for entry in entries:
@@ -2014,7 +2371,101 @@ class Application(QMainWindow):
             gv.setRowMinimumHeight(gr, 44)
             gr += 1
         gv.setRowStretch(gr, 1)
-        sub.addTab(tab_v, "  Vannes  ")
+        sub.addTab(tab_v, "  1-6. Vannes  ")
+
+        # ── Re mapping Miller (plage basse) ──────────────────
+        # ORDRE CHRONOLOGIQUE : faire re_mapping_miller AVANT re_mapping_iso et indiciel
+        tab_miller = QWidget()
+        vm = QVBoxLayout(tab_miller)
+        vm.setContentsMargins(16, 16, 16, 16)
+        vm.setSpacing(16)
+        col_m = QWidget()
+        cml = QVBoxLayout(col_m)
+        cml.setContentsMargins(0, 0, 0, 0)
+        cml.setSpacing(8)
+        lbl_m = QLabel(
+            "<b>7. Re mapping Miller (plage basse)</b><br>"
+            "Détecte le décrochage du ventilateur et détermine u_min, u_seuil et PDC min. "
+            "Couvre la plage basse 250-5000 Re (Miller, bypass ouvert).<br>"
+            "<i>Paliers 12s, mesure automatique u_seuil et PDC min.</i>")
+        lbl_m.setWordWrap(True)
+        lbl_m.setObjectName("muted")
+        cml.addWidget(lbl_m)
+        cml.addSpacing(8)
+        self._btn_re_mapping_miller = QPushButton(
+            "▶  7. Lancer Re mapping Miller")
+        self._btn_re_mapping_miller.setMinimumHeight(40)
+        self._btn_re_mapping_miller.clicked.connect(
+            lambda: self._lancer_test("re_mapping_miller"))
+        cml.addWidget(self._btn_re_mapping_miller)
+        self._lbl_statut_re_mapping_miller = QLabel("—")
+        self._lbl_statut_re_mapping_miller.setObjectName("mono")
+        cml.addWidget(self._lbl_statut_re_mapping_miller)
+        cml.addStretch()
+        vm.addWidget(col_m, 0)
+        self._plot_re_mapping_miller = pg.PlotWidget()
+        self._plot_re_mapping_miller.setMenuEnabled(False)
+        self._plot_re_mapping_miller.showGrid(x=True, y=True, alpha=0.15)
+        self._plot_re_mapping_miller.setLabel("bottom", "Tension [V]")
+        self._plot_re_mapping_miller.setLabel("left", "Reynolds")
+        self._curve_miller_stable = self._plot_re_mapping_miller.plot(
+            pen=pg.mkPen(COLORS["accent"], width=2), symbol="o",
+            symbolSize=6, symbolBrush=COLORS["accent"],
+            symbolPen=pg.mkPen("#E8EEF1", width=1))
+        self._curve_miller_stall = self._plot_re_mapping_miller.plot(
+            pen=None, symbol="x", symbolSize=10,
+            symbolBrush=COLORS["error"],
+            symbolPen=pg.mkPen(COLORS["error"], width=2))
+        self._line_miller_min = pg.InfiniteLine(
+            angle=90, movable=False,
+            pen=pg.mkPen(COLORS["warn"], width=1,
+                         style=Qt.PenStyle.DashLine),
+            label="U min", labelOpts={"color": COLORS["warn"]})
+        self._line_miller_min.setVisible(False)
+        self._plot_re_mapping_miller.addItem(self._line_miller_min)
+        vm.addWidget(self._plot_re_mapping_miller, 1)
+        sub.addTab(tab_miller, "  7. Re Miller  ")
+
+        # ── Re mapping ISO (plage haute) ──────────────────
+        tab_iso = QWidget()
+        viso = QVBoxLayout(tab_iso)
+        viso.setContentsMargins(16, 16, 16, 16)
+        viso.setSpacing(16)
+        col_iso = QWidget()
+        cisol = QVBoxLayout(col_iso)
+        cisol.setContentsMargins(0, 0, 0, 0)
+        cisol.setSpacing(8)
+        lbl_iso = QLabel(
+            "<b>8. Re mapping ISO (plage haute)</b><br>"
+            "Caractérisation plage haute 5000-15000 Re (ISO, bypass fermé). "
+            "Nécessite que re_mapping_miller ait été lancé au préalable.<br>"
+            "<i>Paliers 12s, montée depuis u_seuil jusqu'à 10V.</i>")
+        lbl_iso.setWordWrap(True)
+        lbl_iso.setObjectName("muted")
+        cisol.addWidget(lbl_iso)
+        cisol.addSpacing(8)
+        self._btn_re_mapping_iso = QPushButton(
+            "▶  8. Lancer Re mapping ISO")
+        self._btn_re_mapping_iso.setMinimumHeight(40)
+        self._btn_re_mapping_iso.clicked.connect(
+            lambda: self._lancer_test("re_mapping_iso"))
+        cisol.addWidget(self._btn_re_mapping_iso)
+        self._lbl_statut_re_mapping_iso = QLabel("—")
+        self._lbl_statut_re_mapping_iso.setObjectName("mono")
+        cisol.addWidget(self._lbl_statut_re_mapping_iso)
+        cisol.addStretch()
+        viso.addWidget(col_iso, 0)
+        self._plot_re_mapping_iso = pg.PlotWidget()
+        self._plot_re_mapping_iso.setMenuEnabled(False)
+        self._plot_re_mapping_iso.showGrid(x=True, y=True, alpha=0.15)
+        self._plot_re_mapping_iso.setLabel("bottom", "Tension [V]")
+        self._plot_re_mapping_iso.setLabel("left", "Reynolds")
+        self._curve_iso_stable = self._plot_re_mapping_iso.plot(
+            pen=pg.mkPen(COLORS["accent"], width=2), symbol="o",
+            symbolSize=6, symbolBrush=COLORS["accent"],
+            symbolPen=pg.mkPen("#E8EEF1", width=1))
+        viso.addWidget(self._plot_re_mapping_iso, 1)
+        sub.addTab(tab_iso, "  8. Re ISO  ")
 
         # ── Indiciel ──────────────────────────────────────────
         tab_i = QWidget()
@@ -2024,6 +2475,16 @@ class Application(QMainWindow):
         gi.setColumnStretch(0, 3)
         gi.setColumnMinimumWidth(1, 52)
         gi.setColumnStretch(2, 2)
+
+        lbl_i = QLabel(
+            "<b>9. Essai indiciel (réglage PI)</b><br>"
+            "Stabilise à U1, applique l'échelon U1→U2, dépouille automatiquement "
+            "le temps mort, τ, gain K et propose kp/ki (IMC). "
+            "Prérequis : tests 7-8 (Re mapping Miller + ISO).<br>"
+            "<i>Configuration : diaphragme Miller (90°), bypass fermé, vanne PDC ouverte.</i>")
+        lbl_i.setWordWrap(True)
+        lbl_i.setObjectName("muted")
+        gi.addWidget(lbl_i, 0, 0, 1, 3)
 
         hv = QHBoxLayout()
         hv.addWidget(QLabel("U1 [V] :"))
@@ -2036,12 +2497,12 @@ class Application(QMainWindow):
         self.inp_u2.setFixedWidth(60)
         hv.addWidget(self.inp_u2)
         hv.addStretch()
-        gi.addLayout(hv, 0, 0, 1, 3)
+        gi.addLayout(hv, 1, 0, 1, 3)
 
-        self._btn_indiciel = QPushButton("▶  Lancer l'essai indiciel")
+        self._btn_indiciel = QPushButton("▶  9. Lancer l'essai indiciel")
         self._btn_indiciel.setMinimumHeight(40)
         self._btn_indiciel.clicked.connect(self._lancer_indiciel)
-        gi.addWidget(self._btn_indiciel, 1, 0)
+        gi.addWidget(self._btn_indiciel, 2, 0)
 
         bhi = QPushButton("?")
         bhi.setFixedSize(44, 40)
@@ -2050,86 +2511,12 @@ class Application(QMainWindow):
             self, "Essai indiciel",
             "Stabilise à U1, applique l'échelon vers U2, dépouille "
             "automatiquement : t_mort, τ, gain K, propose kp/ki IMC."))
-        gi.addWidget(bhi, 1, 1)
+        gi.addWidget(bhi, 2, 1)
         self._lbl_statut_indiciel = QLabel("—")
         self._lbl_statut_indiciel.setObjectName("mono")
-        gi.addWidget(self._lbl_statut_indiciel, 1, 2)
-        gi.setRowStretch(2, 1)
-        sub.addTab(tab_i, "  Indiciel  ")
-
-        # ── Courbe de gain ────────────────────────────────────
-        tab_g = QWidget()
-        hg = QHBoxLayout(tab_g)
-        hg.setContentsMargins(16, 16, 16, 16)
-        hg.setSpacing(16)
-        col_g = QWidget()
-        cgl = QVBoxLayout(col_g)
-        cgl.setContentsMargins(0, 0, 0, 0)
-        cgl.setSpacing(8)
-        cgl.addWidget(QLabel("Paliers [V] (séparés par virgules) :"))
-        self.inp_paliers = QLineEdit("2, 4, 6, 8")
-        cgl.addWidget(self.inp_paliers)
-        self._btn_courbe_gain = QPushButton(
-            "▶  Lancer courbe de gain")
-        self._btn_courbe_gain.clicked.connect(self._lancer_courbe_gain)
-        cgl.addWidget(self._btn_courbe_gain)
-        self._lbl_statut_courbe_gain = QLabel("—")
-        cgl.addWidget(self._lbl_statut_courbe_gain)
-        cgl.addStretch()
-        hg.addWidget(col_g, 1)
-        self._plot_gain = pg.PlotWidget()
-        self._plot_gain.setMenuEnabled(False)
-        self._plot_gain.showGrid(x=True, y=True, alpha=0.15)
-        self._plot_gain.setLabel("bottom", "Tension [V]")
-        self._plot_gain.setLabel("left", "Reynolds")
-        self._curve_gain = self._plot_gain.plot(
-            pen=pg.mkPen(COLORS["accent"], width=2),
-            symbol="o", symbolSize=6,
-            symbolBrush=COLORS["accent"],
-            symbolPen=pg.mkPen("#E8EEF1", width=1))
-        hg.addWidget(self._plot_gain, 2)
-        sub.addTab(tab_g, "  Courbe de gain  ")
-
-        # ── Tension min ───────────────────────────────────────
-        tab_f = QWidget()
-        hf = QHBoxLayout(tab_f)
-        hf.setContentsMargins(16, 16, 16, 16)
-        hf.setSpacing(16)
-        col_f = QWidget()
-        cfl = QVBoxLayout(col_f)
-        cfl.setContentsMargins(0, 0, 0, 0)
-        cfl.setSpacing(8)
-        self._btn_freq_min = QPushButton(
-            "▶  Test décrochage ventilateur")
-        self._btn_freq_min.clicked.connect(
-            lambda: self._lancer_test("freq_min"))
-        cfl.addWidget(self._btn_freq_min)
-        self._lbl_statut_freq_min = QLabel("—")
-        cfl.addWidget(self._lbl_statut_freq_min)
-        cfl.addStretch()
-        hf.addWidget(col_f, 1)
-        self._plot_freq_min = pg.PlotWidget()
-        self._plot_freq_min.setMenuEnabled(False)
-        self._plot_freq_min.showGrid(x=True, y=True, alpha=0.15)
-        self._plot_freq_min.setLabel("bottom", "Tension [V]")
-        self._plot_freq_min.setLabel("left", "Reynolds")
-        self._curve_freq_stable = self._plot_freq_min.plot(
-            pen=pg.mkPen(COLORS["accent"], width=2), symbol="o",
-            symbolSize=6, symbolBrush=COLORS["accent"],
-            symbolPen=pg.mkPen("#E8EEF1", width=1))
-        self._curve_freq_stall = self._plot_freq_min.plot(
-            pen=None, symbol="x", symbolSize=10,
-            symbolBrush=COLORS["error"],
-            symbolPen=pg.mkPen(COLORS["error"], width=2))
-        self._line_freq_min = pg.InfiniteLine(
-            angle=90, movable=False,
-            pen=pg.mkPen(COLORS["warn"], width=1,
-                         style=Qt.PenStyle.DashLine),
-            label="U min", labelOpts={"color": COLORS["warn"]})
-        self._line_freq_min.setVisible(False)
-        self._plot_freq_min.addItem(self._line_freq_min)
-        hf.addWidget(self._plot_freq_min, 2)
-        sub.addTab(tab_f, "  Tension min  ")
+        gi.addWidget(self._lbl_statut_indiciel, 2, 2)
+        gi.setRowStretch(3, 1)
+        sub.addTab(tab_i, "  9. Indiciel  ")
 
         # boutons bas
         hb = QHBoxLayout()
@@ -2291,7 +2678,7 @@ class Application(QMainWindow):
 
         # colonne gauche
         _grp("Banc & Fluide", [
-            (("patm_pa",),                      "Pression atmosphérique", "Pa",   "{:.0f}", _positif),
+            (("patm_pa",),                      "Pression atmosphérique", "Pa",   "{:.2f}", _positif),
             (("fluide","gamma"),                "γ (gaz)",                "—",    "{:.5f}", _positif),
             (("veine","section_m2"),            "Section veine",          "m²",   "{:.4f}", _positif),
             (("veine","longueur_caracteristique_m"),"Longueur caract.",   "m",    "{:.3f}", _positif),
@@ -2432,10 +2819,12 @@ class Application(QMainWindow):
 
         # PdC toujours
         try:
-            pct = float(self._inp_pdc.text().replace(",", "."))
-            pct = min(max(pct, 0.0), 100.0)
-            self.pilote.commander_vanne_perte_charge_pct(pct)
-            self._log(f"PdC → {pct:.0f} %", "#FF9900")
+            pct_ferm = float(self._inp_pdc.text().replace(",", "."))
+            pct_ferm = min(max(pct_ferm, 0.0), 100.0)
+            # Convertir % fermeture → % ouverture pour le pilote
+            pct_ouv = 100.0 - pct_ferm
+            self.pilote.commander_vanne_perte_charge_pct(pct_ouv)
+            self._log(f"PdC → {pct_ferm:.0f} % fermeture", "#FF9900")
             self._dirty["pdc"] = False
         except ValueError:
             pass
@@ -2474,6 +2863,15 @@ class Application(QMainWindow):
         self._mark_dirty("re")
 
     def _on_re_input(self, text: str) -> None:
+        try:
+            re_val = int(text.replace(",", ".").replace(" ", ""))
+            # Synchroniser le slider avec la valeur saisie (Re / 250)
+            slider_val = int(re_val / 250)
+            self._slider_re.blockSignals(True)
+            self._slider_re.setValue(slider_val)
+            self._slider_re.blockSignals(False)
+        except ValueError:
+            pass
         self._mark_dirty("re")
 
     def _on_vman_slider(self, v: int) -> None:
@@ -2481,17 +2879,37 @@ class Application(QMainWindow):
         self._mark_dirty("vman")
 
     def _on_vman_input(self, text: str) -> None:
+        try:
+            v_val = float(text.replace(",", "."))
+            # Synchroniser le slider avec la valeur saisie (V * 10)
+            slider_val = int(v_val * 10)
+            self._slider_u.blockSignals(True)
+            self._slider_u.setValue(slider_val)
+            self._slider_u.blockSignals(False)
+        except ValueError:
+            pass
         self._mark_dirty("vman")
 
     def _on_pdc_slider(self, v: int) -> None:
+        """Slider PDC: v = % fermeture (0=ouverte, 100=fermée)."""
         self._inp_pdc.setText(str(v))
-        self._lbl_pdc_v.setText(f"≙ {v / 10:.1f} V — 0 V = fermée")
+        # Convertir % fermeture en volts: 0% → Umax, 100% → Umin
+        volts = self._pdc_umax - (v / 100.0) * (self._pdc_umax - self._pdc_umin)
+        self._lbl_pdc_v.setText(f"≙ {volts:.2f} V — {self._pdc_umin:.1f}V = fermée")
         self._mark_dirty("pdc")
 
     def _on_pdc_input(self, text: str) -> None:
+        """Input PDC: saisie directe % fermeture."""
         try:
-            v = float(text.replace(",", "."))
-            self._lbl_pdc_v.setText(f"≙ {v / 10:.1f} V — 0 V = fermée")
+            pct_ferm = float(text.replace(",", "."))
+            pct_ferm = max(0, min(100, pct_ferm))  # Limiter à [0, 100]
+            # Convertir % fermeture en volts
+            volts = self._pdc_umax - (pct_ferm / 100.0) * (self._pdc_umax - self._pdc_umin)
+            self._lbl_pdc_v.setText(f"≙ {volts:.2f} V — {self._pdc_umin:.1f}V = fermée")
+            # Synchroniser le curseur avec la valeur saisie
+            self._slider_pdc.blockSignals(True)
+            self._slider_pdc.setValue(int(pct_ferm))
+            self._slider_pdc.blockSignals(False)
         except ValueError:
             pass
         self._mark_dirty("pdc")
@@ -2536,24 +2954,6 @@ class Application(QMainWindow):
                                  "0 ≤ U1 < U2 ≤ 10 V requis.")
             return
         self._lancer_test("indiciel", u1=u1, u2=u2)
-
-    def _lancer_courbe_gain(self) -> None:
-        try:
-            tensions = [
-                float(x.replace(",", "."))
-                for x in self.inp_paliers.text().replace(";", ",").split(",")
-                if x.strip()
-            ]
-            if (len(tensions) < 2
-                    or not all(0 <= v <= 10 for v in tensions)
-                    or any(b <= a for a, b in zip(tensions, tensions[1:]))):
-                raise ValueError
-        except ValueError:
-            QMessageBox.critical(
-                self, "Courbe de gain",
-                "Au moins 2 paliers strictement croissants entre 0 et 10 V.")
-            return
-        self._lancer_test("courbe_gain", tensions=tensions)
 
     def _appliquer_apprentissage(self) -> None:
         rep = QMessageBox.question(
@@ -2672,7 +3072,7 @@ class Application(QMainWindow):
         self._section("voies", self._tick_entrees, e)
         self._section("apprentissage", self._tick_apprentissage)
         self._section("séquence", self._tick_sequence, e)
-        self._section("mise en service", self._tick_mise_en_service, e)
+        self._section("maintenance", self._tick_mise_en_service, e)
         self._section("courbe", self._historiser, e)
 
     def _historiser(self, e: dict) -> None:
@@ -2750,14 +3150,13 @@ class Application(QMainWindow):
         self._act_subs["bypass"].setText(bp_sub)
 
         pdc = e.get("pdc_position")
-        pdc_pct = int((pdc or 0) / 10.0 * 100)
+        pdc_pct = self._pdc_v_vers_pct(pdc)
         self._act_vals["pdc"].setText(
             f"{pdc_pct} %" if pdc is not None else "—")
         self._act_dots["pdc"].setStyleSheet(
             f"color:{'#FF9900' if pdc_pct > 10 else '#DBE5EA'};"
             " font-size:10px; background:transparent;")
-        self._act_bars["pdc"].setValue(
-            int(min((pdc or 0) / 10.0, 1.0) * 1000))
+        self._act_bars["pdc"].setValue(pdc_pct * 10)
         self._act_subs["pdc"].setText(
             f"{pdc:.2f} V".replace(".", ",") if pdc is not None else "—")
 
@@ -2817,7 +3216,7 @@ class Application(QMainWindow):
         sp_val = f"{e.get('re_cible', 0.0):.0f}"
         self._scope_legend_re.setText(
             f"<span style='color:#00B8DE'>▬</span>"
-            f" Re mesuré  <b style='color:#00B8DE'>{re_val}</b>")
+            f" Re calculé  <b style='color:#00B8DE'>{re_val}</b>")
         self._scope_legend_sp.setText(
             f"<span style='color:#FF9900'>╌</span>"
             f" Re consigne  <b style='color:#FF9900'>{sp_val}</b>")
@@ -3024,38 +3423,40 @@ class Application(QMainWindow):
              lambda r: (f"K={r['gain_re_par_v']} Re/V  "
                         f"τ={r['tau_s']} s  "
                         f"kp={r['kp_propose']}  ki={r['ki_propose']}"))
-        _maj(self._btn_courbe_gain, self._lbl_statut_courbe_gain, "courbe_gain",
-             lambda r: (f"Gain moy. {r['gain_moyen']} Re/V  "
-                        f"non-lin. {r['non_linearite_pct']} %  "
-                        f"{r['verdict']}"))
-        _maj(self._btn_freq_min, self._lbl_statut_freq_min, "freq_min",
+        # Re mapping Miller (plage basse)
+        _maj(self._btn_re_mapping_miller, self._lbl_statut_re_mapping_miller, "re_mapping_miller",
              lambda r: (f"U min = {r['u_min_exploitable_v']} V  "
-                        f"Re = {r['re_a_u_min']}"))
-
-        if "courbe_gain" in r:
-            pts = r["courbe_gain"]["points_V_Re"]
-            self._curve_gain.setData(
-                [p[0] for p in pts], [p[1] for p in pts])
-
-        paliers = (a.etat.get("paliers_freq_min")
-                   or (r["freq_min"]["paliers_V_Re"]
-                       if "freq_min" in r else None))
-        if paliers:
-            if "freq_min" in r:
-                u_min = r["freq_min"]["u_min_exploitable_v"]
-                ok  = [(u, re) for u, re in paliers if u >= u_min]
-                nok = [(u, re) for u, re in paliers if u < u_min]
-                self._curve_freq_stable.setData(
+                        f"u_seuil = {r.get('u_seuil_bas_re_v', '?')} V"))
+        paliers_miller = (a.etat.get("paliers_re_mapping")
+                          or (r["re_mapping_miller"]["paliers_V_Re"]
+                              if "re_mapping_miller" in r else None))
+        if paliers_miller:
+            if "re_mapping_miller" in r:
+                u_min = r["re_mapping_miller"]["u_min_exploitable_v"]
+                ok  = [(u, re) for u, re in paliers_miller if u >= u_min]
+                nok = [(u, re) for u, re in paliers_miller if u < u_min]
+                self._curve_miller_stable.setData(
                     [p[0] for p in ok], [p[1] for p in ok])
-                self._curve_freq_stall.setData(
+                self._curve_miller_stall.setData(
                     [p[0] for p in nok], [p[1] for p in nok])
-                self._line_freq_min.setValue(u_min)
-                self._line_freq_min.setVisible(True)
+                self._line_miller_min.setValue(u_min)
+                self._line_miller_min.setVisible(True)
             else:
-                self._curve_freq_stable.setData(
-                    [p[0] for p in paliers], [p[1] for p in paliers])
-                self._curve_freq_stall.setData([], [])
-                self._line_freq_min.setVisible(False)
+                self._curve_miller_stable.setData(
+                    [p[0] for p in paliers_miller], [p[1] for p in paliers_miller])
+                self._curve_miller_stall.setData([], [])
+                self._line_miller_min.setVisible(False)
+
+        # Re mapping ISO (plage haute)
+        _maj(self._btn_re_mapping_iso, self._lbl_statut_re_mapping_iso, "re_mapping_iso",
+             lambda r: (f"{len(r.get('paliers_plage_haute', []))} paliers  "
+                        f"u_seuil = {r.get('u_seuil_utilise_v', '?')} V"))
+        paliers_iso = (a.etat.get("paliers_plage_haute")
+                       or (r["re_mapping_iso"]["paliers_plage_haute"]
+                           if "re_mapping_iso" in r else None))
+        if paliers_iso:
+            self._curve_iso_stable.setData(
+                [p[0] for p in paliers_iso], [p[1] for p in paliers_iso])
 
     def _tracer(self) -> None:
         donnees = list(self._hist_re)
