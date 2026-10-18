@@ -514,6 +514,9 @@ class Pilote:
         # PDC minimale exploitable (%) mesurée par apprentissage, défaut 50%
         # (limite physique décrochage observée empiriquement)
         self.pdc_min_exploitable_pct = srcfg.get("pdc_min_exploitable_pct", 50.0)
+        # Re conduite minimal tenu en mode PdC (Re mapping Miller) : borne
+        # basse des consignes, comme le capteur ΔP borne le haut
+        self.re_min_exploitable = srcfg.get("re_min_exploitable")
         # écart commande / position de la vanne PdC [V] : en deçà, la vanne
         # est arrivée (alarme « hors de portée » armée seulement en butée
         # PHYSIQUE, pas dès que la commande y est)
@@ -574,6 +577,7 @@ class Pilote:
         self._biais_ff: dict = {}          # mode -> (id table, biais relatif appris)
         self._t_ecart_variateur = None     # début de l'écart commande / recopie AM
         self._re_cible_max = None          # consigne max mesurable (None = pas de limite)
+        self._re_cible_min = None          # consigne min tenable en mode PdC
         # dernière butée LUE de la vanne 3 voies (diaphragme dont le capteur
         # ΔP est exploité) : tenue pendant une course, faute de butée lue
         self._diaphragme_mesure_dernier: str | None = None
@@ -870,6 +874,7 @@ class Pilote:
         self._mode_cible_precedent = None
         self._mode_effectif_precedent = None
         self._re_cible_max = None
+        self._re_cible_min = None
         self.etat["consigne_limitee"] = None
 
     def mode_manuel_tension(self, volts: float) -> None:
@@ -989,6 +994,8 @@ class Pilote:
                 "marge_ventilateur_pdc", self.marge_ventilateur_pdc))
             self.pdc_min_exploitable_pct = sr.get("pdc_min_exploitable_pct",
                                                    self.pdc_min_exploitable_pct)
+            self.re_min_exploitable = sr.get("re_min_exploitable",
+                                             self.re_min_exploitable)
             self.ecart_course_pdc_v = sr.get("ecart_course_pdc_v",
                                              self.ecart_course_pdc_v)
             self.bas_re_scale = min(max(sr.get("gain_scale",
@@ -1628,6 +1635,18 @@ class Pilote:
             # Re au-delà de la mesure et ne convergeait jamais.
             self._borner_consigne(diaph, qm_vise, re_cible, T, p_amont,
                                   reference)
+            # borne basse : sous le Re minimal tenu en mode PdC (vanne PdC
+            # au minimum exploitable, ventilateur à u_pdc), la consigne était
+            # attendue ~30 s puis déclarée « hors de portée »
+            re_min = self.re_min_exploitable
+            if mode == MODE_PDC_CONTROL and _nombre(re_min) and re_min > 0 \
+                    and 0 < re_cond_attendu < re_min:
+                self._re_cible_min = re_cible * re_min / re_cond_attendu
+                msg = (f"consigne {re_cible:.0f} Re {reference} sous le minimum "
+                       f"tenu en mode PdC ({re_min:.0f} Re conduite) : "
+                       f"régulation limitée à {self._re_cible_min:.0f} Re {reference}")
+                self.etat["consigne_limitee"] = msg
+                log.warning(msg)
 
             # Mémoriser l'équivalent conduite de la consigne
             self._re_cible_conduite = re_cond_attendu
@@ -2173,8 +2192,7 @@ class Pilote:
 
             # ---- Calcul de la commande selon le mode ----
             # consigne effective : bornée au maximum mesurable par le capteur
-            re_vise = re_cible if self._re_cible_max is None \
-                else min(re_cible, self._re_cible_max)
+            re_vise = self._re_borne(re_cible)
             if not vannes_pretes:
                 # CORRECTION-2 : Timeout si vannes bloquées
                 self._cycles_attente_vannes += 1
@@ -2315,8 +2333,7 @@ class Pilote:
         # jugée sur la consigne effectivement visée : bornée au maximum
         # mesurable, une consigne hors plage ne convergeait jamais (Re moyen
         # sur le plafond, mais comparé à la consigne saisie)
-        re_effectif = re_cible if self._re_cible_max is None \
-            else min(re_cible, self._re_cible_max)
+        re_effectif = self._re_borne(re_cible)
         tol = self.tolerance_sortie if self._convergee_depuis is not None \
             else self.tolerance
         # pas de convergence sur un transitoire : la moyenne d'une fenêtre
@@ -2351,7 +2368,11 @@ class Pilote:
                               f"au-delà du seuil Miller/ISO "
                               f"({self.banc.seuil_re:.0f}) : ignoré — corriger "
                               "strategie_bas_re")
-            if not seuil or self.u_min_ventilateur is None:
+            if not self._mode_pdc_caracterise():
+                motifs.append("Re mapping Miller non fait : le mode PdC (très "
+                              "bas Re) reste inactif — lancer l'apprentissage "
+                              "« Re mapping Miller »")
+            elif not seuil or self.u_min_ventilateur is None:
                 motifs.append("seuil bas-Re inconnu : lancer l'apprentissage "
                               "« Re mapping » (ou fixer strategie_bas_re.seuil_re)")
             bornes = self._re_bornes_bas_re()
@@ -2493,10 +2514,21 @@ class Pilote:
         mesurés bypass fermé et surestiment le Re tenu à u_min en Miller."""
         if not self.bas_re_actif:
             return 0.0                     # stratégie désactivée : jamais de mode PdC
+        if not self._mode_pdc_caracterise():
+            return 0.0
         if self.seuil_bas_re and not self._seuil_bas_re_config_invalide():
             return self.seuil_bas_re
         bornes = self._re_bornes_bas_re()
         return 0.5 * (bornes[0] + bornes[1]) if bornes else 0.0
+
+    def _mode_pdc_caracterise(self) -> bool:
+        """Le mode PdC fixe le ventilateur à u_min × marge : il n'est sûr
+        qu'avec un u_min MESURÉ sur ce banc, c.-à-d. après le Re mapping
+        Miller (qui produit aussi la table Miller). Sans lui, le seuil
+        retombait sur la table ISO ou le gain appris en marche, avec le
+        u_min de la config : sur un banc non caractérisé, ventilateur à
+        0,35 V, Re nul et alarme « hors de portée »."""
+        return self.table_gains_bas_re.valide_ff()
 
     def _u_pdc(self) -> float:
         """Tension du ventilateur en mode PdC : u_min × marge_ventilateur_pdc."""
@@ -2635,6 +2667,15 @@ class Pilote:
             return min(max(re_cond_attendu / self._gain_re_par_volt, 0.0), 10.0)
         return None
 
+    def _re_borne(self, re_cible: float) -> float:
+        """Consigne effectivement visée : bornée au maximum mesurable par le
+        capteur ΔP et au minimum tenu en mode PdC."""
+        if self._re_cible_max is not None:
+            re_cible = min(re_cible, self._re_cible_max)
+        if self._re_cible_min is not None:
+            re_cible = max(re_cible, self._re_cible_min)
+        return re_cible
+
     def _borner_consigne(self, diaph: str, qm_vise: float, re_cible: float,
                          T: float, p_amont: float,
                          reference: str = "conduite") -> None:
@@ -2645,6 +2686,7 @@ class Pilote:
         Sans cette borne, le Re calculé plafonne au capteur, l'erreur ne se
         résorbe jamais, et la commande part en butée."""
         self._re_cible_max = None
+        self._re_cible_min = None
         self.etat["consigne_limitee"] = None
         cle = CLE_DP.get(diaph, CLE_DP["miller"])
         dp_lim = self.marge_consigne_dp * self.saturation_dp \

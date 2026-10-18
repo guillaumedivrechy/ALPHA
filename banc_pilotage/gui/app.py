@@ -464,7 +464,7 @@ class Application(QMainWindow):
         ("dp_sature",         "⚠ ΔP saturé — Re au-delà de la plage "
                               "mesurable du capteur"),
         ("bas_re_motif",      "ℹ Stratégie bas-Re indisponible"),
-        ("consigne_limitee",  "⚠ Consigne limitée au maximum mesurable"),
+        ("consigne_limitee",  "⚠ Consigne limitée à la plage atteignable"),
         ("alerte_table_ff",   "⚠ Table de gains à refaire"),
         ("alerte_pdc",        "⚠ Consigne hors de portée du mode PdC"),
     ]
@@ -3928,8 +3928,9 @@ class Application(QMainWindow):
         re_val = "en cours" if en_course else f"{re:.0f}" if re is not None else "—"
         sp_val = f"{e.get('re_cible', 0.0):.0f}"
         vise = e.get("re_vise")
-        if vise is not None and e.get("re_cible") and vise < e["re_cible"] - 0.5:
-            # consigne bornée au maximum mesurable : la valeur réellement visée
+        if vise is not None and e.get("re_cible") and abs(vise - e["re_cible"]) > 0.5:
+            # consigne bornée (maximum mesurable ou minimum tenu en PdC) :
+            # la valeur réellement visée
             sp_val += f" → limitée à {vise:.0f}"
         self._scope_legend_re.setText(
             f"<span style='color:#00B8DE'>▬</span>"

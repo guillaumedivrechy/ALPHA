@@ -1851,6 +1851,7 @@ class Apprentissage:
                 lignes.append(f"PDC min exploitable = {r['pdc_min_exploitable_pct']:.1f}%")
             if r.get("re_min_exploitable") is not None:
                 self.cfg["strategie_bas_re"]["re_min_exploitable"] = r["re_min_exploitable"]
+                self.pilote.re_min_exploitable = r["re_min_exploitable"]
                 lignes.append(f"Re min exploitable = {r['re_min_exploitable']}")
         # Gestion séparée des résultats re_mapping_miller
         if "re_mapping_miller" in self.resultats:
@@ -1881,6 +1882,7 @@ class Apprentissage:
                 lignes.append(f"PDC min exploitable = {r['pdc_min_exploitable_pct']:.1f}%")
             if r.get("re_min_exploitable") is not None:
                 self.cfg["strategie_bas_re"]["re_min_exploitable"] = r["re_min_exploitable"]
+                self.pilote.re_min_exploitable = r["re_min_exploitable"]
                 lignes.append(f"Re min exploitable = {r['re_min_exploitable']}")
         # Gestion séparée des résultats re_mapping_iso
         if "re_mapping_iso" in self.resultats:

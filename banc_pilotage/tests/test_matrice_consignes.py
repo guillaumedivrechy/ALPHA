@@ -75,10 +75,14 @@ def test_consigne_depuis_chaque_etat(monkeypatch, tmp_path, depart, re, ref):
                                              else 40.0), t_conv
     assert e["convergee"], (e.get("re_moyen"), e.get("re_vise"))
     assert e["re_moyen"] == pytest.approx(e["re_vise"], rel=0.01)
-    limitee = e["re_vise"] < re - 0.5
+    limitee = abs(e["re_vise"] - re) > 0.5
     assert bool(e.get("consigne_limitee")) == limitee
-    if limitee:                          # plafond capteur ΔP ISO (451 Pa)
+    if limitee and e["re_vise"] < re:    # plafond capteur ΔP ISO (451 Pa)
         assert e["re_vise"] > 0.93 * (25600 if ref == "conduite" else 13690)
+    elif limitee:                        # plancher du mode PdC (Re mapping)
+        re_min = b.cfg["strategie_bas_re"]["re_min_exploitable"]
+        assert e["re_vise"] * (K_VEINE if ref == "veine" else 1.0) \
+            == pytest.approx(re_min, rel=0.02)
     for cle in ("alerte_pdc", "alerte_table_ff", "dp_sature"):
         assert not e.get(cle), (cle, e.get(cle))
     # au plus un changement de configuration de vannes, sans battement
@@ -177,4 +181,39 @@ def test_banc_vierge_sans_violation(monkeypatch, tmp_path, re, ref):
     b = _banc(monkeypatch, tmp_path, "repos", caracterise=False)
     b.consigne(float(re), ref)
     assert b.jusqu_a_convergence(80.0) is not None
+    assert not b.violations, b.violations[:3]
+
+
+@pytest.mark.parametrize("re", [300.0, 600.0])
+def test_banc_vierge_pas_de_mode_pdc_sans_re_mapping_miller(monkeypatch, tmp_path, re):
+    """Banc non caractérisé, après une marche en ISO (gain appris en
+    marche) : très bas Re au ventilateur, jamais en mode PdC avec un u_min
+    non mesuré (avant : ventilateur à 0,35 V, Re nul, alarme)."""
+    b = _banc(monkeypatch, tmp_path, "ISO", caracterise=False)
+    b.consigne(re, "veine")
+    modes = set()
+    for _ in range(int(80 / b.p.periode)):
+        b.cycles(b.p.periode)
+        modes.add(b.p._mode_regulation)
+    e = b.p.etat
+    assert "pdc_control" not in modes
+    assert not e.get("alerte_pdc")
+    assert e["re_moyen"] == pytest.approx(re, rel=0.10)
+    assert "Re mapping Miller non fait" in (e.get("bas_re_motif") or "")
+    assert not b.violations, b.violations[:3]
+
+
+@pytest.mark.parametrize("re,ref", [(150.0, "veine"), (349.0, "conduite")])
+def test_consigne_sous_le_minimum_du_mode_pdc_limitee(monkeypatch, tmp_path, re, ref):
+    """Sous le Re minimal tenu en mode PdC (Re mapping Miller) : consigne
+    limitée dès la saisie, convergée au minimum, sans alarme « hors de
+    portée » (avant : ~30 s d'attente puis alarme)."""
+    b = _banc(monkeypatch, tmp_path, "Miller")
+    b.consigne(re, ref)
+    assert b.jusqu_a_convergence(90.0) is not None
+    e = b.p.etat
+    re_min = b.cfg["strategie_bas_re"]["re_min_exploitable"]
+    assert "sous le minimum" in (e.get("consigne_limitee") or "")
+    assert e["re_vise"] * (K_VEINE if ref == "veine" else 1.0) == pytest.approx(re_min, rel=0.02)
+    assert not e.get("alerte_pdc")
     assert not b.violations, b.violations[:3]

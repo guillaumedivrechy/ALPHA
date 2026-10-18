@@ -231,6 +231,10 @@ def test_cycles_simulation_sans_erreur():
     assert pilote.etat.get("defaut_vanne") is None
 
 
+# table Miller (bypass ouvert) d'un banc caractérisé : prérequis du mode PdC
+TABLE_MILLER = TableGains([(0.5, 700.0), (2.0, 2800.0), (5.0, 7000.0)])
+
+
 def _pilote_en_position(fc: str) -> tuple:
     """Pilote sur StubES avec la vanne 3 voies déjà en position.
 
@@ -278,6 +282,7 @@ def test_rampe_pi_bornee_en_bas_re():
     contre l'actionneur lent -> dépassement puis oscillation."""
     pilote, es = _pilote_en_position("fc_3voies_90")   # déjà sur Miller
     pilote.seuil_bas_re = 3000.0
+    pilote.table_gains_bas_re = TABLE_MILLER        # Re mapping Miller fait
     pilote.definir_consigne(1000.0, "conduite")
     pilote.demarrer_regulation()
     pilote._cycle()
@@ -576,6 +581,7 @@ def test_bascule_bas_re_en_cours_recale_le_pi():
     du mode précédent."""
     pilote, es = _pilote_en_position("fc_3voies_90")
     pilote.seuil_bas_re = 2000.0
+    pilote.table_gains_bas_re = TABLE_MILLER        # Re mapping Miller fait
     pilote.u_min_ventilateur = 0.5
     pilote.table_gains_pdc = TableGains([(30.0, 300.0), (100.0, 1500.0)])
     es.mesures["dp_diaph_500"] = 0.5
@@ -591,6 +597,8 @@ def test_bascule_bas_re_en_cours_recale_le_pi():
     assert pilote._mode_regulation == "pdc_control"
     v_ff = pilote._pdc_ff_v(1000.0)
     assert appels and appels[0] == pytest.approx(v_ff)
+    for _ in range(15):                 # u_pdc rejoint sur la rampe du variateur
+        pilote._cycle()
     assert pilote.etat["u_variateur"] == pytest.approx(pilote._u_pdc())
 
 
@@ -1004,6 +1012,7 @@ def test_feed_forward_pdc_depuis_la_table_apprise_en_pourcent():
     plafonné à 1 V (~10 % d'ouverture)."""
     pilote, es = _pilote_en_position("fc_3voies_90")
     pilote.seuil_bas_re = 2000.0
+    pilote.table_gains_bas_re = TABLE_MILLER        # Re mapping Miller fait
     pilote.u_min_ventilateur = 0.5
     pilote.table_gains_pdc = TableGains([(30.0, 300.0), (100.0, 1500.0)])
     es.mesures["dp_diaph_500"] = 0.5
@@ -1316,6 +1325,7 @@ def test_consigne_hors_de_portee_du_mode_pdc_signalee():
     consigne : la régulation attendait indéfiniment sans rien signaler."""
     pilote, es = _pilote_en_position("fc_3voies_90")
     pilote.seuil_bas_re = 2000.0
+    pilote.table_gains_bas_re = TABLE_MILLER        # Re mapping Miller fait
     pilote.u_min_ventilateur = 0.5
     es.mesures["dp_diaph_500"] = 0.5                 # Re ~ 0
     pilote.definir_consigne(1000.0, "conduite")
@@ -1335,6 +1345,7 @@ def test_alarme_pdc_seulement_en_butee_physique(monkeypatch):
     monkeypatch.setattr(time, "monotonic", lambda: horloge[0])
     pilote, es = _pilote_en_position("fc_3voies_90")
     pilote.seuil_bas_re = 2000.0
+    pilote.table_gains_bas_re = TABLE_MILLER        # Re mapping Miller fait
     pilote.u_min_ventilateur = 0.5
     es.mesures["dp_diaph_500"] = 200.0               # Re bien au-dessus
     es.mesures["pdc_recopie"] = 10.0
