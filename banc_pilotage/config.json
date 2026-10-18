@@ -70,7 +70,7 @@
     "recul_saturation_v_par_s": 0.5,
     "trim_max_v": 1.5,
     "suivi_variateur_max_s": 15.0,
-    "marge_consigne_dp_relative": 1.0,
+    "marge_consigne_dp_relative": 0.95,
     "bande_integration_relative": 0.03,
     "seuil_stabilite_relatif": 0.005,
     "re_max_iso": 26878

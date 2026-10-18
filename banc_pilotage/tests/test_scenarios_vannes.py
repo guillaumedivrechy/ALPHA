@@ -249,3 +249,10 @@ def test_consigne_veine_hors_capteur_bornee_et_convergee(banc):
     assert 13000 < e["re_vise"] < 15000                 # plafond en Re veine
     assert e["re_moyen"] == pytest.approx(e["re_vise"], rel=0.01)
     assert e["convergee"]
+
+
+def test_config_plafond_consigne_sous_le_seuil_de_saturation():
+    """marge_consigne_dp_relative = 1 placerait la consigne limitée SUR le
+    seuil de saturation : le bruit le franchit sans cesse, le recul sur
+    saturation s'enclenche et la régulation ne converge jamais."""
+    assert CFG["regulation"]["marge_consigne_dp_relative"] < 1.0
