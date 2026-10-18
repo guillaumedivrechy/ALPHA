@@ -121,7 +121,7 @@ Temps mesurés sur le banc simulé, à titre de repère.
 | 12 000 Re veine depuis le repos | ISO, bypass fermé | « RÉGULÉ ✓ » ≤ 30 s | |
 | 3 000 depuis 12 000 | reste en ISO, aucune manœuvre | ≤ 15 s | |
 | 2 000 depuis 3 000 | Miller, bypass ouvert, variateur | ≤ 30 s | |
-| 300 depuis 2 000 | mode PdC, ventilateur fixe | ≤ 80 s | |
+| 300 depuis 2 000 | mode PdC, ventilateur fixe, sans creux sous la consigne | ≤ 40 s | |
 | 15 000 | limitée ≈ 13 700 (« consigne limitée ») | ≤ 30 s | |
 | `exemple_sequence.csv` | chaque échelon converge, « Arrêter » fige | — | |
 
