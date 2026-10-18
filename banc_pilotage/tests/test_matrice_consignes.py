@@ -70,8 +70,8 @@ def test_consigne_depuis_chaque_etat(monkeypatch, tmp_path, depart, re, ref):
     mode = _mode_attendu(b, depart, re_cond)
     assert b.p._mode_regulation == mode
     assert not b.violations, b.violations[:3]
-    # temps mesurés sur ce banc : ≤ 28 s variateur, 31-68 s vanne PdC
-    assert t_conv is not None and t_conv <= (80.0 if mode == "pdc_control"
+    # temps mesurés sur ce banc : ≤ 28 s variateur, ≤ 37 s vanne PdC
+    assert t_conv is not None and t_conv <= (50.0 if mode == "pdc_control"
                                              else 40.0), t_conv
     assert e["convergee"], (e.get("re_moyen"), e.get("re_vise"))
     assert e["re_moyen"] == pytest.approx(e["re_vise"], rel=0.01)
@@ -217,3 +217,35 @@ def test_consigne_sous_le_minimum_du_mode_pdc_limitee(monkeypatch, tmp_path, re,
     assert e["re_vise"] * (K_VEINE if ref == "veine" else 1.0) == pytest.approx(re_min, rel=0.02)
     assert not e.get("alerte_pdc")
     assert not b.violations, b.violations[:3]
+
+
+@pytest.mark.parametrize("depart,re,ref", [("ISO", 600.0, "veine"),
+                                           ("Miller", 600.0, "veine"),
+                                           ("Miller", 1000.0, "conduite")])
+def test_entree_en_mode_pdc_par_le_haut_sans_creux(monkeypatch, tmp_path,
+                                                   depart, re, ref):
+    """Entrée en mode PdC depuis l'ISO ou le Miller : la vanne part grande
+    ouverte (≈ 12 s de course). Le PI poursuivait le Re de la vanne pas
+    encore arrivée et la vanne arrivait trop fermée : Re à -20/-30 % sous la
+    consigne puis 30 s de rattrapage. Désormais tenue sur la table PdC
+    pendant sa course."""
+    b = _banc(monkeypatch, tmp_path, depart)
+    b.consigne(re, ref)
+    # creux mesuré après le premier passage à la consigne (depuis l'ISO, le
+    # ventilateur coupé pendant la manœuvre fait repartir le Re de zéro)
+    signe, traverse, re_min = None, False, None
+    for _ in range(int(60 / b.p.periode)):
+        b.cycles(b.p.periode)
+        e = b.p.etat
+        # ventilateur arrivé à u_pdc : sous ~1,2 V le simulateur fait
+        # décrocher le ventilateur (débit erratique pendant sa montée)
+        if b.p._mode_regulation != "pdc_control" or e.get("manoeuvre") \
+                or abs(e["u_variateur"] - b.p._u_pdc()) > 0.02:
+            continue
+        s_ = e["re_mesure"] >= re
+        traverse = traverse or (signe is not None and s_ != signe)
+        signe = s_
+        if traverse:
+            re_min = e["re_mesure"] if re_min is None else min(re_min, e["re_mesure"])
+    assert re_min is not None and re_min > 0.95 * re, re_min
+    assert e["convergee"]

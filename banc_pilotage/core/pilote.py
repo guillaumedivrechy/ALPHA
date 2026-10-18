@@ -2276,12 +2276,25 @@ class Pilote:
 
                 consigne_pi = self._reference_filtree(re_vise, re_mesure)
                 self.pi.u_max = 10.0          # sortie = vanne, pas variateur
-                pdc_v = min(max(self.pi.calculer(consigne_pi, re_mesure),
-                                0.0), 10.0)
-                # feed-forward de la table PdC (Re conduite) : publié pour le
-                # diagnostic, la sortie du PI le contient déjà (intégrale
-                # pré-chargée par _preparer_pi)
+                # feed-forward de la table PdC (Re conduite) : la sortie du PI
+                # le contient (intégrale pré-chargée par _preparer_pi)
                 v_ff_pdc = self._pdc_ff_v(re_vise * self._k_conversion)
+                en_course = abs(self._pdc_consigne - self._pdc_position_estimee) \
+                    > self.ecart_course_pdc_v
+                if v_ff_pdc is not None and en_course:
+                    # vanne en course vers sa commande (≈ 16 s pleine course,
+                    # p. ex. depuis grande ouverte à l'entrée en mode PdC) :
+                    # le Re mesuré est celui d'une vanne pas encore arrivée.
+                    # Le PI le poursuivait, vidait son intégrale, et la vanne
+                    # arrivait bien trop fermée (Re à -30 %, 30 s de rattrapage).
+                    # Vanne tenue sur la table, PI recalé dessus ; il reprend
+                    # la main une fois la vanne arrivée.
+                    self.pi.reinitialiser(v_ff_pdc)
+                    self._consigne_interne = None
+                    pdc_v = v_ff_pdc
+                else:
+                    pdc_v = min(max(self.pi.calculer(consigne_pi, re_mesure),
+                                    0.0), 10.0)
                 if v_ff_pdc is not None:
                     self._diag = {
                         "phase": "FF+PI vanne PdC",
