@@ -574,16 +574,13 @@ class Application(QMainWindow):
     def closeEvent(self, event):
         """Fermeture par la croix, Alt-F4 ou fin de session.
 
-        arreter() ne fait qu'arreter le thread et fermer la liaison : les
-        sorties du coupleur gardent leur derniere valeur. Sans l'arret de
-        regulation prealable, fermer la fenetre ventilateur en marche le
-        laissait tourner, hors de toute supervision et sans plus aucun
-        moyen de l'arreter depuis le logiciel.
-
-        On ne remet pas les vannes en position de repos ici : c'est le role
-        délibéré du bouton Quitter. La croix garantit le minimum, l'arret
-        de la machine tournante."""
+        Pilote.arreter() coupe le ventilateur, arrête la boucle, met les
+        vannes en position de repos puis ferme la liaison. L'arrêt de
+        régulation préalable reste en tête : si arreter() échouait, la
+        machine tournante serait au moins arrêtée. Une séquence
+        d'apprentissage en cours est annulée."""
         self._timer.stop()
+        self.apprentissage.annuler()
         try:
             self.pilote.arreter_regulation()   # 0 V + RUN retire, mode manuel coupe
         except Exception as e:                 # noqa: BLE001
@@ -3214,10 +3211,9 @@ class Application(QMainWindow):
         self._log("ARRÊT VARIATEUR", COLORS["error"])
 
     def _quitter(self) -> None:
-        self.pilote.arreter_regulation()
-        self.pilote.commander_vanne_perte_charge(10.0)   # PdC grande ouverte (10 V)
-        self.pilote.commander_bypass(False)              # bypass fermé
-        self.pilote.commander_diaphragme("iso")          # diaphragme ISO
+        # arrêt et position de repos sont faits par closeEvent / Pilote.arreter
+        # (ventilateur coupé, puis Miller, bypass et PdC ouverts). Commander
+        # ici ISO + bypass fermé était aussitôt contredit par cette position.
         self.close()
 
     def _cmd_diaph(self, pos: str) -> None:

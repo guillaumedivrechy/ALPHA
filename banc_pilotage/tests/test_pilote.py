@@ -1053,3 +1053,100 @@ def test_saturation_detectee_malgre_l_ecretage_du_capteur():
         pilote._cycle()
     assert pilote.etat["dp_sature"] is True
     assert pilote.etat["plafond_u_sature"] is not None
+
+
+# ---- boucle : modes, chiens de garde, arrêt (revue complète) ---------------
+
+def test_strategie_bas_re_desactivee_respectee():
+    """strategie_bas_re.actif = false : jamais de mode PdC (variateur figé à
+    u_min). RÉGRESSION : le drapeau n'agissait que sur le message affiché."""
+    pilote, es = _pilote_en_position("fc_3voies_90")
+    pilote.bas_re_actif = False
+    pilote.seuil_bas_re = 2000.0
+    pilote.u_min_ventilateur = 0.5
+    es.mesures["dp_diaph_500"] = 0.5
+    pilote.definir_consigne(1000.0, "conduite")
+    pilote.demarrer_regulation()
+    for _ in range(5):
+        pilote._cycle()
+    assert pilote._mode_regulation == "normal_low"
+
+
+def test_seuils_diaphragme_de_la_boucle_alignes_sur_le_banc():
+    """La boucle lisait une clé inexistante (seuil figé à 5000) et une demi-
+    hystérésis : venant de l'ISO, une consigne de 4600 (dans la bande
+    4500-5500 du Banc) faisait basculer la boucle vers le Miller."""
+    pilote, es = _pilote_en_position("fc_3voies_0")
+    pilote.bas_re_actif = False
+    es.mesures["dp_iso_500"] = 20.0
+    pilote.definir_consigne(4600.0, "conduite")
+    pilote.demarrer_regulation()
+    for _ in range(5):
+        pilote._cycle()
+    assert False not in es.coil_diaphragme          # jamais commandée vers 90°
+    cfg = json.loads(json.dumps(CFG))
+    cfg["selection_diaphragme"]["seuil_re"] = 6000.0
+    pilote.appliquer_banc(Banc(cfg))
+    assert pilote._configuration_modes().seuil_diaphragme == 6000.0
+
+
+def test_chien_de_garde_du_bypass_conserve_en_manoeuvre_simultanee():
+    """Bypass et vanne 3 voies commandés ensemble : la seconde manœuvre
+    écrasait la première, le bypass n'avait plus de chien de garde."""
+    pilote, es = _pilote_en_position("fc_3voies_0")
+    pilote.t_vanne_bypass = pilote.t_vanne_3voies = 0.2
+    pilote.marge_manoeuvre = 0.0
+    pilote._cycle()
+    pilote.commander_bypass(True)                    # n'arrivera jamais
+    pilote.commander_diaphragme("miller")
+    es.mesures.update({"fc_3voies_0": False, "fc_3voies_90": True})
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < 1.0 and not pilote.etat.get("defaut_vanne"):
+        pilote._cycle()
+        time.sleep(0.02)
+    assert "bypass" in (pilote.etat.get("defaut_vanne") or "")
+
+
+def test_ventilateur_a_zero_pendant_une_manoeuvre_hors_manuel():
+    """Pendant une manœuvre en régulation, l'état publiait 0 V mais la sortie
+    gardait la dernière tension écrite."""
+    pilote, es = _pilote_en_position("fc_3voies_0")
+    pilote._cycle()
+    es.ecrire_variateur(3.0)                         # dernière tension écrite
+    pilote.commander_diaphragme("miller")
+    pilote._cycle()
+    assert pilote.etat["manoeuvre"]
+    assert es.variateur[-1] == 0.0
+
+
+def test_delai_d_attente_des_vannes_derive_de_la_config():
+    pilote, _ = _pilote_en_position("fc_3voies_0")
+    attendu = pilote.facteur_chien_garde * (
+        pilote.t_vanne_bypass + pilote.t_vanne_3voies
+        + pilote.t_vanne_pdc_course) + 3.0 * pilote.marge_manoeuvre
+    assert pilote._timeout_attente_vannes_s() == pytest.approx(attendu)
+    pilote.t_vanne_pdc_course = 60.0
+    assert pilote._timeout_attente_vannes_s() > attendu
+
+
+def test_arret_coupe_le_ventilateur_avant_la_position_de_repos(tmp_path):
+    """Basculer sur le Miller ventilateur lancé enverrait tout le débit dans
+    le petit orifice : arreter() coupe d'abord le variateur."""
+    evenements = []
+
+    class ESJournal(StubES):
+        def ecrire_variateur(self, volts):
+            evenements.append(("variateur", volts))
+
+        def ecrire_vanne_diaphragme(self, vers_0deg):
+            evenements.append(("3voies", vers_0deg))
+
+    es = ESJournal({"temperature": 20.0, "fc_3voies_0": True})
+    pilote = Pilote(Banc(CFG), es, CFG)
+    pilote._chemin_etat = tmp_path / "etat.json"
+    pilote.journal = None
+    pilote.mode_manuel_tension(4.0)
+    evenements.clear()
+    pilote.arreter()
+    premier_3voies = next(i for i, e in enumerate(evenements) if e[0] == "3voies")
+    assert ("variateur", 0.0) in evenements[:premier_3voies]

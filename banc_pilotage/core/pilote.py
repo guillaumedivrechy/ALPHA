@@ -415,8 +415,11 @@ class Pilote:
 
         # manœuvre en cours : None ou dict {motif, fc_attendue | angle_attendu,
         # t_debut, t_max}
-        self._manoeuvre: dict | None = None
-        self._t_fin_gel = 0.0              # petite marge après fin de course
+        # manœuvres en cours, une par vanne ("3voies", "bypass") : bypass et
+        # vanne 3 voies sont souvent commandés ensemble, et chacun garde son
+        # propre chien de garde. dict {motif, fc_attendue | angle_attendu,
+        # t_debut, t_max, t_fin_gel}
+        self._manoeuvres: dict[str, dict] = {}
 
         # vanne perte de charge : recopie 0-10 V (pas de fin de course).
         # L'estimation interne (consigne suivie à 10 V / temps de course)
@@ -467,7 +470,6 @@ class Pilote:
 
         # CORRECTION-2 : Timeout FC + arrêt sécurisé
         self._cycles_attente_vannes = 0
-        self._timeout_vannes_cycles = int(40.0 / self.periode)  # 40s timeout (bypass 11s + diaphragme 8s + marge 20s)
 
         # CORRECTION-3 : Arrêt si FC incohérents
         self._cycles_fc_incoherents = 0
@@ -604,13 +606,7 @@ class Pilote:
         self._mode_effectif_precedent: ModeRegulation | None = None
 
         # Configuration modes (construit à partir de config.json)
-        self._config_modes = ConfigurationModes(
-            seuil_diaphragme=cfg.get("selection_diaphragme", {}).get("seuil_re_conduite", 5000),
-            largeur_hysteresis_diaphragme=cfg.get("selection_diaphragme", {}).get("hysteresis_re", 500),
-            seuil_bas_re=self.seuil_bas_re or 2000,  # Sera mis à jour dynamiquement
-            largeur_hysteresis_bas_re=100,  # ±5% (hardcodé pour l'instant)
-            u_min=self.u_min_ventilateur or 1.2
-        )
+        self._config_modes = self._configuration_modes()
 
         self._verrou = threading.Lock()
         self._stop = threading.Event()
@@ -661,6 +657,7 @@ class Pilote:
             self.etat[cle] = None
         self._cycles_t_invalide = 0
         self._cycles_incoherence = 0
+        self._cycles_attente_vannes = 0    # sinon l'attente d'avant l'arrêt est décomptée
         self._plafond_u_sature = None
         self.pi.u_max = 10.0
 
@@ -753,6 +750,9 @@ class Pilote:
         self._u_ff_applique = 0.0
         self._consigne_interne = None
         self._mode_regulation = None
+        # mémoire d'hystérésis des modes : la vanne a pu être manœuvrée depuis
+        self._mode_cible_precedent = None
+        self._mode_effectif_precedent = None
         self._re_cible_max = None
         self.etat["consigne_limitee"] = None
 
@@ -993,13 +993,32 @@ class Pilote:
     def _demarrer_manoeuvre(self, motif: str, t_course: float,
                             fc_attendue: str | None = None,
                             angle_attendu: str | None = None) -> None:
-        self._manoeuvre = {
+        vanne = "3voies" if angle_attendu is not None else "bypass"
+        self._manoeuvres[vanne] = {
             "motif": motif,
             "fc_attendue": fc_attendue,      # vannes TOR : une fin de course
             "angle_attendu": angle_attendu,  # vanne 3 voies : une butée
             "t_debut": time.monotonic(),
             "t_max": time.monotonic() + t_course * self.facteur_chien_garde,
+            "t_fin_gel": None,               # fin de course + marge
         }
+
+    @property
+    def _manoeuvre(self) -> dict | None:
+        """Manœuvre en cours qui finit le plus tard (None si aucune)."""
+        if not self._manoeuvres:
+            return None
+        return max(self._manoeuvres.values(), key=lambda m: m["t_max"])
+
+    def _timeout_attente_vannes_s(self) -> float:
+        """Délai maximal d'attente des vannes avant régulation : pire cas
+        séquentiel (bypass, puis vanne 3 voies, puis ouverture de la PdC),
+        chien de garde et marges compris — dérivé des temps de course de la
+        config au lieu des 40 s codés en dur."""
+        return (self.facteur_chien_garde
+                * (self.t_vanne_bypass + self.t_vanne_3voies
+                   + self.t_vanne_pdc_course)
+                + 3.0 * self.marge_manoeuvre)
 
     # ----------------------------------------------------------------- boucle
 
@@ -1021,9 +1040,8 @@ class Pilote:
             self.es.ecrire_vanne_bypass(True)
             self._bypass_commande = True
         except (IOError, RuntimeError, OSError) as exc:
-            # Échec silencieux si le matériel n'est pas disponible (simulation, etc.)
-            log.debug(f"Position repos non appliquée: {exc}")
-            pass
+            # liaison indisponible : signalé, sans bloquer le démarrage ni l'arrêt
+            log.warning(f"Position repos non appliquée: {exc}")
 
     def demarrer(self) -> None:
         """Démarre le thread de régulation et attend qu'il soit prêt."""
@@ -1039,17 +1057,22 @@ class Pilote:
         self._position_repos()
 
     def arreter(self) -> None:
-        """Arrêt complet : régulation + remise en position sûre.
+        """Arrêt complet, dans cet ordre : ventilateur coupé, boucle arrêtée,
+        vannes en position de repos, journal et liaison fermés.
 
+        Le ventilateur est coupé AVANT toute manœuvre : basculer la vanne 3
+        voies sur le Miller ventilateur lancé enverrait tout le débit dans le
+        petit orifice. La boucle est arrêtée avant la position de repos, sans
+        quoi sa réaffirmation des ordres TOR la contrarierait.
         Log les erreurs critiques mais ne bloque pas l'arrêt complet.
         """
         erreurs_arret = []
 
-        # 1. Remettre vannes en position de repos (PRIORITÉ 1, sécurité matérielle)
+        # 1. Ventilateur coupé (régulation, manuel, séquence)
         try:
-            self._position_repos()
+            self.arreter_regulation()
         except Exception as e:
-            msg = f"Position repos non atteinte : {e}"
+            msg = f"Arrêt variateur non confirmé : {e}"
             erreurs_arret.append(msg)
             log.error(msg)
 
@@ -1061,6 +1084,14 @@ class Pilote:
                 msg = "Thread régulation non terminé après 3s (timeout)"
                 erreurs_arret.append(msg)
                 log.warning(msg)
+
+        # 3. Vannes en position de repos (sécurité matérielle)
+        try:
+            self._position_repos()
+        except Exception as e:
+            msg = f"Position repos non atteinte : {e}"
+            erreurs_arret.append(msg)
+            log.error(msg)
 
         # 3. Fermer journal (best-effort, erreur non critique)
         if self.journal is not None:
@@ -1175,9 +1206,11 @@ class Pilote:
                 if self.journal.ouvert:
                     try:
                         self.journal.enregistrer(self.etat, time.monotonic())
-                    except (OSError, ValueError, KeyError):
-                        # Erreur d'écriture journal : jamais au détriment de la boucle
-                        pass
+                    except Exception:  # noqa: BLE001
+                        # Erreur d'écriture journal : jamais au détriment de
+                        # la boucle (hors du try du cycle, une exception ici
+                        # tuerait le thread)
+                        log.exception("Écriture du journal d'essai")
                 self.etat["journal"] = str(self.journal.chemin) \
                     if self.journal.chemin else None
                 self.etat["journal_lignes"] = self.journal.lignes
@@ -1603,19 +1636,17 @@ class Pilote:
         # ---- gel pendant une manœuvre de vanne TOR -------------------------
         # Fin de gel : fin de course atteinte (+ marge). Chien de garde :
         # défaut vanne si la fin de course n'arrive pas à temps.
-        if self._manoeuvre is not None:
-            m = self._manoeuvre
+        for vanne, m in list(self._manoeuvres.items()):
             if m["angle_attendu"] is not None:
                 atteinte = (self._angle_vanne_3voies(mesures)
                             == m["angle_attendu"])
             else:
                 atteinte = bool(mesures.get(m["fc_attendue"], False))
             if atteinte:
-                if self._t_fin_gel == 0.0:
-                    self._t_fin_gel = maintenant + self.marge_manoeuvre
-                if maintenant >= self._t_fin_gel:
-                    self._manoeuvre = None
-                    self._t_fin_gel = 0.0
+                if m["t_fin_gel"] is None:
+                    m["t_fin_gel"] = maintenant + self.marge_manoeuvre
+                if maintenant >= m["t_fin_gel"]:
+                    del self._manoeuvres[vanne]
             elif maintenant > m["t_max"]:
                 # DÉFAUT VANNE : fin de course jamais atteinte -> repli sûr
                 # (variateur 0 V ET ordre RUN retiré, comme sur défaut variateur)
@@ -1627,34 +1658,37 @@ class Pilote:
                     "manoeuvre": None, "regulation": False,
                     "u_variateur": 0.0, "convergee": False,
                 })
-                self._manoeuvre = None
-                self._t_fin_gel = 0.0
+                self._manoeuvres.clear()
                 return
-            if self._manoeuvre is not None:
-                # En mode manuel, continuer d'écrire le variateur même pendant
-                # une manœuvre (apprentissage re_mapping Phase 4 : bypass ferme
-                # pendant 11s, mais le variateur doit rester actif).
-                # Lire à nouveau la tension manuelle pour garantir la valeur actuelle.
-                with self._verrou:
-                    manuel_actuel = self.mode_manuel
-                    u_manu_actuel = self.tension_manuelle
+        if self._manoeuvres:
+            m = self._manoeuvre
+            # En mode manuel, continuer d'écrire le variateur même pendant
+            # une manœuvre (apprentissage re_mapping Phase 4 : bypass ferme
+            # pendant 11s, mais le variateur doit rester actif).
+            # Lire à nouveau la tension manuelle pour garantir la valeur actuelle.
+            with self._verrou:
+                manuel_actuel = self.mode_manuel
+                u_manu_actuel = self.tension_manuelle
 
-                if manuel_actuel and u_manu_actuel > 0:
-                    self.es.ecrire_variateur(u_manu_actuel)
-                    u_variateur = u_manu_actuel
-                else:
-                    u_variateur = 0.0
+            if manuel_actuel and u_manu_actuel > 0:
+                u_variateur = u_manu_actuel
+            else:
+                # hors manuel, ventilateur à 0 V pendant la manœuvre (comme
+                # dans l'attente des vannes) : l'état publié valait déjà 0,
+                # mais la sortie gardait la dernière tension écrite
+                u_variateur = 0.0
+            self.es.ecrire_variateur(u_variateur)
 
-                self.etat.update({
-                    "temperature": T, "p_amont": p_amont, "dp": dp,
-                    "manoeuvre": m["motif"],
-                    "manoeuvre_restant_s": max(m["t_max"] - maintenant, 0.0),
-                    "fc_attendue": m["fc_attendue"] or m["angle_attendu"],
-                    "convergee": False, "regulation": regul, "manuel": manuel_actuel,
-                    "u_variateur": u_variateur,
-                    "variateur_actif_en_manoeuvre": manuel_actuel and u_manu_actuel > 0,
-                })
-                return
+            self.etat.update({
+                "temperature": T, "p_amont": p_amont, "dp": dp,
+                "manoeuvre": m["motif"],
+                "manoeuvre_restant_s": max(m["t_max"] - maintenant, 0.0),
+                "fc_attendue": m["fc_attendue"] or m["angle_attendu"],
+                "convergee": False, "regulation": regul, "manuel": manuel_actuel,
+                "u_variateur": u_variateur,
+                "variateur_actif_en_manoeuvre": manuel_actuel and u_manu_actuel > 0,
+            })
+            return
         self.etat["manoeuvre"] = None
 
         # ---- cohérence de la position de la vanne 3 voies -----------------
@@ -1803,11 +1837,6 @@ class Pilote:
             re_cible = self.re_cible
             u_manu = self.tension_manuelle
 
-        # DEBUG : Vérifier pourquoi le code n'entre pas dans la branche régulation
-        if regul and re_cible <= 0:
-            log.warning(f"CYCLE: regulation_active=True MAIS re_cible={re_cible} !")
-        if not regul and re_cible > 0:
-            log.warning(f"CYCLE: regulation_active=False alors que re_cible={re_cible}")
 
         # ---- ordre RUN du variateur (3G3MV : S1, n003=1) --------------------
         # RUN dès qu'une tension > 0 doit être appliquée ; arrêt sinon.
@@ -1913,20 +1942,22 @@ class Pilote:
             # 2. CONVERSION REYNOLDS (pour critères en conduite)
             re_cible_cond = self._re_cible_conduite or re_cible
 
-            # Mettre à jour config modes avec seuil bas Re dynamique
-            self._config_modes = ConfigurationModes(
-                seuil_diaphragme=self._config_modes.seuil_diaphragme,
-                largeur_hysteresis_diaphragme=self._config_modes.largeur_hysteresis_diaphragme,
-                seuil_bas_re=self._seuil_bas_re(),  # Seuil dynamique
-                largeur_hysteresis_bas_re=self._config_modes.largeur_hysteresis_bas_re,
-                u_min=self.u_min_ventilateur or 1.2
-            )
+            # seuils relus à chaque cycle : seuil bas-Re appris, Banc remplacé
+            # par une édition de configuration
+            self._config_modes = self._configuration_modes()
 
             # 3. DÉTERMINATION MODES (nouveaux modules)
+            # mémoire d'hystérésis amorcée sur le mode préparé (lui-même
+            # parti de la position réelle de la vanne) : vide, la gestion des
+            # modes tranchait la bande d'hystérésis sur le seuil seul et
+            # contredisait la préparation
+            precedent = self._mode_cible_precedent
+            if precedent is None and self._mode_regulation is not None:
+                precedent = ModeRegulation(self._mode_regulation)
             mode_cible_enum = determiner_mode_cible(
                 re_cible_cond,
                 self._config_modes,
-                self._mode_cible_precedent
+                precedent
             )
 
             mode_effectif_enum = determiner_mode_effectif(
@@ -2033,7 +2064,7 @@ class Pilote:
             vannes_pretes = diaphragme_ok and bypass_ok and pdc_ok
 
             # DEBUG : Logguer état vannes_pretes
-            log.info(f"VANNES: diaph_ok={diaphragme_ok} (attendu={PositionDiaphragme.ISO}, lu={etat_vannes.diaphragme}), "
+            log.debug(f"VANNES: diaph_ok={diaphragme_ok} (attendu={PositionDiaphragme.ISO}, lu={etat_vannes.diaphragme}), "
                      f"bypass_ok={bypass_ok} (attendu={PositionBypass.FERME}, lu={etat_vannes.bypass}), "
                      f"pdc_ok={pdc_ok} (attendu={PositionPDC.OUVERT}, lu={etat_vannes.pdc}) → pretes={vannes_pretes}")
 
@@ -2044,7 +2075,8 @@ class Pilote:
             if not vannes_pretes:
                 # CORRECTION-2 : Timeout si vannes bloquées
                 self._cycles_attente_vannes += 1
-                if self._cycles_attente_vannes > self._timeout_vannes_cycles:
+                if self._cycles_attente_vannes * self.periode \
+                        > self._timeout_attente_vannes_s():
                     # Timeout dépassé : arrêt sécurisé
                     self._repli_sur()
 
@@ -2335,6 +2367,9 @@ class Pilote:
             freq_min_re = (self.u_min_ventilateur or 0.3) * \
                 (self._gain_re_par_volt or 1000)
 
+        if not self.bas_re_actif:
+            freq_min_re = 0.0              # stratégie désactivée : jamais de mode PdC
+
         courant = self._mode_regulation
         if courant is None:
             # premier choix : partir de la position réelle du diaphragme,
@@ -2370,6 +2405,8 @@ class Pilote:
         Le seuil dérivé vient en priorité de la table Miller (bypass ouvert,
         configuration du mode PdC) ; la table ISO et le gain global ont été
         mesurés bypass fermé et surestiment le Re tenu à u_min en Miller."""
+        if not self.bas_re_actif:
+            return 0.0                     # stratégie désactivée : jamais de mode PdC
         if self.seuil_bas_re and not self._seuil_bas_re_config_invalide():
             return self.seuil_bas_re
         if self.u_min_ventilateur and self.table_gains_bas_re.valide_ff():
@@ -2382,6 +2419,20 @@ class Pilote:
             return self.u_min_ventilateur * self._gain_re_par_volt \
                 * self.marge_seuil_bas_re
         return 0.0
+
+    def _configuration_modes(self) -> ConfigurationModes:
+        """Seuils de la gestion des modes, alignés sur ceux du Banc
+        (selection_diaphragme) qu'utilise aussi la préparation de consigne.
+        Banc.choisir_diaphragme bascule à seuil ± hystérésis ; gestion_modes
+        applique seuil ± largeur/2 : la largeur vaut donc 2 × hystérésis. Avant,
+        la boucle lisait une clé inexistante (seuil figé à 5000) et une demi-
+        hystérésis : les deux logiques se contredisaient de 4500 à 4750."""
+        return ConfigurationModes(
+            seuil_diaphragme=self.banc.seuil_re,
+            largeur_hysteresis_diaphragme=2.0 * self.banc.hysteresis_re,
+            seuil_bas_re=self._seuil_bas_re(),
+            largeur_hysteresis_bas_re=0.1 * self._seuil_bas_re(),  # ±5 % (gestion_modes)
+            u_min=self.u_min_ventilateur or 0.0)
 
     def _seuil_bas_re_config_invalide(self) -> bool:
         """Seuil bas-Re de config (strategie_bas_re) au-delà du seuil
