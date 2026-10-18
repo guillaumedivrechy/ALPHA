@@ -76,6 +76,26 @@ Le mode simulation reproduit la chaîne complète (ventilateur 1er ordre,
 ΔP générés par les mêmes équations, bruit capteur) : il permet de former
 les opérateurs et de régler les gains sans toucher au banc.
 
+## Gestion des vannes à chaque consigne
+
+| Mode | Vanne 3 voies | Bypass | Vanne PdC | Organe régulé | Table |
+|---|---|---|---|---|---|
+| ISO (Re > seuil ISO/Miller) | ISO | fermé | 100 % | variateur | ISO (bypass fermé) |
+| Miller (Re_freq_min < Re < seuil) | Miller | ouvert | 100 % | variateur | Miller (bypass ouvert) |
+| PdC (Re < Re_freq_min) | Miller | ouvert | 100 % à l'entrée, puis régulée | vanne PdC (variateur fixe) | PdC |
+
+À chaque cycle, la boucle lit les fins de course des trois vannes et ne
+commande que celles qui ne sont pas en position, **toutes simultanément**.
+Aucune consigne n'est envoyée au variateur ni à la PdC avant que toutes
+soient en butée : variateur à 0 V pendant les manœuvres des vannes TOR ;
+si seule la PdC rejoint sa butée (sortie du mode PdC), la tension du
+variateur est tenue, sans nouvelle consigne. La consigne initiale vient de la
+table apprise du mode (interpolation entre paliers), puis la régulation
+corrige en continu l'organe du mode. Une PdC déjà régulée en mode PdC n'est
+pas rouverte pour une nouvelle consigne de mode PdC (elle l'est après un
+arrêt). Une nouvelle consigne reçue pendant un déplacement redirige aussitôt
+les vannes vers leurs nouvelles positions.
+
 ## Mode séquence
 
 L'onglet **Séquence** suit automatiquement un profil chargé depuis un CSV

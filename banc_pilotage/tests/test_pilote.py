@@ -912,8 +912,10 @@ def test_feed_forward_pdc_depuis_la_table_apprise_en_pourcent():
     assert pilote._mode_regulation == "pdc_control"
     assert pilote.etat["phase_regulation"] == "FF+PI vanne PdC"
     assert pilote._diag["v_ff_pdc"] == pytest.approx(v_attendu, abs=1e-3)
-    assert pilote.etat["u_variateur"] == pytest.approx(pilote._u_pdc())
     assert pilote._pdc_consigne == pytest.approx(v_attendu, abs=0.2)
+    for _ in range(5):                               # variateur sur sa rampe
+        pilote._cycle()
+    assert pilote.etat["u_variateur"] == pytest.approx(pilote._u_pdc())
 
 
 def test_seuil_bas_re_de_config_au_dela_du_seuil_miller_ignore():
@@ -976,16 +978,6 @@ def test_vanne_pdc_rouverte_une_fois_les_vannes_tor_en_place():
     pilote._cycle()
     assert pilote.etat["phase_regulation"] == "attente vannes"
     assert pilote.etat["u_variateur"] == 0.0
-    assert pilote._pdc_consigne == 10.0
-
-
-def test_prepositionnement_pdc_dans_l_echelle_de_la_consigne():
-    """La recopie de la PdC plafonne à ~9,2 V (butées calibrées) : la
-    reprendre comme consigne refermait partiellement une vanne ouverte."""
-    pilote, es = _pilote_en_position("fc_3voies_0")
-    pilote._pdc_consigne = 10.0
-    pilote.etat["pdc_position"] = pilote.pdc_recopie_max      # recopie ~9,15 V
-    pilote._prepositionner_vanne_pdc_securitaire("normal_high")
     assert pilote._pdc_consigne == 10.0
 
 
@@ -1228,3 +1220,21 @@ def test_consigne_hors_de_portee_du_mode_pdc_signalee():
         pilote._cycle()
     assert pilote._mode_regulation == "pdc_control"
     assert "hors de portée" in (pilote.etat["alerte_pdc"] or "")
+
+
+def test_bypass_sans_fin_de_course_hors_manoeuvre_en_defaut():
+    """Bypass sans aucune fin de course alors qu'aucune manœuvre n'est en
+    cours (fil coupé) : défaut au bout d'une course chien de garde comprise,
+    au lieu d'attendre le délai global d'attente des vannes (~50 s)."""
+    es = StubES({"temperature": 20.0, "fc_3voies_0": True,
+                 "fc_pdc_ouvert": True, "dp_iso_500": 100.0})
+    pilote = Pilote(Banc(CFG), es, CFG)
+    pilote.bas_re_actif = False
+    pilote.t_vanne_bypass = 1.0
+    pilote.definir_consigne(8000.0, "conduite")
+    pilote.demarrer_regulation()
+    for _ in range(int(pilote.facteur_chien_garde * 1.0 / pilote.periode) + 3):
+        pilote._cycle()
+    assert "bypass sans fin de course" in (pilote.etat.get("defaut_vanne") or "")
+    assert pilote.regulation_active is False
+    assert es.variateur[-1] == 0.0

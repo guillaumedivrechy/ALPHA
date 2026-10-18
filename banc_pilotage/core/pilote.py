@@ -543,6 +543,11 @@ class Pilote:
         self._diag: dict = {}              # grandeurs internes publiées / journalisées
         self._cycles_trim_sature = 0       # cycles consécutifs correction en butée
         self._cycles_pdc_butee = 0         # cycles consécutifs PdC en butée, consigne non atteinte
+        # PdC sous régulation (mode PdC engagé, vannes prêtes) : une nouvelle
+        # consigne de mode PdC ne la rouvre pas (scénario 3 bis) ; une entrée
+        # en mode PdC l'attend ouverte à 100 % (scénario 3)
+        self._pdc_regulee = False
+        self._cycles_bypass_sans_fc = 0    # bypass sans fin de course hors manœuvre
 
         # état courant (lu par l'IHM)
         # Initialiser rho, mu, nu avec des valeurs par défaut (air à 20°C, 101325 Pa)
@@ -744,6 +749,9 @@ class Pilote:
             self.tension_manuelle = 0.0
             self._sequence = None
             self.arrets += 1
+        # après un arrêt, la PdC n'est plus réputée régulée : une consigne de
+        # mode PdC la rouvrira à 100 % avant de reprendre
+        self._pdc_regulee = False
 
     def _repli_sur(self) -> None:
         """Repli sûr latché sur défaut : variateur 0 V et RUN retiré, après
@@ -1468,7 +1476,6 @@ class Pilote:
         diaph = self.etat["diaphragme"]
 
         # ---- préparation à l'activation de la consigne --------------------
-        preparation_attente_transition = False  # Flag pour sauter la suite si attente transition
         if regul and not self._preparation_faite and re_cible > 0:
             if reference == "veine":
                 qm_vise = self.banc.re_veine_vers_qm(re_cible, T, p_amont)
@@ -1480,132 +1487,71 @@ class Pilote:
             nouveau_diaph = self.banc.choisir_diaphragme(re_cond_attendu, diaph)
             diaphragme_change = nouveau_diaph != diaph
 
-            # ---- SÉCURITÉ R1.2 : Transition HAUT→BAS (ISO→Miller) --------
-            # Réf. rapport_comparaison_final.md R1.2 : transition ISO→Miller
-            # (HAUT Re → BAS Re) nécessite protection contre saturation Miller (500 Pa).
-            # NOUVELLE STRATÉGIE (commandes simultanées pour gagner du temps) :
-            # 1. Commander bypass ouvert + diaphragme Miller SIMULTANÉMENT
-            # 2. Forcer variateur à u_min (protection débit)
-            # 3. Attendre SEULEMENT que Re < seuil - hystérésis
-            # Avec variateur à u_min, risque saturation minimal même si bypass
-            # pas encore complètement ouvert.
-            transition_haut_bas = (diaphragme_change
-                                  and diaph == "iso"
-                                  and nouveau_diaph == "miller")
+            # La préparation ne commande AUCUNE vanne ni tension : la boucle
+            # (plus bas) commande les vannes d'après les fins de course lues au
+            # cycle, simultanément, et n'envoie de consigne qu'une fois toutes
+            # en butée. Ici : choix du mode, bornes, calage des régulateurs.
+            mode = self._determiner_mode_regulation(re_cond_attendu)
 
-            if transition_haut_bas:
-                # COMMANDES SIMULTANÉES : bypass ouvert + diaphragme Miller
-                # Sécurité assurée par : u_min (débit minimal) + bypass ouvert (évacue surpression)
-                # Protection supplémentaire : ne commander que si le diaphragme actuel n'est PAS déjà Miller
-                # (évite manœuvre inutile si état transitoire incohérent)
-                diaph_actuel_etat = self.etat.get("diaphragme")
+            # diaphragme visé (la vanne est commandée par la boucle)
+            if diaphragme_change:
+                diaph = nouveau_diaph
 
-                # CORRECTION CRITIQUE : Si une manœuvre est déjà en cours, attendre sa fin
-                # avant de lancer la transition ISO→Miller. Sinon la nouvelle manœuvre
-                # est silencieusement ignorée et _preparation_faite est marqué True sans
-                # avoir effectué la transition.
-                if self._manoeuvre is not None:
-                    # Une manœuvre est déjà en cours (probablement la fin du positionnement
-                    # de la consigne précédente) → attendre le prochain cycle
-                    preparation_attente_transition = True
-                    log.debug("Transition ISO→Miller reportée : manœuvre en cours")
-                elif diaph_actuel_etat == "miller":
-                    # Diaphragme déjà en Miller : pas de transition nécessaire
-                    # Continuer la préparation normalement
-                    pass
+            self.etat["dp_attendu"] = self.banc.dP_attendu(
+                diaph, qm_vise, T, p_amont)
+            # _borner_consigne doit recevoir le Re CONDUITE pour calculer correctement
+            # la limite basée sur DP, quelle que soit la référence utilisateur
+            self._borner_consigne(diaph, qm_vise, re_cond_attendu, T, p_amont)
+
+            # Mémoriser l'équivalent conduite de la consigne
+            self._re_cible_conduite = re_cond_attendu
+
+            # Calculer et mémoriser le facteur de conversion k AVANT toute limitation
+            # k sera utilisé pour le feed-forward même si _re_cible_conduite est limité
+            # Cela garantit que le lookup de table utilise le bon facteur de conversion
+            self._k_conversion = (self._re_cible_conduite / re_cible) \
+                if re_cible > 0 else 1.0
+
+            # Appliquer limite Re_max ISO si configurée (après conversion veine→conduite)
+            # Cette limite s'applique au Re CONDUITE pour protéger le capteur ΔP ISO
+            if self.re_max_iso and self._re_cible_conduite > self.re_max_iso:
+                log.warning(f"Consigne {self._re_cible_conduite:.0f} Re conduite limitée à {self.re_max_iso:.0f} Re "
+                           f"(re_max_iso configuré, référence={reference})")
+                self._re_cible_conduite = self.re_max_iso
+                # Note: self._k_conversion reste inchangé (basé sur les valeurs avant limitation)
+
+                # IMPORTANT: Mettre à jour _re_cible_max pour limiter re_vise dans le référentiel utilisateur
+                # Sans cela, en mode veine, re_vise reste à 15000 alors que Re_conduite est limité à 24500
+                # et le feed-forward essaie d'atteindre 15000*k = 46950 Re_conduite → 10V
+                if reference == "veine":
+                    # Convertir la limite Re_conduite en Re_veine
+                    re_cible_max_veine = self.re_max_iso / self._k_conversion
+                    # Appliquer comme limite de consigne
+                    if self._re_cible_max is None or re_cible_max_veine < self._re_cible_max:
+                        self._re_cible_max = re_cible_max_veine
                 else:
-                    # Aucune manœuvre en cours ET diaphragme pas encore Miller
-                    # → Lancer la transition ISO→Miller
-                    # 1. Commander bypass ouvert (évacuation surpression)
-                    self.commander_bypass(True)
-                    # 2. Commander diaphragme Miller SIMULTANÉMENT (pas d'attente)
-                    self.commander_diaphragme("miller")
-                    log.info("Transition ISO→Miller: bypass ouvert + diaphragme miller commandés simultanément")
+                    # En mode conduite, appliquer directement la limite
+                    if self._re_cible_max is None or self.re_max_iso < self._re_cible_max:
+                        self._re_cible_max = self.re_max_iso
 
-                    # 3. Forcer variateur à u_min pour limiter débit pendant transition
-                    self.es.ecrire_variateur(self.u_min_ventilateur or 0.0)
-
-                    # 4. Attendre fin de manoeuvre diaphragme avant de réguler
-                    # (vannes TOR prennent ~2s, on ne veut pas calculer u_ff avec mauvais diaphragme)
-                    if self._manoeuvre is not None:
-                        # Manoeuvre lancée : attendre sa fin
-                        preparation_attente_transition = True
-                    else:
-                        # Cas normalement impossible (manœuvre devrait être en cours après commander_diaphragme)
-                        # mais par sécurité, attendre le prochain cycle pour vérifier l'état
-                        preparation_attente_transition = True
-                        log.warning("Transition ISO→Miller: manœuvre lancée mais _manoeuvre=None (état transitoire)")
-
-            # Continuer la préparation seulement si pas en attente de transition
-            if not preparation_attente_transition:
-                # Déterminer le mode de régulation pour la nouvelle consigne
-                mode = self._determiner_mode_regulation(re_cond_attendu)
-
-                # SÉCURITÉ : Pré-positionner vanne PDC selon règle min(actuelle, cible)
-                # AVANT toute manœuvre TOR (diaphragme, bypass). Garantit aucun surdébit
-                # transitoire (réf. rapport_comparaison_final.md R1.3)
-                self._prepositionner_vanne_pdc_securitaire(mode)
-
-                # Basculement de diaphragme OK (soit pas HAUT→BAS, soit bypass ouvert + Re bas)
-                if diaphragme_change:
-                    # Mise à jour du diaphragme attendu (commande dans la boucle de régulation)
-                    diaph = nouveau_diaph
-
-                self.etat["dp_attendu"] = self.banc.dP_attendu(
-                    diaph, qm_vise, T, p_amont)
-                # _borner_consigne doit recevoir le Re CONDUITE pour calculer correctement
-                # la limite basée sur DP, quelle que soit la référence utilisateur
-                self._borner_consigne(diaph, qm_vise, re_cond_attendu, T, p_amont)
-
-                # Mémoriser l'équivalent conduite de la consigne
-                self._re_cible_conduite = re_cond_attendu
-
-                # Calculer et mémoriser le facteur de conversion k AVANT toute limitation
-                # k sera utilisé pour le feed-forward même si _re_cible_conduite est limité
-                # Cela garantit que le lookup de table utilise le bon facteur de conversion
-                self._k_conversion = (self._re_cible_conduite / re_cible) \
-                    if re_cible > 0 else 1.0
-
-                # Appliquer limite Re_max ISO si configurée (après conversion veine→conduite)
-                # Cette limite s'applique au Re CONDUITE pour protéger le capteur ΔP ISO
-                if self.re_max_iso and self._re_cible_conduite > self.re_max_iso:
-                    log.warning(f"Consigne {self._re_cible_conduite:.0f} Re conduite limitée à {self.re_max_iso:.0f} Re "
-                               f"(re_max_iso configuré, référence={reference})")
-                    self._re_cible_conduite = self.re_max_iso
-                    # Note: self._k_conversion reste inchangé (basé sur les valeurs avant limitation)
-
-                    # IMPORTANT: Mettre à jour _re_cible_max pour limiter re_vise dans le référentiel utilisateur
-                    # Sans cela, en mode veine, re_vise reste à 15000 alors que Re_conduite est limité à 24500
-                    # et le feed-forward essaie d'atteindre 15000*k = 46950 Re_conduite → 10V
-                    if reference == "veine":
-                        # Convertir la limite Re_conduite en Re_veine
-                        re_cible_max_veine = self.re_max_iso / self._k_conversion
-                        # Appliquer comme limite de consigne
-                        if self._re_cible_max is None or re_cible_max_veine < self._re_cible_max:
-                            self._re_cible_max = re_cible_max_veine
-                    else:
-                        # En mode conduite, appliquer directement la limite
-                        if self._re_cible_max is None or self.re_max_iso < self._re_cible_max:
-                            self._re_cible_max = self.re_max_iso
-
-                # Petit échelon de séquence, même diaphragme, même mode : on
-                # conserve l'état PI (l'intégrale compense déjà l'erreur du
-                # feed-forward ; se recaler sur la table referait converger
-                # depuis la même erreur à chaque échelon)
-                conserver_pi = (self._echelon_depuis is not None
-                                and not diaphragme_change
-                                and mode == self._mode_regulation
-                                and abs(re_cible - self._echelon_depuis)
-                                < self.echelon_reinit_ff * self._echelon_depuis)
-                self._echelon_depuis = None
-                if conserver_pi:
-                    # rien à recaler : l'intégrale (biais de table) est
-                    # gardée, le feed-forward rejoint la nouvelle consigne
-                    # sur sa rampe et la référence le suit
-                    pass
-                else:
-                    self._preparer_pi(mode, re_cond_attendu)
-                self._preparation_faite = True
+            # Petit échelon de séquence, même diaphragme, même mode : on
+            # conserve l'état PI (l'intégrale compense déjà l'erreur du
+            # feed-forward ; se recaler sur la table referait converger
+            # depuis la même erreur à chaque échelon)
+            conserver_pi = (self._echelon_depuis is not None
+                            and not diaphragme_change
+                            and mode == self._mode_regulation
+                            and abs(re_cible - self._echelon_depuis)
+                            < self.echelon_reinit_ff * self._echelon_depuis)
+            self._echelon_depuis = None
+            if conserver_pi:
+                # rien à recaler : l'intégrale (biais de table) est
+                # gardée, le feed-forward rejoint la nouvelle consigne
+                # sur sa rampe et la référence le suit
+                pass
+            else:
+                self._preparer_pi(mode, re_cond_attendu)
+            self._preparation_faite = True
 
         # ---- vanne perte de charge : recopie réelle + diagnostic ------------
         maintenant = time.monotonic()
@@ -1667,6 +1613,12 @@ class Pilote:
                 })
                 self._manoeuvres.clear()
                 return
+        if self._manoeuvres and regul and re_cible > 0:
+            # consigne (éventuellement nouvelle) : vannes redirigées vers ses
+            # positions, sans attendre la fin des courses en cours
+            self._rediriger_vannes(
+                self._mode_cible_courant(self._re_cible_conduite or re_cible),
+                mesures)
         if self._manoeuvres:
             m = self._manoeuvre
             # En mode manuel, continuer d'écrire le variateur même pendant
@@ -1946,26 +1898,30 @@ class Pilote:
             else:
                 self._cycles_fc_incoherents = 0
 
+            # Bypass sans aucune fin de course hors manœuvre (fil coupé,
+            # commun 24 V absent) : défaut au bout d'une course chien de garde
+            # comprise, au lieu d'attendre le délai global des vannes.
+            if etat_vannes.bypass == PositionBypass.EN_TRANSIT \
+                    and "bypass" not in self._manoeuvres:
+                self._cycles_bypass_sans_fc += 1
+            else:
+                self._cycles_bypass_sans_fc = 0
+            if self._cycles_bypass_sans_fc * self.periode \
+                    > self.facteur_chien_garde * self.t_vanne_bypass:
+                self._repli_sur()
+                self.etat.update({
+                    "defaut_vanne": "bypass sans fin de course hors manœuvre "
+                                    "(fil coupé ou commun 24 V absent) — "
+                                    "vérifier la vanne et son câblage, puis relancer",
+                    "regulation": False, "u_variateur": 0.0, "convergee": False,
+                })
+                return
+
             # 2. CONVERSION REYNOLDS (pour critères en conduite)
             re_cible_cond = self._re_cible_conduite or re_cible
 
-            # seuils relus à chaque cycle : seuil bas-Re appris, Banc remplacé
-            # par une édition de configuration
-            self._config_modes = self._configuration_modes()
-
             # 3. DÉTERMINATION MODES (nouveaux modules)
-            # mémoire d'hystérésis amorcée sur le mode préparé (lui-même
-            # parti de la position réelle de la vanne) : vide, la gestion des
-            # modes tranchait la bande d'hystérésis sur le seuil seul et
-            # contredisait la préparation
-            precedent = self._mode_cible_precedent
-            if precedent is None and self._mode_regulation is not None:
-                precedent = ModeRegulation(self._mode_regulation)
-            mode_cible_enum = determiner_mode_cible(
-                re_cible_cond,
-                self._config_modes,
-                precedent
-            )
+            mode_cible_enum = self._mode_cible_courant(re_cible_cond)
 
             mode_effectif_enum = determiner_mode_effectif(
                 etat_vannes,
@@ -1975,7 +1931,6 @@ class Pilote:
             )
 
             # Sauvegarder pour hystérésis
-            self._mode_cible_precedent = mode_cible_enum
             self._mode_effectif_precedent = mode_effectif_enum
 
             # Conversion enum → str (compatibilité avec ancien code)
@@ -2042,9 +1997,15 @@ class Pilote:
                 else:
                     log.debug(f"Bypass déjà {'ouvert' if commandes_vannes.bypass else 'fermé'}, ordre non envoyé")
 
-            # PDC sera commandée par la régulation plus loin (sauf init à 10V)
-            # Ici on ne commande que les TOR (diaphragme, bypass)
-            # (consigne PdC : calculée plus bas selon le mode)
+            # Vanne PdC : vers sa position cible EN MÊME TEMPS que les vannes TOR
+            # (écrite plus bas, dans l'attente des vannes) — grande ouverte dans
+            # tous les modes, sauf si elle est déjà régulée en mode PdC.
+            pdc_ouverte_visee = not (mode_cible == MODE_PDC_CONTROL
+                                     and self._pdc_regulee)
+            if mode_cible != MODE_PDC_CONTROL:
+                # la PdC est rouverte pour un autre mode : un retour au mode
+                # PdC repassera par l'ouverture à 100 % (scénario 3)
+                self._pdc_regulee = False
 
             # 6. VÉRIFICATION : Toutes les vannes sont-elles en position ?
             # Utiliser les positions depuis etat_vannes (nouveau module)
@@ -2059,7 +2020,10 @@ class Pilote:
                 # - normal_low : PDC doit être à 100% (FC ouvert)
                 # - pdc_control, ENTRÉE : PDC doit être à 100% d'abord (FC ouvert)
                 # - pdc_control, DÉJÀ en mode : PDC peut être n'importe où (contrôlée par PI)
-                deja_en_mode_pdc = (mode == MODE_PDC_CONTROL and self._mode_regulation == MODE_PDC_CONTROL)
+                # « déjà en mode PdC » = la PdC est DÉJÀ régulée, et non « la
+                # préparation vient de choisir le mode PdC » (elle le fixe
+                # elle-même : l'entrée en mode PdC n'attendait pas la PdC à 100 %)
+                deja_en_mode_pdc = (mode == MODE_PDC_CONTROL and self._pdc_regulee)
                 if deja_en_mode_pdc:
                     pdc_ok = True  # Déjà en mode, PDC contrôlée par PI
                 else:
@@ -2104,23 +2068,21 @@ class Pilote:
                     })
                     return
 
-                # ATTENTE : vannes pas encore en position -> variateur à 0 V.
-                # Le feed-forward repartira de 0 sur sa rampe ; le biais de
-                # table appris (intégrale) est conservé.
-                u = 0.0
-                # Vanne PdC : tenue à sa position (pré-positionnée au plus bas,
-                # cf. _prepositionner_vanne_pdc_securitaire) tant que les
-                # vannes TOR manœuvrent ; une fois diaphragme et bypass en
-                # place, ouverte en grand, puisque tous les modes y attendent
-                # sa fin de course « ouverte ». Sans cette ouverture, une PdC
-                # restée à mi-course (sortie du mode PdC) n'atteignait jamais
-                # la fin de course attendue : blocage puis défaut vanne.
-                if diaphragme_ok and bypass_ok:
-                    pdc_v = 10.0
-                else:
-                    pdc_v = self._pdc_consigne
-                self._u_ff_applique = 0.0
-                self.trim.reinitialiser(0.0, self.trim.integrale)
+                # ATTENTE : aucune NOUVELLE consigne tant que les vannes ne
+                # sont pas toutes en butée.
+                # - vannes TOR en mouvement : variateur à 0 V ;
+                # - seule la PdC rejoint sa butée (vannes TOR déjà en place,
+                #   ex. sortie du mode PdC) : tension TENUE à sa dernière
+                #   valeur — la couper arrêtait le ventilateur le temps de la
+                #   course de la PdC.
+                # Le biais de table appris (intégrale) est conservé et la
+                # régulation repartira de la tension tenue, sans à-coup.
+                u = (self.etat.get("u_variateur", 0.0) or 0.0) \
+                    if (diaphragme_ok and bypass_ok) else 0.0
+                # PdC vers sa cible, simultanément avec les vannes TOR
+                pdc_v = 10.0 if pdc_ouverte_visee else self._pdc_consigne
+                self.trim.reinitialiser(u, self.trim.integrale)
+                self._u_ff_applique = max(0.0, u - self.trim.integrale)
                 self._consigne_interne = None
                 self._diag = {"phase": "attente vannes"}
             else:
@@ -2128,10 +2090,15 @@ class Pilote:
                 self._cycles_attente_vannes = 0
 
             if vannes_pretes and mode_table == MODE_PDC_CONTROL:
-                # très bas Re : tension fixe au minimum, le PI règle la PdC.
+                # très bas Re : tension fixe (u_pdc), le PI règle la PdC.
                 # Le PI a été calé sur le feed-forward PdC par _preparer_pi
                 # au changement de mode (plus haut).
-                u = self._u_pdc()
+                self._pdc_regulee = True
+                # u_pdc rejoint sur la rampe du variateur : pas d'échelon à la
+                # bascule depuis le mode variateur
+                u_prec = self.etat.get("u_variateur", 0.0) or 0.0
+                pas = self._rampe_nominale * self.periode
+                u = u_prec + max(-pas, min(pas, self._u_pdc() - u_prec))
 
                 consigne_pi = self._reference_filtree(re_vise, re_mesure)
                 self.pi.u_max = 10.0          # sortie = vanne, pas variateur
@@ -2164,6 +2131,7 @@ class Pilote:
                         f"variateur fixé à {u:.2f} V) — ajuster "
                         "strategie_bas_re (seuil, u_min) ou la consigne")
             elif vannes_pretes:
+                self._pdc_regulee = False
                 # modes normaux : PdC grande ouverte, variateur =
                 # feed-forward + correction PI en volts
                 # CORRECTION CRITIQUE-1 : Utiliser mode_table pour choisir table gains
@@ -2393,6 +2361,58 @@ class Pilote:
         if self._gain_re_par_volt:
             return u0 * self._gain_re_par_volt, u1 * self._gain_re_par_volt
         return None
+
+    def _mode_cible_courant(self, re_cible_cond: float) -> ModeRegulation:
+        """Mode visé pour la consigne (gestion_modes), avec sa mémoire
+        d'hystérésis. Seul point de décision : la boucle et la redirection
+        des vannes en cours de manœuvre (_rediriger_vannes) l'utilisent tous
+        deux, sans quoi elles pourraient se contredire dans les bandes
+        d'hystérésis et faire osciller les vannes.
+
+        Mémoire amorcée sur le mode préparé (lui-même parti de la position
+        réelle de la vanne) : vide, la bande d'hystérésis était tranchée sur
+        le seuil seul, contre la préparation."""
+        # seuils relus : seuil bas-Re appris, Banc remplacé par une édition
+        self._config_modes = self._configuration_modes()
+        precedent = self._mode_cible_precedent
+        if precedent is None and self._mode_regulation is not None:
+            precedent = ModeRegulation(self._mode_regulation)
+        mode = determiner_mode_cible(re_cible_cond, self._config_modes,
+                                     precedent)
+        self._mode_cible_precedent = mode
+        return mode
+
+    def _rediriger_vannes(self, mode: ModeRegulation, mesures: dict) -> None:
+        """Nouvelle consigne pendant un déplacement de vannes : chaque vanne
+        rejoint tout de suite la position du nouveau mode — inversion en
+        cours de course si elle allait ailleurs (la carte GF3 et les ER20
+        acceptent l'ordre inverse à tout moment), commande immédiate si elle
+        était immobile hors de sa cible. Toutes ensemble, chacune avec un
+        chien de garde neuf. Sans cela, la course devenue inutile allait à
+        son terme avant le demi-tour (~20 s perdues)."""
+        vise_diaph = "iso" if mode == ModeRegulation.NORMAL_HIGH else "miller"
+        vise_ouvert = mode != ModeRegulation.NORMAL_HIGH
+        etat_v = lire_etat_vannes(mesures, self._diaphragme_par_angle)
+
+        m = self._manoeuvres.get("3voies")
+        if m is not None:
+            if m["angle_attendu"] != self._angle_par_diaphragme[vise_diaph]:
+                # sans entrée en cours, commander_diaphragme ne relance pas de
+                # manœuvre si la vanne n'a pas encore quitté sa butée cible
+                del self._manoeuvres["3voies"]
+                self.commander_diaphragme(vise_diaph)
+        elif etat_v.diaphragme in (PositionDiaphragme.ISO, PositionDiaphragme.MILLER) \
+                and etat_v.diaphragme.value != vise_diaph:
+            self.commander_diaphragme(vise_diaph)
+
+        fc_visee = "fc_bypass_ouvert" if vise_ouvert else "fc_bypass_ferme"
+        m = self._manoeuvres.get("bypass")
+        if m is not None:
+            if m["fc_attendue"] != fc_visee:
+                self.commander_bypass(vise_ouvert)
+        elif etat_v.bypass in (PositionBypass.OUVERT, PositionBypass.FERME) \
+                and (etat_v.bypass == PositionBypass.OUVERT) != vise_ouvert:
+            self.commander_bypass(vise_ouvert)
 
     def _configuration_modes(self) -> ConfigurationModes:
         """Seuils de la gestion des modes, alignés sur ceux du Banc
@@ -2624,34 +2644,6 @@ class Pilote:
             "alerte_table_ff": alerte,
         }
         return u
-
-    def _prepositionner_vanne_pdc_securitaire(self, mode: str) -> None:
-        """Pré-positionne la vanne PDC selon la règle min(actuelle, cible)
-        pour garantir l'absence de surdébit transitoire avant toute manœuvre.
-
-        Règle de sécurité (réf. prompt_pilotage_veine.md §3.6) :
-        amener la vanne à min(position actuelle, position cible) avant toute
-        manœuvre TOR (diaphragme, bypass). Aucune manœuvre ne peut alors
-        créer de surdébit transitoire."""
-        # Position actuelle dans l'échelle de la CONSIGNE (la dernière
-        # commande). La recopie n'est pas dans cette échelle (butées
-        # calibrées pdc_recopie_min/max, ~9,2 V à pleine ouverture) : la
-        # renvoyer comme consigne refermait partiellement une vanne ouverte.
-        position_actuelle_v = self._pdc_consigne
-
-        # Position cible selon mode
-        if mode in (MODE_NORMAL_HIGH, MODE_NORMAL_LOW):
-            # Modes normaux : PDC grande ouverte
-            position_cible_v = 10.0
-        else:
-            # Mode pdc_control : position médiane (sera ajustée par PI)
-            position_cible_v = 5.0
-
-        # Règle min(actuelle, cible) : sécurité anti-surdébit
-        position_securitaire_v = min(position_actuelle_v, position_cible_v)
-
-        # Commander position sécuritaire AVANT manœuvres TOR
-        self.commander_vanne_perte_charge(position_securitaire_v)
 
     def _preparer_pi(self, mode: str, re_cond_attendu: float) -> None:
         """Cale les régulateurs sur le régime visé.

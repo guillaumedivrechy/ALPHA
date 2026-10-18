@@ -39,9 +39,10 @@ def calculer_commandes_vannes(
     """
     Calcule les commandes à envoyer aux vannes pour atteindre le mode cible.
 
-    Logique de transition sécurisée :
-    - HAUT → BAS (ISO → Miller) : Commande simultanée diaphragme + bypass ouvert
-    - BAS → HAUT (Miller → ISO) : Séquentiel (fermer bypass d'abord, puis diaphragme)
+    Les vannes à déplacer sont commandées simultanément, dans les deux sens
+    (ISO → Miller : diaphragme + ouverture du bypass ; Miller → ISO :
+    diaphragme + fermeture du bypass) ; le ventilateur est tenu à 0 V par le
+    pilote pendant les manœuvres.
 
     Args:
         etat_actuel: État physique actuel des vannes
@@ -87,17 +88,16 @@ def calculer_commandes_vannes(
                 # Bypass en transit ou inconnu, attendre
                 return CommandesVannes(diaphragme=None, bypass=None, pdc=None)
 
-        # Sous-cas 1.2 : Diaphragme Miller (transition BAS → HAUT)
+        # Sous-cas 1.2 : Diaphragme Miller (transition BAS → HAUT) :
+        # diaphragme ET bypass commandés simultanément. La séquence d'avant
+        # (bypass d'abord) protégeait le petit orifice du débit ; le pilote
+        # tient désormais le ventilateur à 0 V pendant toute manœuvre.
         elif etat_actuel.diaphragme == PositionDiaphragme.MILLER:
-            # Logique séquentielle : fermer bypass d'abord, puis diaphragme
-            if etat_actuel.bypass != PositionBypass.FERME:
-                # Étape 1 : Fermer bypass
-                log.info("Transition Miller→ISO : fermeture bypass d'abord")
-                return CommandesVannes(diaphragme=None, bypass=False, pdc=None)
-            else:
-                # Étape 2 : Bypass fermé, commander diaphragme vers ISO
-                log.info("Transition Miller→ISO : bypass fermé, commande diaphragme ISO")
-                return CommandesVannes(diaphragme="iso", bypass=None, pdc=None)
+            fermer = etat_actuel.bypass != PositionBypass.FERME
+            log.info("Transition Miller→ISO : diaphragme ISO%s",
+                     " + fermeture bypass" if fermer else "")
+            return CommandesVannes(diaphragme="iso",
+                                   bypass=False if fermer else None, pdc=None)
 
         # Sous-cas 1.3 : Diaphragme en transit ou inconnu
         else:
