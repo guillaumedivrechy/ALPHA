@@ -42,6 +42,9 @@ COLONNES = [
     ("defauts", "defauts"),
 ]
 
+# grandeurs déduites du ΔP : sans objet pendant la course de la vanne 3 voies
+_MESURES_DEBIT = ("re_mesure", "re_moyen", "re_ecart_type", "dp", "qm")
+
 # drapeaux de défaut recopiés dans la colonne « defauts »
 _DEFAUTS = ("erreur_com", "defaut_capteur", "defaut_vanne",
             "defaut_variateur", "defaut_pdc", "incoherence_vanne")
@@ -155,6 +158,16 @@ class JournalEssai:
             str(etat[c]) if isinstance(etat.get(c), str) else c
             for c in _DEFAUTS if etat.get(c))
         valeurs = dict(etat)
+        # diaphragme dont le capteur ΔP est exploité (butée lue)
+        valeurs["diaphragme"] = etat.get("diaphragme_mesure",
+                                         etat.get("diaphragme"))
+        if etat.get("diaphragme_lu") == "en_transit":
+            # vanne 3 voies en course : le débit passe par les deux voies,
+            # aucun capteur ne le mesure — pas de valeur plutôt qu'une fausse
+            # (l'IHM affiche « en cours »)
+            for cle in _MESURES_DEBIT:
+                valeurs[cle] = None
+            valeurs["diaphragme"] = "en cours"
         valeurs["horodatage"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         valeurs["t_s"] = round(t_monotonic - (self._t0 or t_monotonic), 1)
         valeurs["defauts"] = defauts

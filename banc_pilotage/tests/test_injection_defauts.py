@@ -41,11 +41,14 @@ def _assert_repli(b, cle, texte):
 
 
 def _assert_reprise_apres_acquittement(b, consigne=(12000.0, "veine")):
+    motif = b.p.etat.get("arret_motif")
+    assert motif                                      # cause mémorisée
     b.cycles(10, verifier=False)                     # défaut disparu
     assert not b.p.regulation_active and b.sim.u_ecrite == 0.0
     assert b.p.etat["arret_securite"]                 # toujours à acquitter
+    assert b.p.etat["arret_motif"] == motif           # cause toujours lisible
     b.p.acquitter_arret_securite()
-    assert b.p.etat["arret_securite"] is None
+    assert b.p.etat["arret_securite"] is None and b.p.etat["arret_motif"] is None
     b.consigne(*consigne)
     assert b.jusqu_a_convergence(150) is not None
 

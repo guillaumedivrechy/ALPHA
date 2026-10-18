@@ -103,6 +103,11 @@ _MAP_PDC = {
 }
 
 
+# défauts qui provoquent un repli : cause publiée de l'arrêt de sécurité
+_CLES_DEFAUT = ("erreur_com", "defaut_capteur", "defaut_vanne",
+                "defaut_variateur", "defaut_pdc", "incoherence_vanne")
+
+
 def _nombre(x) -> bool:
     return isinstance(x, (int, float)) and not isinstance(x, bool) \
         and x == x and abs(x) != float("inf")
@@ -842,6 +847,7 @@ class Pilote:
         efface le bandeau et les défauts latchés."""
         self._acquitter_defauts()
         self.etat["arret_securite"] = None
+        self.etat["arret_motif"] = None
 
     def arreter_regulation(self) -> None:
         """Arrêt du variateur : coupe la régulation, le mode manuel ET la
@@ -1268,6 +1274,24 @@ class Pilote:
     def _cycle_protege(self) -> None:
         """Un cycle, avec repli sûr sur toute exception (Modbus, capteur,
         calcul ou défaut de programmation)."""
+        try:
+            self._cycle_protege_corps()
+        finally:
+            self._memoriser_motif_arret()
+
+    def _memoriser_motif_arret(self) -> None:
+        """Cause d'un arrêt de sécurité, figée au premier repli : le défaut
+        peut disparaître de lui-même (liaison revenue) et l'IHM peut être
+        rouverte — la cause reste lisible jusqu'à l'acquittement."""
+        if not self.etat.get("arret_securite") or self.etat.get("arret_motif"):
+            return
+        motifs = [str(self.etat[c]) if isinstance(self.etat.get(c), str)
+                  else c.replace("_", " ")
+                  for c in _CLES_DEFAUT if self.etat.get(c)]
+        if motifs:
+            self.etat["arret_motif"] = " ; ".join(motifs)
+
+    def _cycle_protege_corps(self) -> None:
         try:
             self._cycle()
             self.etat["erreur_com"] = None

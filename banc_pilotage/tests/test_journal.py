@@ -240,3 +240,22 @@ def test_journal_desactivable(tmp_path):
     pilote.demarrer_regulation()
     pilote._cycle()                                  # ne doit pas lever
     assert not any(tmp_path.iterdir())
+
+
+def test_mesures_vides_pendant_la_course_de_la_vanne_3_voies(tmp_path):
+    """Vanne 3 voies en course : le débit passe par les deux voies, aucun
+    capteur ne le mesure — colonnes de mesure vides, diaphragme « en cours »
+    (avant : le Re du capteur de la dernière butée, sans valeur physique)."""
+    j = JournalEssai(tmp_path, periode_s=0.0)
+    j.ouvrir(100.0)
+    j.enregistrer(dict(_etat(), diaphragme_lu="en_transit"), 100.0)
+    j.enregistrer(dict(_etat(), diaphragme_lu="miller",
+                       diaphragme_mesure="miller"), 101.0)
+    j.fermer()
+    entete, en_course, arrivee = (l.split(";") for l in
+                                  j.chemin.read_text(encoding="utf-8-sig").splitlines())
+    c, a = dict(zip(entete, en_course)), dict(zip(entete, arrivee))
+    for col in ("Re calculé", "Re moyen", "Re ecart-type", "dP [Pa]", "qm [kg/s]"):
+        assert c[col] == "", col
+    assert c["diaphragme"] == "en cours" and c["Re consigne"] == "6000"
+    assert a["Re calculé"] == "5987" and a["diaphragme"] == "miller"

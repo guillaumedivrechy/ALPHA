@@ -617,7 +617,10 @@ class Application(QMainWindow):
                 txt = val if isinstance(val, str) else cle.replace("_", " ")
                 if txt not in self._motifs_arret:
                     self._motifs_arret.append(txt)
-        motif = " ; ".join(self._motifs_arret) or "cause non publiée"
+        # cause mémorisée par le pilote (survit au défaut disparu et à une
+        # réouverture de l'IHM) ; à défaut, celle relevée ici
+        motif = e.get("arret_motif") or " ; ".join(self._motifs_arret) \
+            or "cause non publiée"
         self._lbl_arret.setText(
             f"⛔ ARRÊT DE SÉCURITÉ à {heure} — ventilateur coupé. {motif}")
         self._bandeau_arret.setVisible(True)
