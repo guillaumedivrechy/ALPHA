@@ -83,7 +83,7 @@ class BancSimule:
     def cycles(self, duree_s: float, verifier: bool = True) -> None:
         for _ in range(max(1, int(round(duree_s / self.p.periode)))):
             self.t[0] += self.p.periode
-            self.p._cycle()
+            self.p._cycle_protege()          # comme _boucle : repli sur exception
             if verifier:
                 self.invariants()
 

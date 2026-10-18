@@ -1237,6 +1237,53 @@ class Pilote:
             except (OSError, ValueError) as e:
                 log.error(f"Erreur sauvegarde état : {e}")
 
+    def _cycle_protege(self) -> None:
+        """Un cycle, avec repli sûr sur toute exception (Modbus, capteur,
+        calcul ou défaut de programmation)."""
+        try:
+            self._cycle()
+            self.etat["erreur_com"] = None
+        except Exception as exc:  # noqa: BLE001
+            # Erreurs attendues (Modbus, capteurs, calculs) ou défaut de
+            # programmation : repli sûr dans tous les cas. Une exception
+            # non rattrapée tuerait le thread en laissant le variateur
+            # sous tension, RUN actif, sans plus aucune supervision.
+            if not isinstance(exc, (IOError, OSError, ConnectionError,
+                                    TimeoutError, ValueError, KeyError,
+                                    RuntimeError)):
+                log.exception("Erreur inattendue dans le cycle de régulation")
+                exc = f"erreur interne ({type(exc).__name__}: {exc})"
+            self.etat["erreur_com"] = str(exc)
+            # état sûr documenté : variateur 0 V ET ordre RUN retiré.
+            # On latche l'arrêt (régulation ET mode manuel), comme les
+            # défauts variateur/vanne, pour ne pas relancer la soufflerie
+            # tout seul dès que la communication revient.
+            en_marche = self.regulation_active or self.mode_manuel
+            self._latcher_arret()
+            # banc en marche coupé : arrêt de sécurité à acquitter, comme
+            # tout repli (bandeau IHM). Banc à l'arrêt, une liaison absente
+            # reste signalée par le voyant, sans bandeau.
+            if en_marche and not self.etat.get("arret_securite"):
+                self.etat["arret_securite"] = time.strftime("%H:%M:%S")
+            # l'état publié doit dire la vérité : le cycle ayant échoué
+            # avant sa mise à jour, l'IHM continuait d'afficher
+            # « RÉGULATION » et une tension d'avant la coupure, alors
+            # que le banc venait d'être arrêté et verrouillé.
+            self.etat.update({"regulation": False, "manuel": False,
+                              "convergee": False, "u_variateur": 0.0,
+                              "manoeuvre": None, "sequence": None})
+            try:
+                self.es.ecrire_variateur(0.0)
+            except (IOError, RuntimeError, OSError):
+                # Si même écrire 0V échoue, on ne peut plus rien faire
+                pass
+            try:
+                self.es.ecrire_variateur_run(False)
+                self._run_actif = False
+            except (IOError, RuntimeError, OSError):
+                # Tentative d'arrêt du RUN en repli, même si communication rompue
+                pass
+
     def _boucle(self) -> None:
         """Boucle de régulation principale (thread dédié)."""
         self._preparation_faite = False
@@ -1244,43 +1291,7 @@ class Pilote:
         self._ready.set()
         while not self._stop.is_set():
             debut = time.monotonic()
-            try:
-                self._cycle()
-                self.etat["erreur_com"] = None
-            except Exception as exc:  # noqa: BLE001
-                # Erreurs attendues (Modbus, capteurs, calculs) ou défaut de
-                # programmation : repli sûr dans tous les cas. Une exception
-                # non rattrapée tuerait le thread en laissant le variateur
-                # sous tension, RUN actif, sans plus aucune supervision.
-                if not isinstance(exc, (IOError, OSError, ConnectionError,
-                                        TimeoutError, ValueError, KeyError,
-                                        RuntimeError)):
-                    log.exception("Erreur inattendue dans le cycle de régulation")
-                    exc = f"erreur interne ({type(exc).__name__}: {exc})"
-                self.etat["erreur_com"] = str(exc)
-                # état sûr documenté : variateur 0 V ET ordre RUN retiré.
-                # On latche l'arrêt (régulation ET mode manuel), comme les
-                # défauts variateur/vanne, pour ne pas relancer la soufflerie
-                # tout seul dès que la communication revient.
-                self._latcher_arret()
-                # l'état publié doit dire la vérité : le cycle ayant échoué
-                # avant sa mise à jour, l'IHM continuait d'afficher
-                # « RÉGULATION » et une tension d'avant la coupure, alors
-                # que le banc venait d'être arrêté et verrouillé.
-                self.etat.update({"regulation": False, "manuel": False,
-                                  "convergee": False, "u_variateur": 0.0,
-                                  "manoeuvre": None, "sequence": None})
-                try:
-                    self.es.ecrire_variateur(0.0)
-                except (IOError, RuntimeError, OSError):
-                    # Si même écrire 0V échoue, on ne peut plus rien faire
-                    pass
-                try:
-                    self.es.ecrire_variateur_run(False)
-                    self._run_actif = False
-                except (IOError, RuntimeError, OSError):
-                    # Tentative d'arrêt du RUN en repli, même si communication rompue
-                    pass
+            self._cycle_protege()
             # ---- journal des conditions d'essai ------------------------
             # Écrit ICI et non en fin de _cycle : le cycle a cinq sorties
             # anticipées (manœuvre en cours, défaut capteur, défaut vanne,
