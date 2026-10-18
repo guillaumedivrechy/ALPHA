@@ -30,7 +30,8 @@ class TestISOContreExcel:
     ν = 1,5e-5 m²/s (valeurs du classeur ISO V12)."""
 
     @pytest.fixture(scope="class")
-    def r(self):
+    @classmethod
+    def r(cls):
         return iso_qm_depuis_dP(GEO_ISO, dP=145.0, T_celsius=20.0,
                                 P1_abs=101325.0, rho=1.205, nu=1.5e-5,
                                 gamma=GAMMA, formule_C="RHG")
@@ -79,10 +80,11 @@ class TestMillerContreExcel:
     MU_CLASSEUR = 1.845036e-5
 
     @pytest.fixture(scope="class")
-    def r(self):
+    @classmethod
+    def r(cls):
         return miller_qm_depuis_dP(GEO_MILLER, dP=18.3, T_celsius=20.0,
-                                   P1_abs=101325.0, rho=self.RHO_CLASSEUR,
-                                   mu=self.MU_CLASSEUR, gamma=GAMMA)
+                                   P1_abs=101325.0, rho=cls.RHO_CLASSEUR,
+                                   mu=cls.MU_CLASSEUR, gamma=GAMMA)
 
     def test_C(self, r):
         assert r["C"] == pytest.approx(0.773839, abs=2e-6)
@@ -142,8 +144,9 @@ class TestISOCasDeReferenceComplet:
                               alpha_diaphragme=2.394e-5)
 
     @pytest.fixture(scope="class")
-    def r(self):
-        return iso_qm_depuis_dP(self.GEO, dP=145.0, T_celsius=20.0,
+    @classmethod
+    def r(cls):
+        return iso_qm_depuis_dP(cls.GEO, dP=145.0, T_celsius=20.0,
                                 P1_abs=101349.0, rho=1.20507, nu=1.49867e-5,
                                 gamma=GAMMA, formule_C="RHG")
 
@@ -191,8 +194,9 @@ class TestMillerCasDeReferenceComplet:
                               alpha_conduite=8e-5, alpha_diaphragme=1.692e-5)
 
     @pytest.fixture(scope="class")
-    def r(self):
-        return miller_qm_depuis_dP(self.GEO, dP=18.3, T_celsius=17.7,
+    @classmethod
+    def r(cls):
+        return miller_qm_depuis_dP(cls.GEO, dP=18.3, T_celsius=17.7,
                                    P1_abs=101332.0, rho=1.44229,
                                    mu=1.845e-5, gamma=GAMMA)
 

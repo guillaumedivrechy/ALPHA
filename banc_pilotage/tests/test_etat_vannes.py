@@ -39,3 +39,16 @@ def test_butee_180_ou_double_inexploitable():
         e = lire_etat_vannes({**fc, **BYPASS_PDC})
         assert e.diaphragme == PositionDiaphragme.INCONNU
         assert not e.coherent
+
+
+def test_exemples_des_docstrings():
+    """Les exemples des modules de gestion des vannes et des modes sont
+    exécutés : ils importaient des modules inexistants et n'étaient jamais
+    vérifiés."""
+    import doctest
+    import core.commandes_vannes
+    import core.etat_vannes
+    import core.gestion_modes
+    for module in (core.etat_vannes, core.gestion_modes, core.commandes_vannes):
+        resultat = doctest.testmod(module)
+        assert resultat.attempted > 0 and resultat.failed == 0, module.__name__

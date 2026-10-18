@@ -2025,7 +2025,7 @@ class Pilote:
 
             # PDC sera commandée par la régulation plus loin (sauf init à 10V)
             # Ici on ne commande que les TOR (diaphragme, bypass)
-            # La tension PdC vient de calculer_consigne_variateur()
+            # (consigne PdC : calculée plus bas selon le mode)
 
             # 6. VÉRIFICATION : Toutes les vannes sont-elles en position ?
             # Utiliser les positions depuis etat_vannes (nouveau module)
@@ -2271,65 +2271,13 @@ class Pilote:
                            or ("dP saturé" if dp_sature else None)),
             })
 
-    def _determiner_mode_depuis_diaphragme(self, diaph_physique: str,
-                                            re_cond_mesure: float) -> str:
-        """Détermine le mode de régulation à partir du DIAPHRAGME PHYSIQUE
-        (lu sur fins de course) et du Re conduite MESURÉ.
-
-        CORRECTION CRITIQUE-1 : Le mode doit suivre le diaphragme réellement
-        en ligne, pas la consigne. Dans la bande d'hystérésis (4500-5500 Re),
-        utiliser le Re cible créerait une incohérence entre mode et diaphragme.
-
-        - MODE_NORMAL_HIGH : Diaphragme ISO (bypass fermé, PdC 100%, variateur réglé)
-        - MODE_NORMAL_LOW  : Diaphragme Miller (bypass ouvert, PdC 100%, variateur réglé)
-        - MODE_PDC_CONTROL : Diaphragme Miller + Re très bas (variateur u_min, PdC réglée)
-
-        Args:
-            diaph_physique: "iso" ou "miller" (lu sur fins de course FC)
-            re_cond_mesure: Re conduite mesuré (pour basculement NORMAL_LOW ↔ PDC_CONTROL)
-
-        Returns:
-            MODE_NORMAL_HIGH, MODE_NORMAL_LOW ou MODE_PDC_CONTROL
-        """
-        # Re minimal tenu par le variateur seul en Miller (bypass ouvert).
-        # Utilisé pour basculer entre NORMAL_LOW et PDC_CONTROL.
-        seuil = self.banc.seuil_re
-        if self.seuil_bas_re and self.seuil_bas_re < seuil:
-            freq_min_re = self.seuil_bas_re
-        elif self.table_gains_bas_re.valide_ff():
-            freq_min_re = self.table_gains_bas_re._points_ff()[0][1]
-        else:
-            freq_min_re = (self.u_min_ventilateur or 0.3) * \
-                (self._gain_re_par_volt or 1000)
-
-        # Cas 1 : Diaphragme ISO → toujours MODE_NORMAL_HIGH
-        if diaph_physique == "iso":
-            return MODE_NORMAL_HIGH
-
-        # Cas 2 : Diaphragme Miller → NORMAL_LOW ou PDC_CONTROL selon Re mesuré
-        # Hystérésis ±5% pour éviter oscillations au seuil
-        courant = self._mode_regulation
-        if courant == MODE_PDC_CONTROL:
-            # En mode PDC, rester en PDC tant que Re < 105% du seuil
-            bas = re_cond_mesure < 1.05 * freq_min_re
-        elif courant == MODE_NORMAL_LOW:
-            # En mode NORMAL_LOW, basculer vers PDC si Re < 95% du seuil
-            bas = re_cond_mesure < 0.95 * freq_min_re
-        else:
-            # Premier passage ou mode indéterminé : basculer à freq_min_re exact
-            bas = re_cond_mesure < freq_min_re
-
-        return MODE_PDC_CONTROL if bas else MODE_NORMAL_LOW
-
     def _determiner_mode_regulation(self, re_cond: float) -> str:
         """Mode de régulation pour un Re conduite visé, AVEC hystérésis.
 
-        ⚠️ DEPRECATED : Cette méthode est conservée pour compatibilité avec
-        la phase de PRÉPARATION (ligne 1366), mais NE DOIT PLUS être utilisée
-        pour déterminer le mode pendant la régulation (ligne 1741).
-
-        Utiliser _determiner_mode_depuis_diaphragme() à la place pour éviter
-        incohérence mode/diaphragme dans la bande d'hystérésis.
+        Sert à la PRÉPARATION d'une consigne (pré-positionnement de la PdC,
+        calage des régulateurs). En régulation, c'est gestion_modes qui
+        décide, avec les mêmes seuils (cf. _configuration_modes) ; un écart
+        éventuel est rattrapé par un nouveau calage au cycle suivant.
 
         - MODE_NORMAL_HIGH : ISO, bypass fermé, PdC 100 %, variateur réglé
         - MODE_NORMAL_LOW  : Miller, bypass ouvert, PdC 100 %, variateur réglé

@@ -449,31 +449,45 @@ def test_correction_gelee_tant_que_le_variateur_suit_sa_rampe():
                                                        abs=1e-3)
 
 
-@pytest.mark.skip(reason="Test à réécrire après CRITIQUE-1 : mode suit désormais le diaphragme physique, "
-                          "pas la consigne Re. Ce test doit simuler un diaphragme stable au lieu de vérifier "
-                          "le mode depuis Re cible.")
 def test_critere_bas_re_en_reference_veine():
-    """Le mode de régulation est déterminé selon Re CONDUITE : une consigne
-    veine doit être convertie avant comparaison. Ici Re veine 1000 ≈ Re conduite 3129,
-    en-dessous du seuil 5000 -> mode normal_low.
+    """Le mode se décide sur le Re CONDUITE : une consigne veine est convertie
+    avant comparaison. Re veine 1000 ≈ Re conduite 1870 (géométrie de
+    config.json), au-dessus du seuil bas-Re 1500 -> normal_low (comparé tel
+    quel, 1000 partirait en PdC)."""
+    pilote, es = _pilote_en_position("fc_3voies_90")
+    pilote.seuil_bas_re = 1500.0
+    pilote.u_min_ventilateur = 0.5
+    es.mesures["dp_diaph_500"] = 0.5
+    pilote.definir_consigne(1000.0, "veine")
+    pilote.demarrer_regulation()
+    for _ in range(3):
+        pilote._cycle()
+    assert pilote._re_cible_conduite > 1.05 * 1500.0
+    assert pilote._mode_regulation == "normal_low"
 
-    CORRECTION CRITIQUE-1 : Ce test est temporairement désactivé car il repose sur
-    l'ancienne logique (mode depuis Re cible). Avec la nouvelle logique, le mode suit
-    le diaphragme physique lu sur FC, pas le Re cible."""
-    pass
 
-
-@pytest.mark.skip(reason="Test à réécrire après CRITIQUE-1 : mode suit désormais le diaphragme physique. "
-                          "Difficile de simuler un changement de mode sans simuler la manœuvre complète "
-                          "de la vanne (timeout, FCs intermédiaires, etc.). Besoin SimulateurBanc complet.")
 def test_bascule_bas_re_en_cours_recale_le_pi():
-    """Si le mode change en cours de régulation (ex: Re cible conduite change),
-    le PI doit être re-calé sur le feed-forward du nouveau mode.
-
-    CORRECTION CRITIQUE-1 : Ce test est temporairement désactivé car il repose sur
-    l'ancienne logique (mode depuis Re cible). Avec la nouvelle logique, le mode suit
-    le diaphragme physique, nécessitant une simulation complète des manœuvres."""
-    pass
+    """Changement de mode en cours de régulation (Miller variateur -> PdC) :
+    le PI de la vanne est recalé sur son feed-forward, pas laissé sur l'état
+    du mode précédent."""
+    pilote, es = _pilote_en_position("fc_3voies_90")
+    pilote.seuil_bas_re = 2000.0
+    pilote.u_min_ventilateur = 0.5
+    pilote.table_gains_pdc = TableGains([(30.0, 300.0), (100.0, 1500.0)])
+    es.mesures["dp_diaph_500"] = 0.5
+    pilote.definir_consigne(3000.0, "conduite")
+    pilote.demarrer_regulation()
+    for _ in range(5):
+        pilote._cycle()
+    assert pilote._mode_regulation == "normal_low"
+    appels = _espion_reinit(pilote.pi)
+    pilote.definir_consigne(1000.0, "conduite")
+    for _ in range(3):
+        pilote._cycle()
+    assert pilote._mode_regulation == "pdc_control"
+    v_ff = pilote._pdc_ff_v(1000.0)
+    assert appels and appels[0] == pytest.approx(v_ff)
+    assert pilote.etat["u_variateur"] == pytest.approx(0.5)
 
 
 def test_duree_cycle_publiee(tmp_path):

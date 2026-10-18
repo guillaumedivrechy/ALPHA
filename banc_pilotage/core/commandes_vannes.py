@@ -52,8 +52,8 @@ def calculer_commandes_vannes(
         CommandesVannes contenant les commandes à envoyer (None = pas de changement)
 
     Examples:
-        >>> from etat_vannes import EtatVannes, PositionDiaphragme, PositionBypass, PositionPDC
-        >>> from gestion_modes import ModeRegulation
+        >>> from core.etat_vannes import EtatVannes, PositionDiaphragme, PositionBypass, PositionPDC
+        >>> from core.gestion_modes import ModeRegulation
         >>> etat = EtatVannes(
         ...     diaphragme=PositionDiaphragme.ISO,
         ...     bypass=PositionBypass.FERME,

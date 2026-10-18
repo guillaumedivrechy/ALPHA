@@ -140,7 +140,7 @@ def determiner_mode_effectif(
         ModeRegulation effectif (NORMAL_HIGH, NORMAL_LOW, ou PDC_CONTROL)
 
     Examples:
-        >>> from etat_vannes import EtatVannes, PositionDiaphragme, PositionBypass, PositionPDC
+        >>> from core.etat_vannes import EtatVannes, PositionDiaphragme, PositionBypass, PositionPDC
         >>> etat = EtatVannes(
         ...     diaphragme=PositionDiaphragme.ISO,
         ...     bypass=PositionBypass.FERME,
