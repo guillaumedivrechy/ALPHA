@@ -21,6 +21,19 @@ from core.pilote import Pilote
 from gui.app import Application
 
 
+def _abandon(message: str) -> None:
+    """Démarrage impossible : message clair, sans trace Python. Sans console
+    (pythonw, double-clic), le message part dans une boîte de dialogue —
+    sinon il disparaissait avec la fenêtre."""
+    if sys.stderr is None:
+        from PySide6.QtWidgets import QMessageBox
+        _app = QApplication.instance() or QApplication(sys.argv)
+        QMessageBox.critical(None, "Banc aéraulique — démarrage impossible",
+                             message)
+        sys.exit(1)
+    sys.exit(f"\nDémarrage impossible :\n{message}\n")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--simulation", action="store_true",
@@ -35,9 +48,19 @@ def main() -> None:
     else:
         chemin_cfg = Path(__file__).resolve().parent / "config.json"
     if not chemin_cfg.exists():
-        sys.exit(f"Fichier de configuration introuvable : {chemin_cfg}")
-    cfg = json.loads(chemin_cfg.read_text(encoding="utf-8"))
-    banc = Banc(cfg)
+        _abandon(f"Fichier de configuration introuvable : {chemin_cfg}")
+    try:
+        cfg = json.loads(chemin_cfg.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:     # JSONDecodeError, encodage
+        _abandon(f"{chemin_cfg.name} illisible : {exc}\n\n"
+                 "Restaurer la dernière version valide du fichier "
+                 "(historique git, sauvegarde).")
+    try:
+        banc = Banc(cfg)
+    except KeyError as exc:
+        _abandon(f"{chemin_cfg.name} : paramètre obligatoire absent ({exc}).")
+    except (ValueError, TypeError) as exc:
+        _abandon(f"{chemin_cfg.name} : valeur invalide — {exc}")
 
     if args.simulation:
         from io_banc.simulateur import SimulateurBanc
@@ -48,8 +71,8 @@ def main() -> None:
         try:
             es = WagoModbus(cfg["modbus"])
         except (ConnectionError, RuntimeError) as exc:
-            sys.exit(
-                f"\n{exc}\n\n"
+            _abandon(
+                f"{exc}\n\n"
                 f"  - Vérifiez l'adresse IP du coupleur 750-362 dans "
                 f"config.json (section \"modbus\")\n"
                 f"    et que le PC est sur le même sous-réseau "
@@ -58,8 +81,13 @@ def main() -> None:
                 f"python main.py --simulation\n")
         mode = "wago " + cfg["modbus"]["ip"]
 
-    pilote = Pilote(banc, es, cfg)
-    pilote.demarrer()
+    try:
+        pilote = Pilote(banc, es, cfg)
+        pilote.demarrer()
+    except KeyError as exc:
+        _abandon(f"{chemin_cfg.name} : paramètre obligatoire absent ({exc}).")
+    except (ValueError, TypeError, RuntimeError) as exc:
+        _abandon(f"Initialisation du pilote impossible : {exc}")
 
     qt_app = QApplication(sys.argv)
     app = Application(pilote, mode, cfg, chemin_cfg)

@@ -103,6 +103,31 @@ _MAP_PDC = {
 }
 
 
+def _nombre(x) -> bool:
+    return isinstance(x, (int, float)) and not isinstance(x, bool) \
+        and x == x and abs(x) != float("inf")
+
+
+def _table_depuis_fichier(points, nom: str):
+    """TableGains lue d'un fichier d'apprentissage, ou None si absente ou
+    inexploitable. Chaque point doit être un couple (tension, Re) numérique :
+    une ligne mal formée rend toute la table suspecte (elle faisait planter
+    le démarrage sur IndexError)."""
+    if not points:
+        return None
+    try:
+        propres = [[float(p[0]), float(p[1])] for p in points
+                   if len(p) == 2 and _nombre(p[0]) and _nombre(p[1])]
+    except TypeError:
+        propres = []
+    if len(propres) != len(points):
+        log.error(f"Apprentissage : table {nom} mal formée, ignorée "
+                  "(relancer l'apprentissage correspondant)")
+        return None
+    t = TableGains(propres)
+    return t if t.est_valide() else None
+
+
 class TableGains:
     """Relation tension variateur -> Re conduite, par points mesurés et
     interpolation linéaire. Sert au pré-positionnement (feed-forward) :
@@ -604,31 +629,21 @@ class Pilote:
             donnees = self.gestionnaire_apprentissages.charger_tout()
 
             g = donnees.get("gain_re_par_volt")
-            if g and 100 < g < 1e6:          # garde-fou de vraisemblance
+            if _nombre(g) and 100 < g < 1e6:     # garde-fou de vraisemblance
                 self._gain_re_par_volt = g
 
-            pts = donnees.get("table_gains")
-            if pts:
-                t = TableGains(pts)
-                if t.est_valide():
-                    self.table_gains = t
-
-            # Charger table gains mode bas-Re (paliers re_mapping)
-            pts_bas_re = donnees.get("table_gains_bas_re")
-            if pts_bas_re:
-                t_bas_re = TableGains(pts_bas_re)
-                if t_bas_re.est_valide():
-                    self.table_gains_bas_re = t_bas_re
-
-            # Charger table gains PDC (paliers PDC variable à u_min fixe)
-            pts_pdc = donnees.get("table_gains_pdc")
-            if pts_pdc:
-                t_pdc = TableGains(pts_pdc)
-                if t_pdc.est_valide():
-                    self.table_gains_pdc = t_pdc
+            # chaque table chargée séparément : une table mal formée (fichier
+            # édité, version antérieure) est ignorée et signalée, sans
+            # empêcher le démarrage ni le chargement des autres
+            for cle, attribut in (("table_gains", "table_gains"),
+                                  ("table_gains_bas_re", "table_gains_bas_re"),
+                                  ("table_gains_pdc", "table_gains_pdc")):
+                t = _table_depuis_fichier(donnees.get(cle), cle)
+                if t is not None:
+                    setattr(self, attribut, t)
 
             umin = donnees.get("u_min_ventilateur_v")
-            if umin and 0 < umin < 10:
+            if _nombre(umin) and 0 < umin < 10:
                 self.u_min_ventilateur = umin
         except (OSError, ValueError) as e:
             log.warning(f"Impossible de charger les apprentissages: {e}")

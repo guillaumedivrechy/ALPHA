@@ -1856,20 +1856,34 @@ class Application(QMainWindow):
 
     def _mes_diaphragme(self, position: str) -> None:
         self._mes_prepare()
-        self.pilote.commander_diaphragme(position)
-        self._log(f"Mise en service : vanne 3 voies → {position}",
-                  COLORS["accentText"])
+        if self._commande(f"vanne 3 voies → {position}",
+                          self.pilote.commander_diaphragme, position):
+            self._log(f"Mise en service : vanne 3 voies → {position}",
+                      COLORS["accentText"])
 
     def _mes_bypass(self, ouverte: bool) -> None:
         self._mes_prepare()
-        self.pilote.commander_bypass(ouverte)
-        self._log("Mise en service : bypass → "
-                  + ("ouvert" if ouverte else "ferme"), COLORS["accentText"])
+        if self._commande("bypass", self.pilote.commander_bypass, ouverte):
+            self._log("Mise en service : bypass → "
+                      + ("ouvert" if ouverte else "ferme"), COLORS["accentText"])
 
     def _mes_pdc(self, volts: float) -> None:
-        self.pilote.commander_vanne_perte_charge(volts)
-        self._log(f"Mise en service : vanne PdC → {volts:.0f} V",
-                  COLORS["accentText"])
+        if self._commande("vanne PdC", self.pilote.commander_vanne_perte_charge,
+                          volts):
+            self._log(f"Mise en service : vanne PdC → {volts:.0f} V",
+                      COLORS["accentText"])
+
+    def _commande(self, libelle: str, fonction, *args) -> bool:
+        """Ordre opérateur vers un actionneur. Liaison coupleur perdue :
+        l'exception remontait dans le gestionnaire de clic, sans retour
+        pour l'opérateur ; elle est signalée au journal."""
+        try:
+            fonction(*args)
+            return True
+        except OSError as exc:
+            self._log(f"⚠ {libelle} : ordre non transmis — liaison coupleur "
+                      f"perdue ({exc})", COLORS["error"])
+            return False
 
     def _mes_run(self) -> None:
         if self._bloque_par_arret_securite():
@@ -3355,9 +3369,11 @@ class Application(QMainWindow):
                 pct_ferm = min(max(pct_ferm, 0.0), 100.0)
                 # Convertir % fermeture → % ouverture pour le pilote
                 pct_ouv = 100.0 - pct_ferm
-                self.pilote.commander_vanne_perte_charge_pct(pct_ouv)
-                self._log(f"PdC → {pct_ferm:.0f} % fermeture", "#FF9900")
-                self._dirty["pdc"] = False
+                if self._commande("vanne PdC",
+                                  self.pilote.commander_vanne_perte_charge_pct,
+                                  pct_ouv):
+                    self._log(f"PdC → {pct_ferm:.0f} % fermeture", "#FF9900")
+                    self._dirty["pdc"] = False
             except ValueError:
                 self._signaler_saisie(self._inp_pdc,
                                       f"PdC « {self._inp_pdc.text()} » refusée : "
@@ -3395,12 +3411,12 @@ class Application(QMainWindow):
         self.close()
 
     def _cmd_diaph(self, pos: str) -> None:
-        self.pilote.commander_diaphragme(pos)
-        self._log(f"Vanne Diaphragme → {pos.upper()}", "#FF9900")
+        if self._commande("vanne 3 voies", self.pilote.commander_diaphragme, pos):
+            self._log(f"Vanne Diaphragme → {pos.upper()}", "#FF9900")
 
     def _cmd_bypass(self, ouvert: bool) -> None:
-        self.pilote.commander_bypass(ouvert)
-        self._log(f"Bypass → {'Ouvert' if ouvert else 'Fermé'}", COLORS["ok"])
+        if self._commande("bypass", self.pilote.commander_bypass, ouvert):
+            self._log(f"Bypass → {'Ouvert' if ouvert else 'Fermé'}", COLORS["ok"])
 
     def _calculer_k(self) -> float:
         """Calcule le facteur de conversion Re_conduite / Re_veine à partir
