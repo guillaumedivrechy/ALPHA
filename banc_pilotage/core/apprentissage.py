@@ -28,6 +28,9 @@ class Apprentissage:
         self.chemin_cfg = Path(chemin_cfg)
         self.etat = {"en_cours": False, "statut": "", "test": None}
         self.resultats: dict = {}
+        # résultat -> objet déjà appliqué : un test relancé produit un nouvel
+        # objet, donc redevient « à appliquer »
+        self._appliques: dict = {}
         self._annule = threading.Event()
         self._arrets_debut = pilote.arrets
         self._thread: threading.Thread | None = None
@@ -345,14 +348,14 @@ class Apprentissage:
         es = self.pilote.es
         res = {}
 
-        # Pré-positionnement à FC1 (fermeture complète = fc_bypass_ferme)
+        # Pré-positionnement en fermeture complète (FC2 = fc_bypass_ferme)
         t = self._chronometrer_vanne(lambda: es.ecrire_vanne_bypass(False),
                                      "fc_bypass_ferme", "pré-pos fermeture")
         if t is None:
             return
         self._pause(0.5)
 
-        # T1 : FC1 (fermeture) → FC2 (ouverture)
+        # T1 : FC2 (fermeture) → FC1 (ouverture)
         t = self._chronometrer_vanne(lambda: es.ecrire_vanne_bypass(True),
                                      "fc_bypass_ouvert", "T1 fermeture → ouverture")
         if t is None:
@@ -360,7 +363,7 @@ class Apprentissage:
         res["ouverture_s"] = round(t, 2)
         self._pause(0.5)
 
-        # T2 : FC2 (ouverture) → FC1 (fermeture)
+        # T2 : FC1 (ouverture) → FC2 (fermeture)
         t = self._chronometrer_vanne(lambda: es.ecrire_vanne_bypass(False),
                                      "fc_bypass_ferme", "T2 ouverture → fermeture")
         if t is None:
@@ -1665,7 +1668,96 @@ class Apprentissage:
 
     # ------------------------------------------------- application config
 
+    # libellés opérateur des séquences
+    NOMS = {
+        "zero_capteurs": "Zéro capteurs ΔP",
+        "calibration_pdc": "Calibration recopie PdC",
+        "vanne_3voies": "Vanne 3 voies",
+        "vanne_bypass": "Vanne bypass",
+        "vanne_pdc": "Vanne perte de charge",
+        "verif_cablage": "Contrôle câblage E/S",
+        "re_mapping": "Re mapping",
+        "re_mapping_miller": "Re mapping Miller",
+        "re_mapping_iso": "Re mapping ISO",
+        "indiciel": "Essai indiciel",
+    }
+    # marge appliquée au temps de course mesuré (chien de garde)
+    MARGES_COURSE = {"vanne_3voies": 1.1, "vanne_bypass": 1.1, "vanne_pdc": 1.05}
+
+    def apercu_application(self) -> list[tuple[str, str]]:
+        """(séquence, « réglage : ancienne → nouvelle ») pour chaque
+        résultat en attente : ce qu'« Appliquer » va écrire, lisible."""
+        act = self.cfg.get("actionneurs", {})
+        reg = self.cfg.get("regulation", {})
+        sbr = self.cfg.get("strategie_bas_re", {})
+        cles_course = {"vanne_3voies": "vanne_3voies_temps_s",
+                       "vanne_bypass": "vanne_bypass_temps_s",
+                       "vanne_pdc": "vanne_perte_charge_course_s"}
+        lignes = []
+        for nom in self.resultats_a_appliquer():
+            r = self.resultats[nom]
+            titre = self.NOMS.get(nom, nom)
+            if nom in cles_course:
+                v = round(r["max_s"] * self.MARGES_COURSE[nom], 1)
+                lignes.append((titre, f"chien de garde : "
+                               f"{act.get(cles_course[nom], '—')} s → {v} s"))
+            elif nom == "calibration_pdc":
+                lignes.append((titre, "recopie fermée / ouverte : "
+                               f"{act.get('pdc_recopie_min_v', '—')} / "
+                               f"{act.get('pdc_recopie_max_v', '—')} V → "
+                               f"{r['v_min_recopie']} / {r['v_max_recopie']} V"))
+            elif nom == "zero_capteurs":
+                lignes.append((titre, "offsets : " + ", ".join(
+                    f"{v} = {o} Pa" for v, o in r.items())))
+            elif nom == "indiciel":
+                lignes.append((titre,
+                               f"kp {reg.get('kp', '—')} → {r['kp_propose']}, "
+                               f"ki {reg.get('ki', '—')} → {r['ki_propose']}, "
+                               f"τ consigne {reg.get('tau_consigne_s', '—')} s → "
+                               f"{r['tau_s']} s"))
+            elif nom in ("re_mapping", "re_mapping_miller"):
+                txt = (f"u min ventilateur {sbr.get('u_min_ventilateur_v', '—')} V → "
+                       f"{r['u_min_exploitable_v']} V")
+                if r.get("paliers_V_Re"):
+                    txt += f" ; table Miller ({len(r['paliers_V_Re'])} paliers)"
+                if r.get("paliers_PDC_Re"):
+                    txt += f" ; table PdC ({len(r['paliers_PDC_Re'])} paliers)"
+                if r.get("paliers_plage_haute"):
+                    txt += f" ; table ISO ({len(r['paliers_plage_haute'])} paliers)"
+                lignes.append((titre, txt))
+            elif nom == "re_mapping_iso":
+                n = len(r.get("paliers_plage_haute") or [])
+                lignes.append((titre, f"table ISO ({n} paliers)"))
+            elif nom == "verif_cablage":
+                lignes.append((titre, "mapping vanne 3 voies ISO/Miller interverti"
+                               if r.get("mapping_inverse") else
+                               "contrôle seul, rien à écrire"))
+            else:
+                lignes.append((titre, "résultat à appliquer"))
+        return lignes
+
+    def resultats_a_appliquer(self) -> list[str]:
+        """Noms des résultats mesurés et pas encore appliqués."""
+        return [nom for nom, res in self.resultats.items()
+                if self._appliques.get(nom) is not res]
+
     def appliquer(self) -> str:
+        """Applique les seuls résultats pas encore appliqués : « Appliquer »
+        après un test ne réapplique pas en silence ceux des tests
+        précédents de la session. Retourne un résumé."""
+        tous = self.resultats
+        en_attente = {nom: tous[nom] for nom in self.resultats_a_appliquer()}
+        if not en_attente:
+            return "Aucun nouveau résultat à appliquer."
+        self.resultats = en_attente
+        try:
+            resume = self._appliquer_resultats()
+        finally:
+            self.resultats = tous
+        self._appliques.update(en_attente)
+        return resume
+
+    def _appliquer_resultats(self) -> str:
         """Reporte les résultats dans la configuration (avec marge sur les
         temps de course) et la persiste. Retourne un résumé."""
         act = self.cfg.setdefault("actionneurs", {})
@@ -1699,17 +1791,17 @@ class Apprentissage:
                 f"PdC recopie : fermé = {r['v_min_recopie']} V, "
                 f"ouvert = {r['v_max_recopie']} V")
         if "vanne_3voies" in self.resultats:
-            v = round(self.resultats["vanne_3voies"]["max_s"] * 1.1, 1)
+            v = round(self.resultats["vanne_3voies"]["max_s"] * self.MARGES_COURSE["vanne_3voies"], 1)
             act["vanne_3voies_temps_s"] = v
             self.pilote.t_vanne_3voies = v
             lignes.append(f"vanne 3 voies : {v} s")
         if "vanne_bypass" in self.resultats:
-            v = round(self.resultats["vanne_bypass"]["max_s"] * 1.1, 1)
+            v = round(self.resultats["vanne_bypass"]["max_s"] * self.MARGES_COURSE["vanne_bypass"], 1)
             act["vanne_bypass_temps_s"] = v
             self.pilote.t_vanne_bypass = v
             lignes.append(f"bypass : {v} s")
         if "vanne_pdc" in self.resultats:
-            v = round(self.resultats["vanne_pdc"]["max_s"] * 1.05, 1)
+            v = round(self.resultats["vanne_pdc"]["max_s"] * self.MARGES_COURSE["vanne_pdc"], 1)
             act["vanne_perte_charge_course_s"] = v
             self.pilote.t_vanne_pdc_course = v
             lignes.append(f"vanne perte de charge : {v} s")

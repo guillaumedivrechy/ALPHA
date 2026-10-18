@@ -107,10 +107,16 @@ L'onglet **Séquence** suit automatiquement un profil chargé depuis un CSV
   échéances du profil (référence Conduite/Veine du panneau Pilotage) ;
 - le temps de la dernière ligne marque la **fin de la séquence** : sa
   consigne est ensuite maintenue jusqu'à l'arrêt par l'opérateur — mettre
-  `Re = 0` en dernière ligne pour arrêter la soufflerie en fin d'essai.
+  `Re = 0` en dernière ligne pour arrêter la soufflerie en fin d'essai ;
+- si la première ligne n'est pas à t = 0, sa consigne s'applique dès le
+  démarrage : le profil chargé (et tracé) commence alors par un point à
+  t = 0 de même valeur.
 
-« ARRÊT VARIATEUR », le passage en manuel ou l'application d'une consigne
-fixe interrompent la séquence.
+« ■ Arrêter » de l'onglet Séquence **fige la consigne** de l'étape en
+cours : le profil ne défile plus, la régulation continue (retour en mode
+Asservi). « ARRÊT VARIATEUR » ou le passage en manuel coupent le
+ventilateur ; l'application d'une consigne fixe interrompt aussi la
+séquence.
 
 ## Configuration (`config.json`)
 
@@ -161,7 +167,12 @@ corrigent si la plomberie est croisée).
 - Tout défaut (communication Modbus, PT100, pression, ΔP, variateur,
   vanne, erreur interne de la boucle) → repli sûr **latché** : variateur
   0 V, ordre RUN retiré, régulation, séquence **et mode manuel** coupés.
-  Rien ne redémarre seul quand le défaut disparaît.
+  Rien ne redémarre seul quand le défaut disparaît. Un bandeau rouge
+  affiche l'heure et la cause de l'arrêt jusqu'à ce que l'opérateur clique
+  « Acquitter » ; aucune relance (consigne, séquence, apprentissage, RUN
+  de mise en service) n'est acceptée avant.
+- Entrées « défaut actionneur » (bypass, PdC, 3 voies) : alerte seulement
+  (bandeau orange tant qu'elles durent, et journal), sans repli.
 - Chien de garde par vanne (1,5 × temps de course de `actionneurs`), et
   délai global d'attente des vannes dérivé des mêmes temps de course.
 - Vanne 3 voies sans butée franche hors manœuvre (fil coupé, 180°) →

@@ -174,3 +174,14 @@ def test_seule_la_premiere_ligne_peut_etre_un_en_tete(tmp_path):
     f.write_text("temps;Re\n0;3O00\n10;4000\n", encoding="utf-8")
     with pytest.raises(ValueError, match="ligne 2"):
         charger_sequence_csv(f)
+
+
+def test_arreter_la_sequence_fige_la_consigne(pilote):
+    """« ■ Arrêter » de l'onglet Séquence : le profil ne défile plus, mais
+    la consigne courante reste régulée (ventilateur non coupé)."""
+    pilote.demarrer_sequence([(0.0, 3000.0), (60.0, 6000.0)], "conduite")
+    assert pilote.figer_sequence() == 3000.0
+    assert pilote.regulation_active
+    assert pilote.re_cible == 3000.0
+    assert pilote.etat["sequence"] is None
+    assert pilote.figer_sequence() is None          # plus de séquence

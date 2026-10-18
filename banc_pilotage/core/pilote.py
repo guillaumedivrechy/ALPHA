@@ -735,6 +735,18 @@ class Pilote:
             self.journal.ouvrir(time.monotonic())
         return None
 
+    def figer_sequence(self) -> float | None:
+        """Arrête le défilement du profil SANS couper le ventilateur : la
+        consigne de l'étape en cours reste régulée (consigne fixe). Retourne
+        cette consigne, ou None s'il n'y avait pas de séquence."""
+        with self._verrou:
+            if self._sequence is None:
+                return None
+            self._sequence = None
+            re_fige = self.re_cible
+        self.etat["sequence"] = None
+        return re_fige
+
     def _latcher_arret(self) -> None:
         """Coupe régulation, mode manuel et séquence, et compte l'arrêt.
 
@@ -761,9 +773,19 @@ class Pilote:
         self.etat.update({"regulation": False, "manuel": False,
                           "u_variateur": 0.0, "convergee": False,
                           "sequence": None})
+        # heure du PREMIER repli, gardée jusqu'à l'acquittement explicite par
+        # l'opérateur (acquitter_arret_securite) : l'IHM l'affiche en bandeau
+        if not self.etat.get("arret_securite"):
+            self.etat["arret_securite"] = time.strftime("%H:%M:%S")
         self.es.ecrire_variateur(0.0)
         self.es.ecrire_variateur_run(False)
         self._run_actif = False
+
+    def acquitter_arret_securite(self) -> None:
+        """Acquittement volontaire d'un arrêt de sécurité par l'opérateur :
+        efface le bandeau et les défauts latchés."""
+        self._acquitter_defauts()
+        self.etat["arret_securite"] = None
 
     def arreter_regulation(self) -> None:
         """Arrêt du variateur : coupe la régulation, le mode manuel ET la
@@ -1358,6 +1380,13 @@ class Pilote:
         self.etat["mesures_brutes"] = dict(mesures)
         self.etat["image_process"] = getattr(self.es, "image_process", None)
         self.etat["cycles"] = self.etat.get("cycles", 0) + 1
+        # position LUE de la vanne 3 voies, pour l'affichage, à chaque cycle
+        # (etat["diaphragme"] est le diaphragme retenu pour le calcul, qui
+        # vaut la position commandée hors régulation, avant la butée)
+        self.etat["diaphragme_lu"] = _MAP_DIAPHRAGME.get(
+            lire_etat_vannes(mesures, self._diaphragme_par_angle).diaphragme, "?")
+        self.etat["diaphragme_commande"] = self._diaphragme_par_angle.get(
+            self._diaphragme_commande)
 
         # ---- vraisemblance de la PT100 -------------------------------------
         # Hors bornes = sonde coupée ou module saturé. rho et mu en dépendent,
@@ -1472,6 +1501,9 @@ class Pilote:
             regul = self.regulation_active
             manuel = self.mode_manuel
             u_manu = self.tension_manuelle
+        # publiée dès maintenant : les cycles de manœuvre sortent avant la
+        # publication complète, et l'IHM affichait l'ancienne référence
+        self.etat["reference"] = reference
 
         diaph = self.etat["diaphragme"]
 

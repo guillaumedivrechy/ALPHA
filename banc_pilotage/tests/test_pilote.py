@@ -53,6 +53,41 @@ def pilote_stub():
     return Pilote(Banc(CFG), es, CFG), es
 
 
+def test_arret_de_securite_reste_affiche_jusqua_lacquittement(pilote_stub):
+    """Un repli sûr laisse une trace (heure du premier repli) que ni un
+    second repli ni un redémarrage n'effacent : seul l'acquittement
+    explicite de l'opérateur la retire, avec les défauts latchés."""
+    pilote, es = pilote_stub
+    pilote.etat["defaut_variateur"] = "contact MB ouvert"
+    pilote._repli_sur()
+    heure = pilote.etat["arret_securite"]
+    assert heure and es.variateur[-1] == 0.0
+    pilote._repli_sur()
+    assert pilote.etat["arret_securite"] == heure      # premier repli gardé
+    pilote.acquitter_arret_securite()
+    assert pilote.etat["arret_securite"] is None
+    assert pilote.etat["defaut_variateur"] is None
+
+
+def test_position_lue_de_la_vanne_3_voies_publiee_hors_regulation():
+    """L'IHM affiche la position LUE : ordre Miller donné, vanne encore en
+    butée 0° -> la position lue reste ISO tant que la butée 90° n'est pas
+    atteinte, même régulation arrêtée."""
+    es = StubES({"temperature": 20.0, "fc_3voies_0": True})
+    pilote = Pilote(Banc(CFG), es, CFG)
+    pilote._cycle()
+    pilote.commander_diaphragme("miller")
+    pilote._cycle()
+    assert pilote.etat["diaphragme_lu"] == "iso"
+    assert pilote.etat["diaphragme_commande"] == "miller"
+    es.mesures = {"temperature": 20.0}            # en course
+    pilote._cycle()
+    assert pilote.etat["diaphragme_lu"] == "en_transit"
+    es.mesures = {"temperature": 20.0, "fc_3voies_90": True}
+    pilote._cycle()
+    assert pilote.etat["diaphragme_lu"] == "miller"
+
+
 def test_arret_coupe_aussi_le_mode_manuel(pilote_stub):
     """Bouton ARRÊT VARIATEUR : la tension manuelle ne doit pas être
     réappliquée au cycle suivant."""

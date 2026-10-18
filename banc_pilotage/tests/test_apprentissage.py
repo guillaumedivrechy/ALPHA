@@ -241,3 +241,28 @@ def test_re_mapping_combine_est_sauvegarde(tmp_path):
     miller = json.loads((tmp_path / "apprentissages" / "miller.json").read_text("utf-8"))
     assert iso["tables"]["table_gains"]
     assert miller["tables"]["table_gains_bas_re"]
+
+
+def test_appliquer_ne_reapplique_pas_les_resultats_deja_appliques(tmp_path):
+    """« Appliquer » après un 2e test n'applique que ce 2e résultat : le
+    mapping ISO/Miller intervertit une fois, pas une seconde (ce qui le
+    remettait en place en silence)."""
+    app, pilote = _app(tmp_path)
+    app.resultats["verif_cablage"] = {"mapping_inverse": True,
+                                      "resume": "mapping inversé"}
+    app.appliquer()
+    mapping = dict(pilote._diaphragme_par_angle)
+    app.resultats["vanne_bypass"] = {"ouverture_s": 9.0, "fermeture_s": 10.0,
+                                     "max_s": 10.0}
+    assert app.resultats_a_appliquer() == ["vanne_bypass"]
+    assert [t for t, _ in app.apercu_application()] == ["Vanne bypass"]
+    assert "11.0 s" in app.apercu_application()[0][1]
+    app.appliquer()
+    assert pilote._diaphragme_par_angle == mapping
+    assert pilote.t_vanne_bypass == 11.0
+    assert app.resultats_a_appliquer() == []
+    assert "Aucun nouveau" in app.appliquer()
+    # test relancé : nouveau résultat, de nouveau à appliquer
+    app.resultats["vanne_bypass"] = {"ouverture_s": 9.0, "fermeture_s": 9.5,
+                                     "max_s": 9.5}
+    assert app.resultats_a_appliquer() == ["vanne_bypass"]

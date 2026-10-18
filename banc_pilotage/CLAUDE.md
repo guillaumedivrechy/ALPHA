@@ -66,9 +66,11 @@ tests/                 pytest — sans matériel ni Qt
    un arrêt.
 3. **Sécurité** : toute nouvelle branche de la boucle doit préserver les
    replis sûrs : tout défaut passe par `Pilote._repli_sur()` (variateur
-   0 V, RUN off, régulation ET manuel ET séquence coupés, latché), chien de
-   garde par vanne. `arreter_regulation()` doit rester un arrêt TOTAL
-   (régulation ET manuel ; il interrompt aussi les apprentissages).
+   0 V, RUN off, régulation ET manuel ET séquence coupés, latché ; pose
+   `etat["arret_securite"]`, que seul `acquitter_arret_securite()` lève —
+   l'IHM refuse toute relance avant), chien de garde par vanne.
+   `arreter_regulation()` doit rester un arrêt TOTAL (régulation ET
+   manuel ; il interrompt aussi les apprentissages).
 4. **Config, pas de constantes en dur** : adresses Modbus, géométries,
    gains, temps de course → `config.json`.
 5. **Moteur de calcul verrouillé par les tests** : `python -m pytest tests/`

@@ -468,6 +468,16 @@ class Application(QMainWindow):
         ("alerte_table_ff",   "⚠ Table de gains à refaire"),
         ("alerte_pdc",        "⚠ Consigne hors de portée du mode PdC"),
     ]
+    # entrées TOR « défaut actionneur » : alerte seulement, sans repli (lues
+    # dans mesures_brutes, pas sur pilote.etat)
+    ALERTES_ENTREES = [
+        ("defaut_act_bypass", "⚠ Défaut actionneur — bypass"),
+        ("defaut_act_pdc",    "⚠ Défaut actionneur — perte de charge"),
+        ("defaut_act_3voies", "⚠ Défaut actionneur — 3 voies"),
+    ]
+    # défauts qui provoquent un arrêt de sécurité : motif du bandeau
+    MOTIFS_ARRET = ("erreur_com", "defaut_capteur", "defaut_vanne",
+                    "defaut_variateur", "defaut_pdc", "incoherence_vanne")
 
     def __init__(self, pilote: Pilote, mode: str, cfg: dict, chemin_cfg: Path):
         super().__init__()
@@ -520,6 +530,7 @@ class Application(QMainWindow):
         root.setSpacing(0)
 
         root.addWidget(self._build_header(mode))
+        root.addWidget(self._build_bandeau_securite())
 
         body = QWidget()
         bhl = QHBoxLayout(body)
@@ -544,8 +555,9 @@ class Application(QMainWindow):
         self._update_mode_seg()
         self._update_controls_enabled()
 
-        # Initialiser l'échelle du slider Re selon la référence par défaut
-        self._set_ref_re(self._ref_re)
+        # Initialiser l'échelle du slider Re selon la référence par défaut,
+        # sans marquer la consigne « à appliquer » : l'opérateur n'a rien saisi
+        self._set_ref_re(self._ref_re, marquer=False)
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
@@ -553,6 +565,81 @@ class Application(QMainWindow):
 
         # Initialisation des vannes au démarrage (position de repos)
         self._initialiser_vannes_demarrage()
+
+    # ══════════════════════════════════════════════════ ARRÊT DE SÉCURITÉ
+
+    def _build_bandeau_securite(self) -> QWidget:
+        """Bandeau rouge persistant après un repli de sécurité : la cause
+        reste affichée jusqu'à l'acquittement explicite de l'opérateur, et
+        aucune relance n'est acceptée avant. Les défauts actionneur (alerte
+        seulement) s'affichent sur une ligne orange en dessous."""
+        cadre = QWidget()
+        vl = QVBoxLayout(cadre)
+        vl.setContentsMargins(0, 0, 0, 0)
+        vl.setSpacing(0)
+        self._bandeau_arret = QWidget()
+        self._bandeau_arret.setStyleSheet(f"background:{COLORS['error']};")
+        hl = QHBoxLayout(self._bandeau_arret)
+        hl.setContentsMargins(16, 8, 16, 8)
+        self._lbl_arret = QLabel()
+        self._lbl_arret.setWordWrap(True)
+        self._lbl_arret.setStyleSheet(
+            "color:#FFFFFF; font-weight:700; background:transparent;")
+        hl.addWidget(self._lbl_arret, 1)
+        btn = QPushButton("Acquitter")
+        btn.setStyleSheet(
+            "QPushButton { background:#FFFFFF; color:#DC3535; border:none;"
+            " border-radius:4px; font-weight:700; padding:4px 14px; }")
+        btn.clicked.connect(self._acquitter_arret)
+        hl.addWidget(btn)
+        self._bandeau_arret.setVisible(False)
+        vl.addWidget(self._bandeau_arret)
+        self._lbl_defauts_act = QLabel()
+        self._lbl_defauts_act.setStyleSheet(
+            f"background:{COLORS['warn']}; color:#FFFFFF; font-weight:700;"
+            " padding:4px 16px;")
+        self._lbl_defauts_act.setVisible(False)
+        vl.addWidget(self._lbl_defauts_act)
+        self._motifs_arret: list[str] = []
+        return cadre
+
+    def _tick_securite(self, e: dict) -> None:
+        heure = e.get("arret_securite")
+        if not heure:
+            self._motifs_arret = []
+            self._bandeau_arret.setVisible(False)
+            return
+        # motifs cumulés tant que l'arrêt n'est pas acquitté : un défaut de
+        # communication peut disparaître de lui-même, sa trace doit rester
+        for cle in self.MOTIFS_ARRET:
+            val = e.get(cle)
+            if val:
+                txt = val if isinstance(val, str) else cle.replace("_", " ")
+                if txt not in self._motifs_arret:
+                    self._motifs_arret.append(txt)
+        motif = " ; ".join(self._motifs_arret) or "cause non publiée"
+        self._lbl_arret.setText(
+            f"⛔ ARRÊT DE SÉCURITÉ à {heure} — ventilateur coupé. {motif}")
+        self._bandeau_arret.setVisible(True)
+
+    def _acquitter_arret(self) -> None:
+        self._log(f"Arrêt de sécurité acquitté ({' ; '.join(self._motifs_arret)})",
+                  COLORS["warn"])
+        self.pilote.acquitter_arret_securite()
+        self._motifs_arret = []
+        self._bandeau_arret.setVisible(False)
+
+    def _bloque_par_arret_securite(self) -> bool:
+        """Refuse toute relance tant que l'arrêt de sécurité n'est pas
+        acquitté (bandeau rouge)."""
+        if not self.pilote.etat.get("arret_securite"):
+            return False
+        QMessageBox.warning(
+            self, "Arrêt de sécurité",
+            "Un arrêt de sécurité n'a pas été acquitté.\n\n"
+            "Lisez sa cause dans le bandeau rouge, corrigez-la, puis cliquez "
+            "« Acquitter » avant de relancer.")
+        return True
 
     def _pdc_v_vers_pct(self, volts: float | None) -> int:
         """Convertit tension PDC [Umin, Umax] en pourcentage de FERMETURE [0%, 100%].
@@ -605,23 +692,24 @@ class Application(QMainWindow):
     def _lancer_initialisation_vannes(self) -> None:
         """Lance effectivement l'initialisation des vannes (appelé par timer)."""
         # Créer le dialog d'attente
+        # butée de la position Miller lue dans la config (positions_vanne_3voies)
+        angle_miller = self.pilote._angle_par_diaphragme.get("miller", "90")
         self._dialog_init = QProgressDialog(
             "Initialisation des vannes en cours...\n\n"
-            "• Vanne 3 voies → Miller (90°)\n"
+            f"• Vanne 3 voies → Miller ({angle_miller}°)\n"
             "• Bypass → Ouvert\n"
             "• Perte de charge → Ouverte",
-            None,  # Pas de bouton Cancel
+            "Ne plus attendre",  # ferme la fenêtre, les vannes finissent leur course
             0, 0,  # Range 0-0 = mode indéterminé (busy indicator)
             self
         )
         self._dialog_init.setWindowTitle("Initialisation du banc")
         self._dialog_init.setWindowModality(Qt.WindowModality.ApplicationModal)
         self._dialog_init.setMinimumDuration(0)  # Afficher immédiatement
-        self._dialog_init.setCancelButton(None)  # Pas de bouton annuler
         self._dialog_init.setAutoClose(False)
         self._dialog_init.setAutoReset(False)
-        # Arrêter le timer si l'utilisateur ferme manuellement le dialog
-        self._dialog_init.rejected.connect(self._annuler_init_vannes)
+        # « Ne plus attendre » ou fermeture : arrêt du suivi, pas des vannes
+        self._dialog_init.canceled.connect(self._annuler_init_vannes)
         self._dialog_init.show()
 
         # Vérifier que le pilote est bien démarré
@@ -660,15 +748,14 @@ class Application(QMainWindow):
         """Vérifie si les vannes sont en place et ferme le dialog."""
         self._temps_ecoule_init += 0.2  # Timer tick tous les 200ms
 
-        # Lire l'état des vannes
+        # Positions LUES : les fins de course sont dans mesures_brutes, et la
+        # position de la vanne 3 voies est décodée par la boucle selon
+        # positions_vanne_3voies (la butée Miller n'est pas toujours 90°)
         etat = self.pilote.etat
-
-        # Vérifier si toutes les vannes sont en position
-        miller_ok = etat.get("fc_3voies_90", False)
-        bypass_ok = etat.get("fc_bypass_ouvert", False)
-        # PDC doit être ouverte (fermeture <= 10%, soit >= 90% de la plage vers Umax)
-        pdc_90pct_v = self._pdc_umin + 0.9 * (self._pdc_umax - self._pdc_umin)
-        pdc_ok = etat.get("pdc_position", 0.0) >= pdc_90pct_v
+        brutes = etat.get("mesures_brutes") or {}
+        miller_ok = etat.get("diaphragme_lu") == "miller"
+        bypass_ok = bool(brutes.get("fc_bypass_ouvert"))
+        pdc_ok = bool(brutes.get("fc_pdc_ouvert"))
 
         # Mettre à jour le message
         status = []
@@ -693,7 +780,8 @@ class Application(QMainWindow):
         """Arrête le timer d'initialisation si le dialog est fermé manuellement."""
         if hasattr(self, '_timer_verif_init') and self._timer_verif_init.isActive():
             self._timer_verif_init.stop()
-            self._log("Initialisation vannes annulée", COLORS["warn"])
+            self._log("Initialisation vannes : suivi interrompu, les vannes "
+                      "terminent leur course", COLORS["warn"])
 
     # ══════════════════════════════════════════════════════════════ HEADER
 
@@ -758,7 +846,9 @@ class Application(QMainWindow):
             f"color:{COLORS['ok']}; font-size:10px; background:transparent;")
         hl.addWidget(self._lbl_cnx_dot)
         hl.addSpacing(6)
-        lbl_cnx = QLabel("Wago 750-362")
+        # même source que le voyant du pied de page (erreur_com, cf. _tick_footer)
+        self._lbl_cnx = lbl_cnx = QLabel(
+            "Simulateur" if mode.lower() == "simulation" else "Wago 750-362")
         lbl_cnx.setStyleSheet(
             "color:#9DB2C4; font-size:11px; "
             "font-family:'IBM Plex Mono',monospace; background:transparent;")
@@ -1067,7 +1157,7 @@ class Application(QMainWindow):
         rch.setStyleSheet("background:transparent;")
         rchl = QHBoxLayout(rch)
         rchl.setContentsMargins(0, 0, 0, 0)
-        lbl_re_hdr = QLabel("REYNOLDS Re — MESURÉ")
+        self._lbl_re_hdr = lbl_re_hdr = QLabel("REYNOLDS Re — MESURÉ")
         lbl_re_hdr.setObjectName("re-hdr")
         rchl.addWidget(lbl_re_hdr)
         rchl.addStretch()
@@ -1323,6 +1413,7 @@ class Application(QMainWindow):
         rhl.addWidget(inp)
         u = QLabel(unit_lbl)
         u.setObjectName("ctrl-unit")
+        setattr(self, f"_unit_{dirty_key}", u)
         rhl.addWidget(u)
         bvl.addWidget(row1)
 
@@ -1743,6 +1834,12 @@ class Application(QMainWindow):
         self._mes_lbl_reg_status.setStyleSheet(
             f"font-size:11px; color:{COLORS['muted2']}; background:transparent;")
         cl.addWidget(self._mes_lbl_reg_status)
+        # motif technique d'indisponibilité de la stratégie bas-Re
+        self._mes_lbl_bas_re = QLabel("")
+        self._mes_lbl_bas_re.setWordWrap(True)
+        self._mes_lbl_bas_re.setStyleSheet(
+            f"font-size:11px; color:{COLORS['warn']}; background:transparent;")
+        cl.addWidget(self._mes_lbl_bas_re)
 
         vl.addWidget(c)
 
@@ -1775,6 +1872,8 @@ class Application(QMainWindow):
                   COLORS["accentText"])
 
     def _mes_run(self) -> None:
+        if self._bloque_par_arret_securite():
+            return
         if QMessageBox.question(
                 self, "Demarrer le ventilateur",
                 "La soufflerie va tourner.\n\nVerifier que n004 = 2 et "
@@ -1804,26 +1903,7 @@ class Application(QMainWindow):
     def _mes_reg_charger(self) -> None:
         """Recharge les paramètres de régulation depuis config.json."""
         try:
-            # configuration en mémoire, celle du fichier passé par --config
-            cfg = self.cfg
-            reg = cfg.get("regulation", {})
-            sr = cfg.get("strategie_bas_re", {})
-
-            # Charger les valeurs dans les widgets
-            self._mes_reg_widgets["kp"].setValue(reg.get("kp", 0.5))
-            self._mes_reg_widgets["ki"].setValue(reg.get("ki", 0.15))
-            self._mes_reg_widgets["rampe_v_par_s"].setValue(reg.get("rampe_v_par_s", 2.0))
-            self._mes_reg_widgets["tau_consigne_s"].setValue(reg.get("tau_consigne_s", 0.0))
-            self._mes_reg_widgets["tolerance_convergence_relative"].setValue(reg.get("tolerance_convergence_relative", 0.01))
-            self._mes_reg_widgets["fenetre_convergence_s"].setValue(reg.get("fenetre_convergence_s", 2.0))
-            # Note : gain_scheduling n'est plus dans l'IHM (widget retiré)
-            # self._mes_reg_gain_scheduling.setChecked(reg.get("gain_scheduling", False))
-
-            self._mes_reg_widgets["seuil_re"].setValue(sr.get("seuil_re", 0))
-            self._mes_reg_widgets["gain_scale"].setValue(sr.get("gain_scale", 0.2))
-            self._mes_reg_widgets["marge_ventilateur_pdc"].setValue(
-                sr.get("marge_ventilateur_pdc", 1.15))
-
+            self._remplir_widgets_regulation()
             self._mes_lbl_reg_status.setText(f"✓ Paramètres rechargés depuis config.json")
             self._mes_lbl_reg_status.setStyleSheet(f"font-size:11px; color:{COLORS['ok']}; background:transparent;")
             self._log("Maintenance : paramètres de régulation rechargés", COLORS["accentText"])
@@ -1831,6 +1911,28 @@ class Application(QMainWindow):
             self._mes_lbl_reg_status.setText(f"✗ Erreur : {str(e)}")
             self._mes_lbl_reg_status.setStyleSheet(f"font-size:11px; color:{COLORS['error']}; background:transparent;")
             self._log(f"Erreur rechargement paramètres : {e}", COLORS["error"])
+
+    def _remplir_widgets_regulation(self) -> None:
+        """Réglages de régulation de l'onglet Maintenance <- configuration
+        en mémoire (celle du fichier passé par --config)."""
+        cfg = self.cfg
+        reg = cfg.get("regulation", {})
+        sr = cfg.get("strategie_bas_re", {})
+
+        # Charger les valeurs dans les widgets
+        self._mes_reg_widgets["kp"].setValue(reg.get("kp", 0.5))
+        self._mes_reg_widgets["ki"].setValue(reg.get("ki", 0.15))
+        self._mes_reg_widgets["rampe_v_par_s"].setValue(reg.get("rampe_v_par_s", 2.0))
+        self._mes_reg_widgets["tau_consigne_s"].setValue(reg.get("tau_consigne_s", 0.0))
+        self._mes_reg_widgets["tolerance_convergence_relative"].setValue(reg.get("tolerance_convergence_relative", 0.01))
+        self._mes_reg_widgets["fenetre_convergence_s"].setValue(reg.get("fenetre_convergence_s", 2.0))
+        # Note : gain_scheduling n'est plus dans l'IHM (widget retiré)
+        # self._mes_reg_gain_scheduling.setChecked(reg.get("gain_scheduling", False))
+
+        self._mes_reg_widgets["seuil_re"].setValue(sr.get("seuil_re", 0))
+        self._mes_reg_widgets["gain_scale"].setValue(sr.get("gain_scale", 0.2))
+        self._mes_reg_widgets["marge_ventilateur_pdc"].setValue(
+            sr.get("marge_ventilateur_pdc", 1.15))
 
     def _mes_reg_appliquer(self) -> None:
         """Applique les paramètres de régulation et les sauvegarde dans config.json."""
@@ -1868,6 +1970,7 @@ class Application(QMainWindow):
 
             # Appliquer immédiatement au pilote (gains, rampe, tau, bas-Re)
             self.pilote.appliquer_config(self.cfg)
+            self._synchroniser_affichage_config()
 
             self._mes_lbl_reg_status.setText(
                 f"✓ Paramètres appliqués et sauvegardés | "
@@ -1893,6 +1996,9 @@ class Application(QMainWindow):
         mb = self.cfg.get("modbus", {})
 
         # verrou : pas d'actionnement pendant une regulation ou une sequence
+        motif_bas_re = e.get("bas_re_motif")
+        self._mes_lbl_bas_re.setText(
+            f"Stratégie bas-Re indisponible : {motif_bas_re}" if motif_bas_re else "")
         occupe = bool(e.get("regulation")) or self.apprentissage.etat["en_cours"]
         for w in self._mes_actionneurs:
             w.setEnabled(not occupe and (w is not self._mes_slider
@@ -2012,8 +2118,8 @@ class Application(QMainWindow):
         fc1_bypass = brutes.get("fc_bypass_ouvert")
         fc2_bypass = brutes.get("fc_bypass_ferme")
         bits_bypass = []
-        bits_bypass.append(f"FC1 (DI1) : {'fermé' if fc1_bypass else 'ouvert'}")
-        bits_bypass.append(f"FC2 (DI2) : {'fermé' if fc2_bypass else 'ouvert'}")
+        bits_bypass.append(f"FC1 ouverture (DI1) : {'atteinte' if fc1_bypass else 'non atteinte'}")
+        bits_bypass.append(f"FC2 fermeture (DI2) : {'atteinte' if fc2_bypass else 'non atteinte'}")
         # Détection d'anomalie : les deux fins de course actives simultanément
         if fc1_bypass and fc2_bypass:
             bits_bypass.append("ANOMALIE : les deux FC actives")
@@ -2032,8 +2138,8 @@ class Application(QMainWindow):
         # Affichage systématique des fins de course avec leurs identifiants
         fc1_ouvert = brutes.get("fc_pdc_ouvert")
         fc2_ferme = brutes.get("fc_pdc_ferme")
-        bits.append(f"FC1 (DI3) : {'fermé' if fc1_ouvert else 'ouvert'}")
-        bits.append(f"FC2 (DI4) : {'fermé' if fc2_ferme else 'ouvert'}")
+        bits.append(f"FC1 ouverture (DI3) : {'atteinte' if fc1_ouvert else 'non atteinte'}")
+        bits.append(f"FC2 fermeture (DI4) : {'atteinte' if fc2_ferme else 'non atteinte'}")
         # le diagnostic de divergence est deja fait par la boucle
         # (modele de course + hysteresis) : ne pas re-inventer un seuil ici,
         # la vanne met 25 s a parcourir sa course et tout ecart instantane
@@ -2358,6 +2464,12 @@ class Application(QMainWindow):
             QMessageBox.critical(self, "Séquence",
                                  f"Fichier invalide :\n{exc}")
             return
+        if points[0][0] > 0:
+            # la 1re consigne s'applique dès le démarrage : le profil exécuté
+            # (et donc tracé) commence à t = 0 avec cette valeur
+            points = [(0.0, points[0][1])] + points
+            self._log(f"Séquence : 1re consigne ({points[0][1]:.0f}) appliquée "
+                      "dès t = 0 s", COLORS["warn"])
         self._seq_points = points
         # tracé en échelons : chaque consigne tient jusqu'à l'échéance suivante
         xs, ys = [], []
@@ -2372,12 +2484,16 @@ class Application(QMainWindow):
         self._lbl_seq_fichier.setText(
             f"{Path(chemin).name} — {len(points)} étapes, "
             f"{points[-1][0]:.0f} s")
-        self._lbl_seq_statut.setText("profil chargé — prêt à démarrer")
+        self._lbl_seq_statut.setText(
+            f"profil chargé — consignes lues en Re {self._ref_re} — "
+            "prêt à démarrer")
         self._btn_seq_start.setEnabled(True)
         self._log(f"Séquence chargée ({len(points)} étapes)", COLORS["accent"])
 
     def _demarrer_sequence(self) -> None:
         if not self._seq_points:
+            return
+        if self._bloque_par_arret_securite():
             return
         if self.apprentissage.etat["en_cours"]:
             QMessageBox.warning(self, "Séquence",
@@ -2392,10 +2508,25 @@ class Application(QMainWindow):
                   f"{self._seq_points[-1][0]:.0f} s)", COLORS["accent"])
 
     def _arreter_sequence(self) -> None:
-        self.pilote.arreter_regulation()
+        """Fige la consigne de l'étape en cours (le ventilateur continue) :
+        l'arrêt total reste le bouton ARRÊT VARIATEUR."""
+        self.pilote.figer_sequence()
+        regule = self.pilote.regulation_active
+        if regule:
+            # retour en asservi, la consigne figée affichée comme appliquée
+            self._set_ref_re(self.pilote.reference, marquer=False)
+            self.inp_re.setText(f"{self.pilote.re_cible:.0f}")
+            self._dirty["re"] = False
+            self._set_mode("asservi")
+            self._update_dirty()
         self._line_seq_t.setVisible(False)
-        self._lbl_seq_statut.setText("séquence arrêtée")
-        self._log("Séquence arrêtée", COLORS["warn"])
+        if regule:
+            txt = (f"séquence arrêtée — consigne Re {self.pilote.re_cible:.0f} "
+                   f"({self.pilote.reference}) maintenue")
+        else:
+            txt = "séquence arrêtée"
+        self._lbl_seq_statut.setText(txt)
+        self._log(txt[0].upper() + txt[1:], COLORS["warn"])
 
     def _build_apprentissage(self) -> QWidget:
         page = QWidget()
@@ -2436,7 +2567,7 @@ class Application(QMainWindow):
                 "que quelques pascals."),
             "calibration_pdc": ("Calibration recopie PdC",
                 "Envoie 0 V puis 10 V à la vanne PdC et mesure la tension brute "
-                "à chaque butée (5 s de stabilisation). Prérequis pour les tests "
+                "à chaque butée (2 s de mesure). Prérequis pour les tests "
                 "de temps de course."),
             "vanne_3voies": ("Vanne 3 voies",
                 "Chronomètre les deux courses utiles de la carte GF3 : "
@@ -2445,12 +2576,14 @@ class Application(QMainWindow):
                 "— le constructeur ne la définit pas pour un boisseau en L. "
                 "Sauvegarde le temps max + 10 % comme chien de garde."),
             "vanne_bypass": ("Vanne bypass",
-                "Démarre en fermeture complète (FC1). "
-                "T1 : FC1→ouverture (FC2), T2 : FC2→FC1. "
+                "Démarre en fermeture complète (FC2, fermeture). "
+                "T1 : fermeture → ouverture (FC1), T2 : ouverture → fermeture (FC2). "
                 "Sauvegarde le temps max + 10 %."),
             "vanne_pdc": ("Vanne perte de charge",
-                "Démarre en fermeture complète (fc_pdc_ferme). "
-                "T1 : fermeture → ouverture (fc_pdc_ouvert), T2 : ouverture → fermeture. "
+                "Détecte la position de départ (ouverte, fermée ou intermédiaire), "
+                "puis chronomètre une ouverture complète (jusqu'à FC1) et une "
+                "fermeture complète (jusqu'à FC2), dans l'ordre imposé par "
+                "cette position. "
                 "Sauvegarde le temps max + 5 %."),
         }
 
@@ -2473,8 +2606,8 @@ class Application(QMainWindow):
                                  for v, o in r.items())),
             None,
             ("▶  2. Calibration recopie vanne perte de charge", "calibration_pdc",
-             lambda r: (f"0% = {r['v_min_recopie']} V  "
-                        f"100% = {r['v_max_recopie']} V")),
+             lambda r: (f"fermée = {r['v_min_recopie']} V  "
+                        f"ouverte = {r['v_max_recopie']} V")),
             None,
             ("▶  3. Vanne 3 voies", "vanne_3voies",
              lambda r: (f"T1={r['T1_0_vers_90_s']} s  "
@@ -2580,9 +2713,12 @@ class Application(QMainWindow):
         cisol.setSpacing(8)
         lbl_iso = QLabel(
             "<b>8. Re mapping ISO (plage haute)</b><br>"
-            "Caractérisation plage haute 5000-15000 Re (ISO, bypass fermé). "
-            "Nécessite que re_mapping_miller ait été lancé au préalable.<br>"
-            "<i>Paliers 12s, montée depuis u_seuil jusqu'à 10V.</i>")
+            "Caractérisation plage haute (ISO, bypass fermé, PdC ouverte), "
+            "avec chevauchement de la plage Miller vers Re ≈ 3000-5000. "
+            "Utilise le gain déjà appris, s'il existe, pour choisir sa "
+            "tension de départ.<br>"
+            "<i>Paliers de 12 s : descente vers Re ≈ 3000, puis montée "
+            "jusqu'à 10 V ou saturation du capteur ΔP.</i>")
         lbl_iso.setWordWrap(True)
         lbl_iso.setObjectName("muted")
         cisol.addWidget(lbl_iso)
@@ -3170,27 +3306,44 @@ class Application(QMainWindow):
         self._lbl_mode_badge.setText(f"mode {self._mode}")
 
     def _appliquer(self) -> None:
+        if self._bloque_par_arret_securite():
+            return
+        if self._mode == "sequence":
+            QMessageBox.information(
+                self, "Mode séquence",
+                "La consigne suit le profil chargé.\n\nPour imposer une "
+                "consigne fixe, arrêtez la séquence (onglet Séquence) ou "
+                "passez en mode Asservi.")
+            return
         if self._mode == "asservi":
+            texte = self.inp_re.text().strip()
             try:
-                re_val = float(
-                    getattr(self, "inp_re").text().replace(",", "."))
-                if re_val > 0:
-                    self.pilote.definir_consigne(re_val, self._ref_re)
-                    self.pilote.demarrer_regulation()
-                    self._log(f"Consigne Re → {re_val:.0f} ({self._ref_re})",
-                              COLORS["accent"])
-                    self._dirty["re"] = False
+                re_val = float(texte.replace(",", ".").replace(" ", ""))
             except ValueError:
-                pass
+                re_val = None
+            if re_val is None or re_val <= 0:
+                self._signaler_saisie(self.inp_re,
+                                      f"Consigne Re « {texte} » refusée : "
+                                      "nombre strictement positif attendu")
+            else:
+                self.pilote.definir_consigne(re_val, self._ref_re)
+                self.pilote.demarrer_regulation()
+                self._log(f"Consigne Re → {re_val:.0f} ({self._ref_re})",
+                          COLORS["accent"])
+                self._dirty["re"] = False
         elif self._mode == "manuel":
+            texte = self._inp_vman.text().strip()
             try:
-                v = float(self._inp_vman.text().replace(",", "."))
+                v = float(texte.replace(",", "."))
+            except ValueError:
+                self._signaler_saisie(self._inp_vman,
+                                      f"Tension « {texte} » refusée : "
+                                      "nombre entre 0 et 10 V attendu")
+            else:
                 v = min(max(v, 0.0), 10.0)
                 self.pilote.commander_variateur_manuel(v)
                 self._log(f"Variateur → {v:.1f} V", COLORS["accent"])
                 self._dirty["vman"] = False
-            except ValueError:
-                pass
 
         # PdC : en manuel seulement. En asservi, la boucle la pilote (et la
         # pré-positionne avant les manœuvres) : la commander ici court-
@@ -3205,9 +3358,26 @@ class Application(QMainWindow):
                 self._log(f"PdC → {pct_ferm:.0f} % fermeture", "#FF9900")
                 self._dirty["pdc"] = False
             except ValueError:
-                pass
+                self._signaler_saisie(self._inp_pdc,
+                                      f"PdC « {self._inp_pdc.text()} » refusée : "
+                                      "% de fermeture entre 0 et 100 attendu")
 
         self._update_dirty()
+
+    def _signaler_saisie(self, champ: QLineEdit, message: str) -> None:
+        """Saisie refusée : champ encadré de rouge (jusqu'à la prochaine
+        frappe) et motif au journal, au lieu d'un Appliquer sans effet."""
+        champ.setStyleSheet(f"border:2px solid {COLORS['error']};")
+        champ.setToolTip(message)
+        champ.textEdited.connect(self._effacer_signalement)
+        self._log(f"⚠ {message}", COLORS["error"])
+
+    def _effacer_signalement(self, _texte: str = "") -> None:
+        champ = self.sender()
+        if isinstance(champ, QLineEdit):
+            champ.setStyleSheet("")
+            champ.setToolTip("")
+            champ.textEdited.disconnect(self._effacer_signalement)
 
     def _arreter(self) -> None:
         # coupe régulation ET mode manuel (le pilote remet aussi RUN à 0),
@@ -3244,20 +3414,21 @@ class Application(QMainWindow):
     def _re_max_pour_reference(self, ref: str) -> int:
         """Calcule le Re maximum pour la référence donnée (conduite ou veine).
 
-        - Mode CONDUITE : max fixe à 25000 Re
+        - Mode CONDUITE : re_max_iso, le maximum mesurable du banc
         - Mode VEINE : calculé dynamiquement depuis re_max_iso et dimensions veine
         """
         if ref == "conduite":
-            return 25000  # Maximum fixe en mode conduite
+            return int(self.pilote.re_max_iso or 25000)
         else:  # veine
             re_max_iso = self.pilote.re_max_iso or 24500
             k = self._calculer_k()
             return int(re_max_iso / k)
 
-    def _set_ref_re(self, ref: str) -> None:
+    def _set_ref_re(self, ref: str, marquer: bool = True) -> None:
         """Change la référence Re (conduite/veine) et adapte les limites du slider."""
         self._ref_re = ref
         self._seg_set(self._ref_btns, 0 if ref == "conduite" else 1)
+        self._unit_re.setText(f"Re {ref}")
 
         # Calculer le Re max et l'échelle pour cette référence
         re_max = self._re_max_pour_reference(ref)
@@ -3275,7 +3446,8 @@ class Application(QMainWindow):
         except (ValueError, AttributeError):
             pass
 
-        self._mark_dirty("re")
+        if marquer:
+            self._mark_dirty("re")
 
     # ── slider/input sync ──────────────────────────────────────────────────
 
@@ -3363,6 +3535,8 @@ class Application(QMainWindow):
     # ══════════════════════════════════════════════════════════ APPRENTISSAGE
 
     def _lancer_test(self, test: str, **kw) -> None:
+        if self._bloque_par_arret_securite():
+            return
         err = self.apprentissage.demarrer(test, **kw)
         if err:
             QMessageBox.warning(self, "Apprentissage", err)
@@ -3380,12 +3554,18 @@ class Application(QMainWindow):
         self._lancer_test("indiciel", u1=u1, u2=u2)
 
     def _appliquer_apprentissage(self) -> None:
+        apercu = self.apprentissage.apercu_application()
+        if not apercu:
+            return
         rep = QMessageBox.question(
             self, "Confirmer",
-            "Appliquer les résultats mesurés à la configuration ?")
+            "Écrire dans la configuration :\n\n"
+            + "\n".join(f"• {titre} — {txt}" for titre, txt in apercu)
+            + "\n\nLes résultats déjà appliqués ne sont pas réécrits.")
         if rep != QMessageBox.StandardButton.Yes:
             return
         resume = self.apprentissage.appliquer()
+        self._synchroniser_affichage_config()
         self.lbl_app_statut.setStyleSheet(f"color:{COLORS['ok']};")
         self.lbl_app_statut.setText(resume)
 
@@ -3412,12 +3592,25 @@ class Application(QMainWindow):
         self.btn_enregistrer.setEnabled(unlock)
         self.lbl_cfg_statut.setText("")
 
-    def _recharger_champs(self) -> None:
+    def _remplir_champs_config(self) -> None:
+        """Champs de l'onglet Configuration <- configuration en mémoire."""
         for chemin, (entree, _) in self.champs.items():
             try:
                 entree.setText(str(_cfg_lire(self.cfg, chemin)))
             except (KeyError, TypeError):
                 pass
+
+    def _synchroniser_affichage_config(self) -> None:
+        """Après toute écriture de la configuration (Appliquer d'un
+        apprentissage, Maintenance, Configuration), les deux pages qui en
+        affichent des valeurs sont rechargées : un champ resté sur l'ancienne
+        valeur était sinon réécrit à la sauvegarde suivante, et effaçait en
+        silence le résultat appris."""
+        self._remplir_champs_config()
+        self._remplir_widgets_regulation()
+
+    def _recharger_champs(self) -> None:
+        self._remplir_champs_config()
         self.lbl_cfg_statut.setStyleSheet(f"color:{COLORS['muted']};")
         self.lbl_cfg_statut.setText("modifications annulées")
 
@@ -3473,6 +3666,13 @@ class Application(QMainWindow):
         # laissée dans la configuration en mémoire
         candidat = json.loads(json.dumps(self.cfg))
         for chemin, v in valeurs.items():
+            # seules les saisies modifiées sont écrites : une valeur changée
+            # entre-temps par ailleurs n'est pas écrasée par l'affichage
+            try:
+                if float(_cfg_lire(self.cfg, chemin)) == v:
+                    continue
+            except (KeyError, TypeError, ValueError):
+                pass
             _cfg_ecrire(candidat, chemin, v)
         try:
             banc = Banc(candidat)
@@ -3493,6 +3693,7 @@ class Application(QMainWindow):
         # cache par le pilote et doivent etre relus, sinon la saisie
         # n'agirait qu'au redemarrage suivant
         self.pilote.appliquer_config(self.cfg)
+        self._synchroniser_affichage_config()
         self.chk_unlock.setChecked(False)
         self.lbl_cfg_statut.setStyleSheet(f"color:{COLORS['ok']};")
         self.lbl_cfg_statut.setText("✓ configuration enregistrée et appliquée")
@@ -3525,6 +3726,7 @@ class Application(QMainWindow):
         self._section("mesures", self._tick_left, e)
         self._section("supervision", self._tick_right, e)
         self._section("pied de page", self._tick_footer, e)
+        self._section("arrêt de sécurité", self._tick_securite, e)
         self._section("voies", self._tick_entrees, e)
         self._section("apprentissage", self._tick_apprentissage)
         self._section("séquence", self._tick_sequence, e)
@@ -3589,15 +3791,25 @@ class Application(QMainWindow):
         self._act_subs["variateur"].setText("Arrêté" if not is_running else
                                             f"{u:.2f} V".replace(".", ","))
 
-        d = e.get("diaphragme", "")
-        d_txt = {"iso": "ISO", "miller": "Miller"}.get(d, "—")
-        self._act_vals["vanne3"].setText(d_txt)
+        # position LUE (fins de course), pas la position commandée
+        d = e.get("diaphragme_lu", "")
+        noms_diaph = {"iso": "ISO", "miller": "Miller"}
+        d_txt = noms_diaph.get(d, "—")
+        if d == "en_transit":
+            # position LUE : la vanne n'a pas encore atteint sa butée
+            cible = noms_diaph.get(e.get("diaphragme_commande"), "?")
+            self._act_vals["vanne3"].setText("Manœuvre…")
+            self._act_subs["vanne3"].setText(f"→ {cible} (en course)")
+            self._act_bars["vanne3"].setValue(500)
+            couleur = COLORS["warn"]
+        else:
+            self._act_vals["vanne3"].setText(d_txt)
+            self._act_subs["vanne3"].setText(
+                f"Position {d_txt}" if d in noms_diaph else "Position non lue")
+            self._act_bars["vanne3"].setValue(1000 if d in noms_diaph else 0)
+            couleur = "#FF9900" if d in noms_diaph else "#DBE5EA"
         self._act_dots["vanne3"].setStyleSheet(
-            f"color:{'#FF9900' if d in ('iso','miller') else '#DBE5EA'};"
-            " font-size:10px; background:transparent;")
-        self._act_bars["vanne3"].setValue(
-            1000 if d in ("iso", "miller") else 0)
-        self._act_subs["vanne3"].setText(f"Position {d_txt}" if d else "—")
+            f"color:{couleur}; font-size:10px; background:transparent;")
 
         manoeuvre_bp = "bypass" in (e.get("manoeuvre") or "")
         if manoeuvre_bp:
@@ -3617,7 +3829,7 @@ class Application(QMainWindow):
         pdc = e.get("pdc_position")
         pdc_pct = self._pdc_v_vers_pct(pdc)
         self._act_vals["pdc"].setText(
-            f"{pdc_pct} %" if pdc is not None else "—")
+            f"{pdc_pct} % ferm." if pdc is not None else "—")
         self._act_dots["pdc"].setStyleSheet(
             f"color:{'#FF9900' if pdc_pct > 10 else '#DBE5EA'};"
             " font-size:10px; background:transparent;")
@@ -3628,6 +3840,9 @@ class Application(QMainWindow):
     def _tick_right(self, e: dict) -> None:
         re = e.get("re_mesure")
         self._lbl_re_big.setText(f"{re:.0f}" if re is not None else "—")
+        # re_mesure est exprimé dans la référence de la consigne en cours
+        ref = e.get("reference") or self._ref_re
+        self._lbl_re_hdr.setText(f"REYNOLDS Re {ref.upper()} — MESURÉ")
 
         # « ± 28  (0,5 %)  ·  60 s » : dispersion du Re sur la fenêtre de
         # convergence et durée du palier courant
@@ -3692,7 +3907,7 @@ class Application(QMainWindow):
             pass
 
         # Diaphragme segmenté
-        d = e.get("diaphragme", "")
+        d = e.get("diaphragme_lu", "")
         dmap = {"iso": 0, "miller": 1}
         self._seg_set(self._diaph_btns, dmap.get(d, -1))
 
@@ -3723,21 +3938,40 @@ class Application(QMainWindow):
         # variateur et PdC, un défaut pouvait en masquer un autre — et un
         # défaut persistant se re-journalisait sans fin dès qu'il sortait de
         # la fenêtre de 3 lignes.
-        actives = {cle for cle, _ in self.ALERTES if e.get(cle)}
-        for cle, msg in self.ALERTES:
+        sources = dict(e)
+        brutes = e.get("mesures_brutes") or {}
+        for cle, _ in self.ALERTES_ENTREES:
+            sources[cle] = brutes.get(cle)
+        alertes = self.ALERTES + self.ALERTES_ENTREES
+        actives = {cle for cle, _ in alertes if sources.get(cle)}
+        for cle, msg in alertes:
             if cle in actives and cle not in self._alertes_actives:
-                self._log(f"{msg} : {e[cle]}" if isinstance(e[cle], str) else msg,
+                if cle == "bas_re_motif":
+                    # le motif s'adresse au responsable de mise en service
+                    self._log(f"{msg} (détail : onglet Maintenance)",
+                              COLORS["warn"])
+                    continue
+                self._log(f"{msg} : {sources[cle]}"
+                          if isinstance(sources[cle], str) else msg,
                           COLORS["error"])
-        for cle, msg in self.ALERTES:
+        for cle, msg in alertes:
             if cle in self._alertes_actives and cle not in actives:
                 self._log(f"{msg} — rétabli", COLORS["ok"])
         self._alertes_actives = actives
+        # défauts actionneur : visibles en permanence tant qu'ils durent
+        defauts_act = [msg for cle, msg in self.ALERTES_ENTREES if cle in actives]
+        self._lbl_defauts_act.setText("   ".join(defauts_act))
+        self._lbl_defauts_act.setVisible(bool(defauts_act))
 
     def _tick_footer(self, e: dict) -> None:
         ok = not bool(e.get("erreur_com"))
-        self._foot_cnx.setStyleSheet(
-            f"color:{COLORS['ok'] if ok else COLORS['error']};"
-            " font-size:10px; background:transparent;")
+        for voyant in (self._foot_cnx, self._lbl_cnx_dot):
+            voyant.setStyleSheet(
+                f"color:{COLORS['ok'] if ok else COLORS['error']};"
+                " font-size:10px; background:transparent;")
+        self._lbl_cnx_dot.setToolTip(
+            "Liaison E/S établie" if ok
+            else f"Liaison E/S perdue : {e.get('erreur_com')}")
 
         if e.get("manoeuvre"):
             txt = f"MANŒUVRE — {e['manoeuvre']}"
@@ -3745,7 +3979,7 @@ class Application(QMainWindow):
         elif e.get("manuel"):
             txt, col = "MANUEL", COLORS["warn"]
         elif e.get("regulation"):
-            txt = "RÉGULATION ✓" if e.get("convergee") else "RÉGULATION…"
+            txt = "RÉGULÉ ✓" if e.get("convergee") else "RÉGULATION…"   # = badge
             col = COLORS["ok"] if e.get("convergee") else COLORS["accentText"]
         else:
             txt, col = "ARRÊT", COLORS["muted2"]
@@ -3839,13 +4073,18 @@ class Application(QMainWindow):
             self.lbl_app_statut.setStyleSheet(f"color:{COLORS['ok']};")
             self.lbl_app_statut.setText(a.etat["statut"])
 
-        lignes = [
-            f"{nom:14s} : {', '.join(f'{k}={v}' for k, v in res.items())}"
-            for nom, res in a.resultats.items()
-        ]
+        # ce qu'« Appliquer » va écrire (ancienne → nouvelle valeur), puis
+        # les résultats déjà appliqués
+        lignes = [f"• {titre} — {txt}" for titre, txt in a.apercu_application()]
+        en_attente = set(a.resultats_a_appliquer())
+        appliques = [a.NOMS.get(n, n) for n in a.resultats if n not in en_attente]
+        if lignes:
+            lignes.insert(0, "À appliquer :")
+        if appliques:
+            lignes.append("Déjà appliqués : " + ", ".join(appliques))
         self.lbl_app_resultats.setText("\n".join(lignes))
         self.btn_appliquer_app.setEnabled(
-            bool(a.resultats) and not a.etat["en_cours"])
+            bool(en_attente) and not a.etat["en_cours"])
 
         pdc_ok = (self.pilote.pdc_recopie_max
                   - self.pilote.pdc_recopie_min) >= 1.0
