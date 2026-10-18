@@ -156,6 +156,30 @@ corrigent si la plomberie est croisée).
 > 3G3MV (comportement sur perte de référence / perte du contact RUN).
 > À vérifier à la mise en service.
 
+### À vérifier à la mise en service
+
+Points que le logiciel ne peut pas trancher seul :
+
+- **Échelle de la consigne de la vanne PdC.** Les commandes en % passent
+  par les butées de la *recopie* (`actionneurs.pdc_recopie_min_v` /
+  `max_v`, environ 2,4 et 9,2 V) : 100 % commande ~9,2 V, 0 % ~2,4 V. Si
+  la carte P6 attend 0-10 V linéaire sur toute la course, « 100 % »
+  n'ouvrirait qu'à ~91 % et « 0 % » laisserait ~24 % d'ouverture (la
+  valeur apprise `pdc_min_exploitable_pct` vaut justement 24 %). Test :
+  commander 9,2 V et vérifier que la fin de course « ouverte » est atteinte.
+- **Repli du variateur sur perte de liaison** (paramétrage 3G3MV), cf.
+  avertissement ci-dessus.
+- **Bruit des capteurs ΔP à débit stable.** La détection de signal figé
+  arrête le banc si l'écart-type du ΔP reste sous 0,1 Pa pendant 10 s en
+  régulation : un capteur très peu bruité pourrait la déclencher à tort.
+- **Domaine de validité.** La corrélation RHG (prises d'angle, β = 0,535)
+  est normalisée pour ReD ≥ 5000 ; l'hystérésis garde l'ISO jusqu'à 4500.
+  En Miller, un ΔP sous 0,3 Pa (Re conduite ≈ 210) est lu comme un débit
+  nul.
+- **Viscosité.** Avec `fluide.humidite_relative` > 0, μ suit la
+  corrélation linéaire du classeur d'air humide (≈ 0,6 % sous Sutherland à
+  20 °C, soit ≈ 0,6 % sur le Re) ; avec 0, Sutherland.
+
 ## Structure du code
 
 ```
