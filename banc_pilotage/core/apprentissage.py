@@ -209,8 +209,7 @@ class Apprentissage:
             self._pause(2.0)
 
         # 1. Vanne 3 voies sur le diaphragme spécifié
-        label = f"positionnement {'ISO (0°)' if vers_iso else 'Miller (90°)'}"
-        t = self._avancer_vanne_3voies(vers_iso, label)
+        t = self._positionner_diaphragme(diaph_cible)
         if t is None:
             return False
 
@@ -267,6 +266,9 @@ class Apprentissage:
                             timeout: float = 60.0) -> float | None:
         """Commande la vanne et chronomètre jusqu'à la fin de course cible.
         Résolution : la période de la boucle de mesure."""
+        if self._interrompu():
+            self._statut_annule()
+            return None
         ecrire()
         t = self._attendre(lambda: bool(self._brutes().get(fc_cible)),
                            timeout, f"course {sens}")
@@ -278,6 +280,9 @@ class Apprentissage:
         rejoint directement la position demandée, sans impulsion de relance :
         l'ordre F mène à 0°, l'ordre I à 90°. Retourne la durée, ou None."""
         angle = "0" if vers_0deg else "90"
+        if self._interrompu():
+            self._statut_annule()
+            return None
         if self.pilote._angle_vanne_3voies(self._brutes()) == angle:
             return 0.0
         t0 = time.monotonic()
@@ -286,6 +291,16 @@ class Apprentissage:
             lambda: self.pilote._angle_vanne_3voies(self._brutes()) == angle,
             timeout, label)
         return None if ok is None else time.monotonic() - t0
+
+    def _positionner_diaphragme(self, diaphragme: str,
+                                verbe: str = "positionnement") -> float | None:
+        """Amène la vanne 3 voies sur le DIAPHRAGME demandé, via la butée que
+        lui attribue positions_vanne_3voies : sur une plomberie croisée, le
+        Miller est à 0°. Les séquences qui raisonnent en diaphragme passent
+        par ici ; seuls les tests de la vanne elle-même parlent en angle."""
+        angle = self.pilote._angle_par_diaphragme[diaphragme]
+        return self._avancer_vanne_3voies(
+            angle == "0", f"{verbe} {diaphragme.upper()} ({angle}°)")
 
     def _test_vanne_3voies(self) -> None:
         """Chrono des deux courses utiles de la vanne 3 voies. La position 180°
@@ -787,8 +802,7 @@ class Apprentissage:
 
         # 0) préparation : BYPASS OUVERT (condition réelle mode bas-Re)
         # Vanne 3V sur Miller
-        vers_iso = False
-        t = self._avancer_vanne_3voies(vers_iso, "positionnement Miller (90°)")
+        t = self._positionner_diaphragme("miller")
         if t is None:
             return
 
@@ -868,7 +882,6 @@ class Apprentissage:
 
         self._variateur(0.0)
         u_min_reco = round(min(derniere_stable + pas_precedent, u_depart), 2)
-        self.pilote.u_min_ventilateur = u_min_reco
 
         # ---- Phase 2 : mesure u_seuil (tension au seuil en mode bas-Re) ----
         # Trouver quelle tension variateur donne Re = seuil_cible (5000)
@@ -1017,7 +1030,7 @@ class Apprentissage:
 
                 if ok is not None:
                     # Basculer sur ISO (diaphragme pour plage haute)
-                    t = self._avancer_vanne_3voies(True, "basculement ISO (0°)")
+                    t = self._positionner_diaphragme("iso", "basculement")
 
                     if t is not None:
                         # Attendre stabilisation circuit
@@ -1051,6 +1064,11 @@ class Apprentissage:
         # Arrêter variateur
         self._variateur(0.0)
 
+        if self._interrompu():
+            # résultats partiels : rien d'applicable (« Appliquer » les
+            # écrirait en configuration)
+            self._statut_annule()
+            return
         self.resultats["re_mapping"] = {
             "u_min_exploitable_v": u_min_reco,
             "u_seuil_bas_re_v": u_seuil,
@@ -1089,8 +1107,7 @@ class Apprentissage:
         es = self.pilote.es
 
         # ---- Phase 1 : descente Miller (bypass ouvert, PDC 100%) ----
-        vers_iso = False
-        t = self._avancer_vanne_3voies(vers_iso, "positionnement Miller (90°)")
+        t = self._positionner_diaphragme("miller")
         if t is None:
             return
 
@@ -1162,7 +1179,6 @@ class Apprentissage:
 
         self._variateur(0.0)
         u_min_reco = round(min(derniere_stable + pas_precedent, u_depart), 2)
-        self.pilote.u_min_ventilateur = u_min_reco
 
         # ---- Phase 1b : montée Miller (pour couvrir au-delà du seuil 5000 Re) ----
         # Objectif : étendre la table Miller jusqu'à ~6000-6500 Re pour créer un
@@ -1184,10 +1200,11 @@ class Apprentissage:
                 return
             re_moy, bruit = r
 
-            # Vérifier saturation ΔP Miller (100 Pa pleine échelle)
+            # saturation du capteur ΔP Miller (même seuil que la boucle)
             brutes = self.pilote.etat.get("mesures_brutes", {})
-            dp_miller = brutes.get("dp_miller_100", 0.0)
-            if dp_miller > 95.0:  # 95% de saturation
+            dp_miller = brutes.get("dp_diaph_500", 0.0)
+            pe_miller = self.pilote._dp_pleine_echelle["dp_diaph_500"]
+            if dp_miller > self.pilote.saturation_dp * pe_miller:
                 self.etat["statut"] = f"ΔP Miller saturé ({dp_miller:.1f} Pa) à {u:.1f}V"
                 break
 
@@ -1304,6 +1321,11 @@ class Apprentissage:
         self._variateur(0.0)
 
         # Sauvegarder résultats Miller
+        if self._interrompu():
+            # résultats partiels : rien d'applicable (« Appliquer » les
+            # écrirait en configuration)
+            self._statut_annule()
+            return
         self.resultats["re_mapping_miller"] = {
             "u_min_exploitable_v": u_min_reco,
             "u_seuil_bas_re_v": u_seuil,
@@ -1394,7 +1416,7 @@ class Apprentissage:
             return
 
         # Basculer sur ISO
-        t = self._avancer_vanne_3voies(True, "basculement ISO (0°)")
+        t = self._positionner_diaphragme("iso", "basculement")
         if t is None:
             return
 
@@ -1477,10 +1499,9 @@ class Apprentissage:
             brutes = self.pilote.etat.get("mesures_brutes", {})
             dp_iso = brutes.get("dp_iso_500", 0.0)
             if dp_iso > 495.0:
+                # palier NON retenu : son Re est plafonné par le capteur, pas
+                # par le banc, et fausserait le haut de la table
                 self.etat["statut"] = f"ΔP ISO saturé ({dp_iso:.0f} Pa) à {u:.1f}V, Re≈{re_moy:.0f}"
-                # Ajouter ce dernier point avant d'arrêter
-                paliers_plage_haute.append((u, round(re_moy)))
-                self.etat["paliers_plage_haute"] = list(paliers_plage_haute)
                 break
 
             paliers_plage_haute.append((u, round(re_moy)))
@@ -1506,6 +1527,11 @@ class Apprentissage:
         self._variateur(0.0)
 
         # Sauvegarder résultats ISO
+        if self._interrompu():
+            # résultats partiels : rien d'applicable (« Appliquer » les
+            # écrirait en configuration)
+            self._statut_annule()
+            return
         self.resultats["re_mapping_iso"] = {
             "u_seuil_utilise_v": u_seuil,
             "paliers_plage_haute": [[v, re] for v, re in paliers_plage_haute],
@@ -1527,9 +1553,12 @@ class Apprentissage:
     def _test_indiciel(self, u1: float = 2.0, u2: float = 4.0,
                        duree_max: float = 120.0) -> None:
         # Circuit normal obligatoire : un tau mesuré circuit dérivé
-        # fausserait kp/ki et tau_consigne_s.
-        # Utilise Miller pour les tensions moyennes (2-4V typiques).
-        if not self._preparer_circuit_normal("miller"):
+        # fausserait kp/ki et tau_consigne_s. Diaphragme ISO, bypass fermé :
+        # la configuration du mode normal_high, celle de la table de gains
+        # exigée par demarrer() et dont la pente normalise la correction.
+        # (Le Miller bypass fermé n'est jamais une configuration de
+        # régulation, et son capteur s'écrêterait vite.)
+        if not self._preparer_circuit_normal("iso"):
             return
         dt = self.pilote.periode
         fenêtre = max(6, int(5.0 / dt))      # ~5 s de mesures stables
@@ -1758,12 +1787,15 @@ class Apprentissage:
             log.info("=" * 70)
 
             # Déterminer quel type d'apprentissage a été fait
-            apprentissage_miller = "re_mapping_miller" in self.resultats
-            apprentissage_iso = "plage_haute" in self.resultats or "re_mapping_iso" in self.resultats
+            # le re_mapping combiné produit les deux tables
+            apprentissage_miller = ("re_mapping_miller" in self.resultats
+                                    or "re_mapping" in self.resultats)
+            apprentissage_iso = ("re_mapping_iso" in self.resultats
+                                 or "re_mapping" in self.resultats)
 
             # Récupérer les mesures de conditions ambiantes
             mesures = self.pilote.etat.get("mesures_brutes", {})
-            temperature_c = mesures.get("temperature_air_c")
+            temperature_c = mesures.get("temperature")
             # Pression atmosphérique (TODO: ajouter capteur si disponible)
             pression_pa = None
 
@@ -1806,7 +1838,8 @@ class Apprentissage:
                     parametres_miller['u_min_ventilateur_v'] = self.pilote.u_min_ventilateur
                     log.info(f"  - u_min_ventilateur_v: {self.pilote.u_min_ventilateur}V")
 
-                r_miller = self.resultats.get("re_mapping_miller", {})
+                r_miller = self.resultats.get("re_mapping_miller") \
+                    or self.resultats.get("re_mapping", {})
                 if r_miller.get("u_seuil_bas_re_v"):
                     parametres_miller['u_seuil_bas_re_v'] = r_miller["u_seuil_bas_re_v"]
                 if r_miller.get("pdc_min_exploitable_pct"):

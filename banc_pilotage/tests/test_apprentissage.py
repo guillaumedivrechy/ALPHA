@@ -172,3 +172,72 @@ def test_re_mapping_produit_paliers_plage_haute():
     for i in range(len(paliers) - 1):
         assert paliers[i][0] < paliers[i + 1][0], "Voltages doivent être croissants"
         assert paliers[i][1] < paliers[i + 1][1], "Re doivent être croissants"
+
+
+# ---- revue complète : séquences d'apprentissage ----------------------------
+
+def _app_cfg(tmp_path, cfg=None):
+    cfg = cfg or _cfg()
+    pilote = Pilote(Banc(cfg), StubES(), cfg)
+    from core.gestionnaire_apprentissages import GestionnaireApprentissages
+    pilote.gestionnaire_apprentissages = GestionnaireApprentissages(tmp_path)
+    return Apprentissage(pilote, cfg, tmp_path / "config.json"), pilote
+
+
+def test_sequences_positionnent_le_diaphragme_selon_la_plomberie(tmp_path):
+    """Plomberie croisée (ISO à 90°) : « positionner ISO » doit viser 90°.
+    RÉGRESSION : les séquences codaient 0° = ISO et caractérisaient le
+    mauvais diaphragme."""
+    cfg = _cfg()
+    cfg["modbus"]["positions_vanne_3voies"] = {
+        "diaphragme_a_0deg": "miller", "diaphragme_a_90deg": "iso"}
+    app, _ = _app_cfg(tmp_path, cfg)
+    appels = []
+    app._avancer_vanne_3voies = lambda vers_0deg, label: appels.append(vers_0deg) or 0.0
+    app._positionner_diaphragme("iso")
+    app._positionner_diaphragme("miller")
+    assert appels == [False, True]
+
+
+def test_sequence_annulee_ne_produit_aucun_resultat(tmp_path):
+    """Annulée pendant un palier, la séquence ISO allait jusqu'au bout,
+    affichait « terminé » et stockait des paliers partiels que « Appliquer »
+    aurait écrits en configuration."""
+    import threading
+    app, pilote = _app_cfg(tmp_path)
+    pilote.periode = 0.05
+    pilote.etat["mesures_brutes"] = {
+        "fc_bypass_ferme": True, "fc_3voies_0": True,
+        "pdc_recopie": pilote.pdc_recopie_max}
+    threading.Timer(2.5, app.annuler).start()
+    app._test_re_mapping_iso(u_seuil=3.0)
+    assert "re_mapping_iso" not in app.resultats
+    assert not app.etat["statut"].startswith("terminé")
+
+
+def test_essai_indiciel_sur_le_circuit_iso(tmp_path):
+    """L'indiciel exige la table ISO (sa pente normalise la correction) :
+    il doit se faire sur le circuit ISO, bypass fermé — pas sur le Miller
+    bypass fermé, configuration jamais utilisée en régulation."""
+    app, _ = _app_cfg(tmp_path)
+    circuits = []
+    app._preparer_circuit_normal = lambda d: circuits.append(d) or False
+    app._test_indiciel()
+    assert circuits == ["iso"]
+
+
+def test_re_mapping_combine_est_sauvegarde(tmp_path):
+    """Les tables du re_mapping combiné n'étaient jamais écrites dans
+    apprentissages/ (test d'une clé « plage_haute » inexistante) : perdues
+    au redémarrage."""
+    app, pilote = _app_cfg(tmp_path)
+    app.resultats["re_mapping"] = {
+        "u_min_exploitable_v": 0.8, "u_seuil_bas_re_v": 5.0,
+        "paliers_V_Re": [[0.8, 600.0], [2.0, 1500.0], [5.0, 3800.0]],
+        "paliers_plage_haute": [[3.0, 9000.0], [6.0, 18000.0]],
+    }
+    app.appliquer()
+    iso = json.loads((tmp_path / "apprentissages" / "iso.json").read_text("utf-8"))
+    miller = json.loads((tmp_path / "apprentissages" / "miller.json").read_text("utf-8"))
+    assert iso["tables"]["table_gains"]
+    assert miller["tables"]["table_gains_bas_re"]
