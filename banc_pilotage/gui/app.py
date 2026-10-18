@@ -3297,8 +3297,9 @@ class Application(QMainWindow):
         # Consigne Reynolds : active uniquement en mode asservi
         self._slider_re.setEnabled(en_asservi)
         self.inp_re.setEnabled(en_asservi)
+        # référence : aussi en manuel, où elle choisit le Re mesuré affiché
         for btn in self._ref_btns:
-            btn.setEnabled(en_asservi)
+            btn.setEnabled(en_asservi or en_manuel)
 
     def _update_mode_seg(self) -> None:
         idx = {"manuel": 0, "asservi": 1, "sequence": 2}.get(self._mode, 1)
@@ -3429,6 +3430,8 @@ class Application(QMainWindow):
         self._ref_re = ref
         self._seg_set(self._ref_btns, 0 if ref == "conduite" else 1)
         self._unit_re.setText(f"Re {ref}")
+        # hors régulation, le Re mesuré affiché suit ce choix
+        self.pilote.definir_reference_affichage(ref)
 
         # Calculer le Re max et l'échelle pour cette référence
         re_max = self._re_max_pour_reference(ref)
@@ -3840,6 +3843,10 @@ class Application(QMainWindow):
     def _tick_right(self, e: dict) -> None:
         re = e.get("re_mesure")
         self._lbl_re_big.setText(f"{re:.0f}" if re is not None else "—")
+        # hors régulation (manuel, arrêt), la mesure suit la référence choisie
+        # sur l'IHM ; en régulation, celle de la consigne appliquée
+        if not e.get("regulation") and e.get("reference") not in (None, self._ref_re):
+            self.pilote.definir_reference_affichage(self._ref_re)
         # re_mesure est exprimé dans la référence de la consigne en cours
         ref = e.get("reference") or self._ref_re
         self._lbl_re_hdr.setText(f"REYNOLDS Re {ref.upper()} — MESURÉ")

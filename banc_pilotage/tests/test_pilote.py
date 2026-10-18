@@ -88,6 +88,39 @@ def test_position_lue_de_la_vanne_3_voies_publiee_hors_regulation():
     assert pilote.etat["diaphragme_lu"] == "miller"
 
 
+def test_reference_choisie_sur_lihm_suivie_hors_regulation(pilote_stub):
+    """Manuel en « Veine » : le Re mesuré publié est le Re veine. En
+    régulation, la référence reste celle de la consigne appliquée."""
+    pilote, _ = pilote_stub
+    pilote.definir_reference_affichage("veine")
+    assert pilote.reference == "veine"
+    pilote.definir_consigne(5000.0, "conduite")
+    pilote.demarrer_regulation()
+    pilote.definir_reference_affichage("veine")
+    assert pilote.reference == "conduite"
+    with pytest.raises(ValueError):
+        pilote.definir_reference_affichage("veinee")
+
+
+def test_plafond_capteur_dp_dans_la_reference_veine():
+    """15 000 Re veine ≈ 28 000 Re conduite : au-delà du capteur ΔP ISO. Le
+    plafond doit être exprimé en Re VEINE (≈ 14 000), sinon il ne borne
+    rien et la régulation vise un Re que la mesure n'atteint jamais."""
+    import copy
+    cfg = copy.deepcopy(CFG)
+    cfg["regulation"].pop("re_max_iso", None)     # seul le plafond ΔP joue
+    es = StubES({"temperature": 20.0, "fc_3voies_0": True,
+                 "fc_bypass_ferme": True, "fc_pdc_ouvert": True})
+    pilote = Pilote(Banc(cfg), es, cfg)
+    pilote.re_max_iso = None
+    pilote.definir_consigne(15000.0, "veine")
+    pilote.demarrer_regulation()
+    pilote._cycle()
+    assert pilote._re_cible_max is not None
+    assert 13000 < pilote._re_cible_max < 15000
+    assert "Re veine" in pilote.etat["consigne_limitee"]
+
+
 def test_arret_coupe_aussi_le_mode_manuel(pilote_stub):
     """Bouton ARRÊT VARIATEUR : la tension manuelle ne doit pas être
     réappliquée au cycle suivant."""

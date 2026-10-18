@@ -681,6 +681,21 @@ class Pilote:
             # bas-Re et le split-range calés sur l'ancienne consigne
             self._preparation_faite = False
 
+    def definir_reference_affichage(self, reference: str) -> None:
+        """Référence (conduite / veine) du Re mesuré publié, choisie sur
+        l'IHM. Prise en compte hors régulation seulement (manuel, arrêt) :
+        en régulation, la référence est celle de la consigne appliquée.
+        Sans cela, le manuel affichait un Re conduite sous un sélecteur
+        « Veine » (le pilote démarre en conduite)."""
+        if reference not in ("conduite", "veine"):
+            raise ValueError(f"référence inconnue : {reference}")
+        with self._verrou:
+            if self.regulation_active or self.reference == reference:
+                return
+            self.reference = reference
+        self._historique_re.clear()       # moyenne/écart-type d'une seule référence
+        self._convergee_depuis = None
+
     def _acquitter_defauts(self) -> None:
         """Efface les défauts latchés. Appelé au (re)démarrage : l'opérateur
         a vu l'alerte et relance en connaissance de cause. Sans cela un défaut
@@ -1531,9 +1546,13 @@ class Pilote:
 
             self.etat["dp_attendu"] = self.banc.dP_attendu(
                 diaph, qm_vise, T, p_amont)
-            # _borner_consigne doit recevoir le Re CONDUITE pour calculer correctement
-            # la limite basée sur DP, quelle que soit la référence utilisateur
-            self._borner_consigne(diaph, qm_vise, re_cond_attendu, T, p_amont)
+            # plafond capteur ΔP exprimé dans la référence de la consigne : il
+            # borne re_vise, qui est dans cette référence. Calculé en conduite
+            # (26 260 pour un capteur ISO à 475 Pa) puis comparé à une consigne
+            # veine (15 000), il ne bornait rien : la régulation visait un
+            # Re au-delà de la mesure et ne convergeait jamais.
+            self._borner_consigne(diaph, qm_vise, re_cible, T, p_amont,
+                                  reference)
 
             # Mémoriser l'équivalent conduite de la consigne
             self._re_cible_conduite = re_cond_attendu
@@ -2498,7 +2517,8 @@ class Pilote:
         return None
 
     def _borner_consigne(self, diaph: str, qm_vise: float, re_cible: float,
-                         T: float, p_amont: float) -> None:
+                         T: float, p_amont: float,
+                         reference: str = "conduite") -> None:
         """Consigne au-delà de la plage mesurable du capteur ΔP du
         diaphragme : la régulation vise le maximum mesurable (avec la marge
         marge_consigne_dp) et l'opérateur est prévenu.
@@ -2519,10 +2539,11 @@ class Pilote:
             if dp_q <= 0:
                 return
             qm_max *= (dp_lim / dp_q) ** 0.5
+        # Re ∝ qm à T et P donnés : le rapport vaut dans les deux références
         self._re_cible_max = re_cible * qm_max / qm_vise
-        msg = (f"consigne {re_cible:.0f} hors plage du capteur ΔP "
+        msg = (f"consigne {re_cible:.0f} Re {reference} hors plage du capteur ΔP "
                f"({dp_att:.0f} Pa attendus, {dp_lim:.0f} Pa max) : "
-               f"régulation limitée à {self._re_cible_max:.0f}")
+               f"régulation limitée à {self._re_cible_max:.0f} Re {reference}")
         self.etat["consigne_limitee"] = msg
         log.warning(msg)
 
