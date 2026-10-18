@@ -95,8 +95,12 @@ commande que celles qui ne sont pas en position, **toutes simultanément**.
 Aucune consigne n'est envoyée au variateur ni à la PdC avant que toutes
 soient en butée : variateur à 0 V pendant les manœuvres des vannes TOR ;
 si seule la PdC rejoint sa butée (sortie du mode PdC), la tension du
-variateur est tenue, sans nouvelle consigne. La consigne initiale vient de la
-table apprise du mode (interpolation entre paliers), puis la régulation
+variateur est tenue, sans nouvelle consigne. En mode PdC, un ventilateur à
+l'arrêt (repos, ou après une manœuvre TOR) n'est lancé qu'une fois la PdC à
+sa position (recopie), comme les vannes TOR sur leurs fins de course ; elle y
+est tenue sur sa table pendant sa course, le PI reprenant la main à
+l'arrivée (chien de garde : défaut vanne PdC si elle n'arrive pas). La
+consigne initiale vient de la table apprise du mode (interpolation entre paliers), puis la régulation
 corrige en continu l'organe du mode. Une PdC déjà régulée en mode PdC n'est
 pas rouverte pour une nouvelle consigne de mode PdC (elle l'est après un
 arrêt). Une nouvelle consigne reçue pendant un déplacement redirige aussitôt

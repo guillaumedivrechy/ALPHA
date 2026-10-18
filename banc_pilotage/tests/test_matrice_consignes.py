@@ -249,3 +249,53 @@ def test_entree_en_mode_pdc_par_le_haut_sans_creux(monkeypatch, tmp_path,
             re_min = e["re_mesure"] if re_min is None else min(re_min, e["re_mesure"])
     assert re_min is not None and re_min > 0.95 * re, re_min
     assert e["convergee"]
+
+
+@pytest.mark.parametrize("re", [300.0, 600.0])
+def test_mode_pdc_ventilateur_lance_apres_la_pdc(monkeypatch, tmp_path, re):
+    """Démarrage en mode PdC depuis le repos : le ventilateur n'est lancé
+    qu'une fois la PdC à sa position, comme après les fins de course des
+    vannes TOR. Lancé vanne encore ouverte, le Re dépassait de ~36 %."""
+    b = _banc(monkeypatch, tmp_path, "repos")
+    b.consigne(re, "veine")
+    re_max, t_conv = 0.0, None
+    for i in range(int(60 / b.p.periode)):
+        b.cycles(b.p.periode)
+        e = b.p.etat
+        if b.sim.u_ecrite > 0:
+            assert abs(b.p._pdc_consigne - b.p._pdc_position_estimee) \
+                <= b.p.ecart_course_pdc_v + 0.3, "ventilateur lancé PdC en course"
+            re_max = max(re_max, e["re_mesure"] or 0.0)
+        if t_conv is None and e.get("convergee"):
+            t_conv = (i + 1) * b.p.periode
+    assert re_max < 1.10 * re, re_max
+    assert t_conv is not None and t_conv <= 40.0, t_conv
+    assert not b.violations, b.violations[:3]
+
+
+def test_pdc_bloquee_au_demarrage_defaut_sans_lancer_le_ventilateur(monkeypatch, tmp_path):
+    b = _banc(monkeypatch, tmp_path, "repos")
+    b.sim.ecrire_vanne_perte_charge = lambda v: None     # vanne PdC bloquée
+    b.consigne(300.0, "veine")
+    lance = False
+    for _ in range(int(60 / b.p.periode)):
+        b.cycles(b.p.periode, verifier=False)
+        lance = lance or b.sim.u_ecrite > 0
+    assert not lance
+    assert "vanne PdC" in (b.p.etat.get("defaut_vanne") or "")
+    assert b.p.etat["arret_securite"]
+
+
+def test_attente_pdc_interrompue_ne_compte_pas(monkeypatch, tmp_path):
+    """Attente « PdC avant ventilateur » interrompue (ARRÊT), reprise bien
+    plus tard : pas de faux défaut (vu en clics aléatoires : l'horodatage
+    d'un épisode ancien déclenchait le chien de garde)."""
+    b = _banc(monkeypatch, tmp_path, "repos")
+    b.consigne(300.0, "veine")
+    b.cycles(2)
+    assert b.p.etat["phase_regulation"] == "positionnement PdC avant ventilateur"
+    b.p.arreter_regulation()
+    b.cycles(60)                                     # bien au-delà du chien de garde
+    b.consigne(300.0, "veine")
+    assert b.jusqu_a_convergence(60) is not None
+    assert not b.violations, b.violations[:3]

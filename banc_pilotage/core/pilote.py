@@ -583,6 +583,7 @@ class Pilote:
         self._t_ecart_variateur = None     # début de l'écart commande / recopie AM
         self._re_cible_max = None          # consigne max mesurable (None = pas de limite)
         self._re_cible_min = None          # consigne min tenable en mode PdC
+        self._pdc_attente_depuis = None    # démarrage PdC : vanne pas encore placée
         # dernière butée LUE de la vanne 3 voies (diaphragme dont le capteur
         # ΔP est exploité) : tenue pendant une course, faute de butée lue
         self._diaphragme_mesure_dernier: str | None = None
@@ -1498,6 +1499,11 @@ class Pilote:
         self.etat["mesures_brutes"] = dict(mesures)
         self.etat["image_process"] = getattr(self.es, "image_process", None)
         self.etat["cycles"] = self.etat.get("cycles", 0) + 1
+        # attente « PdC avant ventilateur » : ne vaut que si elle se poursuit
+        # d'un cycle au suivant (sinon un épisode ancien, interrompu par une
+        # manœuvre, le manuel ou un arrêt, déclenchait le chien de garde)
+        attente_pdc = self._pdc_attente_depuis
+        self._pdc_attente_depuis = None
         # position LUE de la vanne 3 voies, pour l'affichage, à chaque cycle
         # (etat["diaphragme"] est le diaphragme retenu pour le calcul, qui
         # vaut la position commandée hors régulation, avant la butée)
@@ -2295,7 +2301,35 @@ class Pilote:
                 else:
                     pdc_v = min(max(self.pi.calculer(consigne_pi, re_mesure),
                                     0.0), 10.0)
-                if v_ff_pdc is not None:
+                # démarrage du ventilateur (à l'arrêt : repos ou après une
+                # manœuvre TOR) : seulement une fois la PdC à sa position, comme
+                # les vannes TOR sur leurs fins de course. Lancé vanne encore
+                # ouverte, il faisait dépasser la consigne de ~36 %. Ventilateur
+                # déjà en marche : tension tenue pendant la course (inchangé).
+                if u_prec <= 0.0 and abs(pdc_v - self._pdc_position_estimee) \
+                        > self.ecart_course_pdc_v:
+                    self._pdc_attente_depuis = attente_pdc or maintenant
+                    if maintenant - self._pdc_attente_depuis > \
+                            self.facteur_chien_garde * self.t_vanne_pdc_course \
+                            + self.marge_manoeuvre:
+                        self._repli_sur()
+                        self.etat.update({
+                            "defaut_vanne": (
+                                f"vanne PdC : position {pdc_v:.2f} V non atteinte "
+                                f"(lue {self._pdc_position_estimee:.2f} V) — "
+                                "vanne bloquée ou recopie, vérifier puis relancer"),
+                            "regulation": False, "u_variateur": 0.0,
+                            "convergee": False,
+                        })
+                        self._pdc_attente_depuis = None
+                        return
+                    u = 0.0
+                else:
+                    self._pdc_attente_depuis = None
+                if self._pdc_attente_depuis is not None:
+                    self._diag = {"phase": "positionnement PdC avant ventilateur",
+                                  "pdc_v": round(pdc_v, 3)}
+                elif v_ff_pdc is not None:
                     self._diag = {
                         "phase": "FF+PI vanne PdC",
                         "pdc_v": round(pdc_v, 3),
@@ -2317,7 +2351,8 @@ class Pilote:
                 fermee = pdc_v <= 1e-6 and pos <= self.ecart_course_pdc_v \
                     and re_mesure > re_vise * (1.0 + self.tolerance)
                 self._cycles_pdc_butee = self._cycles_pdc_butee + 1 \
-                    if (ouverte or fermee) else 0
+                    if (ouverte or fermee) and self._pdc_attente_depuis is None \
+                    else 0
                 if self._cycles_pdc_butee > int(5.0 / self.periode):
                     self._diag["alerte_pdc"] = (
                         f"consigne {re_vise:.0f} hors de portée du mode PdC "

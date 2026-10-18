@@ -1023,9 +1023,15 @@ def test_feed_forward_pdc_depuis_la_table_apprise_en_pourcent():
     v_attendu = pilote.pdc_recopie_min + pct / 100.0 * (
         pilote.pdc_recopie_max - pilote.pdc_recopie_min)
     assert pilote._mode_regulation == "pdc_control"
+    # la vanne part de grande ouverte : ventilateur à l'arrêt tant qu'elle
+    # n'a pas rejoint sa position
+    assert pilote.etat["phase_regulation"] == "positionnement PdC avant ventilateur"
+    assert pilote._pdc_consigne == pytest.approx(v_attendu, abs=0.2)
+    assert pilote.etat["u_variateur"] == 0.0
+    es.mesures.update(pdc_recopie=pilote._pdc_consigne, fc_pdc_ouvert=False)
+    pilote._cycle()                                  # vanne arrivée
     assert pilote.etat["phase_regulation"] == "FF+PI vanne PdC"
     assert pilote._diag["v_ff_pdc"] == pytest.approx(v_attendu, abs=1e-3)
-    assert pilote._pdc_consigne == pytest.approx(v_attendu, abs=0.2)
     for _ in range(5):                               # variateur sur sa rampe
         pilote._cycle()
     assert pilote.etat["u_variateur"] == pytest.approx(pilote._u_pdc())

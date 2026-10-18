@@ -148,8 +148,9 @@ def test_scenario2_iso_vannes_simultanees_puis_table_iso(banc):
 
 def test_scenario3_iso_vers_pdc(banc):
     """ISO établi -> Re = 300 : vannes TOR simultanées, PdC GARDÉE à 100 %
-    pendant les manœuvres, puis variateur ET PdC (table Miller / PdC)
-    envoyés ensemble, et seule la PdC est ensuite régulée."""
+    pendant les manœuvres, puis PdC envoyée sur sa table ; le variateur ne
+    démarre qu'une fois la PdC à sa position (comme après les fins de course
+    des vannes TOR), puis seule la PdC est régulée."""
     b = banc
     b.consigne(10000.0)
     b.cycles(40.0)
@@ -164,10 +165,12 @@ def test_scenario3_iso_vers_pdc(banc):
     assert all(v == 0.0 for t, v in b.ecritures("variateur") if t0 < t <= t_pret)
     t_var = _premiere_consigne_utile(b, t0)
     t_pdc = next(t for t, v in b.ecritures("pdc") if t > t_pret and v < 10.0)
-    assert t_var == t_pdc                                    # envoyées ensemble
     ff = b.p._pdc_ff_v(300.0)
     v_pdc_1 = next(v for t, v in b.ecritures("pdc") if t == t_pdc)
     assert v_pdc_1 == pytest.approx(ff, abs=0.2)             # table PdC
+    # variateur après la course de la PdC (10 V -> ff, vitesse nominale)
+    course = (10.0 - v_pdc_1) / (10.0 / b.p.t_vanne_pdc_course)
+    assert t_var - t_pdc >= 0.8 * course
     assert b.p._mode_regulation == "pdc_control"
     assert b.p.etat["u_variateur"] == pytest.approx(b.p._u_pdc())
     assert len({v for t, v in b.ecritures("pdc") if t > t_pdc}) > 3
