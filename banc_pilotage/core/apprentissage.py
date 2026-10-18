@@ -28,6 +28,7 @@ class Apprentissage:
         self.etat = {"en_cours": False, "statut": "", "test": None}
         self.resultats: dict = {}
         self._annule = threading.Event()
+        self._arrets_debut = pilote.arrets
         self._thread: threading.Thread | None = None
 
     # ------------------------------------------------------------- pilotage
@@ -78,7 +79,43 @@ class Apprentissage:
     def annuler(self) -> None:
         self._annule.set()
 
+    def _interrompu(self) -> bool:
+        """Vrai si la séquence doit s'arrêter : annulation demandée, ou arrêt
+        du variateur / repli sûr survenu depuis son démarrage (ARRÊT
+        VARIATEUR, défaut). Sans ce second test, le palier suivant relançait
+        le ventilateur que l'opérateur venait d'arrêter."""
+        if not self._annule.is_set() \
+                and self.pilote.arrets != self._arrets_debut:
+            self.etat["statut"] = "interrompu : arrêt du variateur"
+            self._annule.set()
+        return self._annule.is_set()
+
+    def _statut_annule(self) -> None:
+        """Statut « annulé », sans écraser un motif d'abandon plus parlant
+        (perte de communication, arrêt du variateur)."""
+        if not self.etat["statut"].startswith(("communication perdue",
+                                               "interrompu")):
+            self.etat["statut"] = "annulé"
+
+    def _pause(self, duree_s: float) -> bool:
+        """Attente interruptible. Retourne True si la séquence est interrompue."""
+        fin = time.monotonic() + duree_s
+        while not self._interrompu():
+            reste = fin - time.monotonic()
+            if reste <= 0:
+                return False
+            self._annule.wait(min(reste, 0.1))
+        return True
+
+    def _variateur(self, volts: float) -> None:
+        """Seule voie de commande du ventilateur pendant une séquence : une
+        séquence interrompue ne le relance jamais."""
+        if self._interrompu():
+            return
+        self.pilote.mode_manuel_tension(volts)
+
     def _executer(self, cible, params) -> None:
+        self._arrets_debut = self.pilote.arrets
         # les séquences manœuvrent les vannes en direct (es.*) pour mesurer
         # leurs temps de course : la boucle ne doit pas réaffirmer ses ordres
         self.pilote.suspendre_maintien_tor()
@@ -112,11 +149,8 @@ class Apprentissage:
         ou None si timeout/annulation."""
         t0 = time.monotonic()
         while time.monotonic() - t0 < timeout:
-            if self._annule.is_set():
-                # ne pas écraser un motif d'abandon déjà posé (perte de
-                # communication), qui renseigne mieux que « annulé »
-                if not self.etat["statut"].startswith("communication perdue"):
-                    self.etat["statut"] = "annulé"
+            if self._interrompu():
+                self._statut_annule()
                 return None
             # La boucle publie ses mesures dans pilote.etat ; sur erreur
             # Modbus elle ne les met plus à jour et les séquences liraient
@@ -172,7 +206,7 @@ class Apprentissage:
             if t is None:
                 return False
             # Attendre stabilisation débit (bypass ouvert réduit le Re)
-            time.sleep(2.0)
+            self._pause(2.0)
 
         # 1. Vanne 3 voies sur le diaphragme spécifié
         label = f"positionnement {'ISO (0°)' if vers_iso else 'Miller (90°)'}"
@@ -269,13 +303,13 @@ class Apprentissage:
         t = self._avancer_vanne_3voies(True, "pré-pos butée 0°")
         if t is None:
             return
-        time.sleep(0.5)
+        self._pause(0.5)
 
         t = self._avancer_vanne_3voies(False, "T1 : 0° → 90°")
         if t is None:
             return
         res["T1_0_vers_90_s"] = round(t, 2)
-        time.sleep(0.5)
+        self._pause(0.5)
 
         t = self._avancer_vanne_3voies(True, "T2 : 90° → 0°")
         if t is None:
@@ -300,7 +334,7 @@ class Apprentissage:
                                      "fc_bypass_ferme", "pré-pos fermeture")
         if t is None:
             return
-        time.sleep(0.5)
+        self._pause(0.5)
 
         # T1 : FC1 (fermeture) → FC2 (ouverture)
         t = self._chronometrer_vanne(lambda: es.ecrire_vanne_bypass(True),
@@ -308,7 +342,7 @@ class Apprentissage:
         if t is None:
             return
         res["ouverture_s"] = round(t, 2)
-        time.sleep(0.5)
+        self._pause(0.5)
 
         # T2 : FC2 (ouverture) → FC1 (fermeture)
         t = self._chronometrer_vanne(lambda: es.ecrire_vanne_bypass(False),
@@ -396,7 +430,7 @@ class Apprentissage:
 
             if brutes and "fc_pdc_ferme" in brutes:
                 break
-            time.sleep(0.3)
+            self._pause(0.3)
 
         # Vérifier que les mesures sont disponibles
         if not brutes:
@@ -424,7 +458,7 @@ class Apprentissage:
             position_init = "INTERMÉDIAIRE"
 
         self.etat["statut"] = f"position détectée : {position_init} (FC1={fc_ouvert}, FC2={fc_ferme})"
-        time.sleep(2.0)
+        self._pause(2.0)
 
         # Stratégie selon position initiale
         if position_init == "FERMÉE":
@@ -442,7 +476,7 @@ class Apprentissage:
                 return
             res["ouverture_s"] = round(time.monotonic() - t0, 2)
             self.pilote._pdc_position_estimee = 10.0
-            time.sleep(0.5)
+            self._pause(0.5)
 
             # T2 : fermeture (FC1 → FC2)
             self.pilote.commander_vanne_perte_charge(0.0)
@@ -473,7 +507,7 @@ class Apprentissage:
                 return
             res["fermeture_s"] = round(time.monotonic() - t0, 2)
             self.pilote._pdc_position_estimee = 0.0
-            time.sleep(0.5)
+            self._pause(0.5)
 
             # T2 : ouverture (FC2 → FC1)
             self.pilote.commander_vanne_perte_charge(10.0)
@@ -496,7 +530,7 @@ class Apprentissage:
                                90.0, "pré-pos ouverture (depuis intermédiaire)")
             if t is None:
                 return
-            time.sleep(0.5)
+            self._pause(0.5)
 
             # T1 : fermeture (FC1 → FC2)
             self.pilote.commander_vanne_perte_charge(0.0)
@@ -509,7 +543,7 @@ class Apprentissage:
                 return
             res["fermeture_s"] = round(time.monotonic() - t0, 2)
             self.pilote._pdc_position_estimee = 0.0
-            time.sleep(0.5)
+            self._pause(0.5)
 
             # T2 : ouverture (FC2 → FC1)
             self.pilote.commander_vanne_perte_charge(10.0)
@@ -535,12 +569,12 @@ class Apprentissage:
         """Zéro des capteurs ΔP : moyenne à débit nul (ventilateur arrêté).
         Les offsets sont ensuite soustraits des mesures par la boucle —
         décisif en bas-Re, où le ΔP utile ne vaut que quelques Pa."""
-        self.pilote.mode_manuel_tension(0.0)
+        self._variateur(0.0)
         dt = self.pilote.periode
         t0 = time.monotonic()
         while time.monotonic() - t0 < attente_s:
-            if self._annule.is_set():
-                self.etat["statut"] = "annulé"
+            if self._interrompu():
+                self._statut_annule()
                 return
             self.etat["statut"] = ("extinction de l'écoulement "
                                    f"({attente_s - (time.monotonic() - t0):.0f} s)")
@@ -585,8 +619,8 @@ class Apprentissage:
         miller: list[float] = []
         t0 = time.monotonic()
         while time.monotonic() - t0 < duree_s:
-            if self._annule.is_set():
-                self.etat["statut"] = "annulé"
+            if self._interrompu():
+                self._statut_annule()
                 return None
             brutes = self._brutes()
             iso.append((brutes.get("dp_iso_500") or 0.0)
@@ -616,7 +650,7 @@ class Apprentissage:
             lambda: es.ecrire_vanne_bypass(False),
             "fc_bypass_ferme", "câblage bypass (fermeture)")
         rapport["bypass_fermeture"] = t is not None
-        if self._annule.is_set():
+        if self._interrompu():
             return
 
         # 2) vanne PdC : recopie suivie dans les deux sens
@@ -627,7 +661,7 @@ class Apprentissage:
         self.pilote.commander_vanne_perte_charge(10.0)
         ok = self._attendre_pdc_extreme(10.0, 90.0, "câblage PdC (ouverture)")
         rapport["pdc_ouverture"] = ok is not None
-        if self._annule.is_set():
+        if self._interrompu():
             return
 
         # 3) vanne 3 voies : les trois fins de course sont atteignables
@@ -636,11 +670,11 @@ class Apprentissage:
             t = self._avancer_vanne_3voies(vers_0deg,
                                            f"câblage 3 voies ({nom})")
             rapport[f"v3_{nom}"] = t is not None
-            if self._annule.is_set():
+            if self._interrompu():
                 return
 
         # 4) variateur : RUN + tension -> un écoulement doit apparaître
-        self.pilote.mode_manuel_tension(u_essai)
+        self._variateur(u_essai)
 
         def _flux_present():
             b = self._brutes()
@@ -657,23 +691,23 @@ class Apprentissage:
         mapping = None
         if rapport["variateur_repond"] and rapport.get("v3_0°") \
                 and rapport.get("v3_90°"):
-            if self._annule.wait(3.0):                 # établissement du flux
-                self.etat["statut"] = "annulé"
+            if self._pause(3.0):                 # établissement du flux
+                self._statut_annule()
                 return
             m1 = self._dp_moyens(4.0, "identification : butée 0°")
             if m1 is None:
                 return
             t = self._avancer_vanne_3voies(False,
                                            "identification : vers butée 90°")
-            if self._annule.is_set():
+            if self._interrompu():
                 return
             if t is None:
                 # vanne pas arrivée : diagnostic « vanne », pas « capteurs »
                 # (mesurer m2 ici accuserait à tort les capteurs ΔP)
                 rapport["v3_identification"] = False
             else:
-                if self._annule.wait(2.0):
-                    self.etat["statut"] = "annulé"
+                if self._pause(2.0):
+                    self._statut_annule()
                     return
                 m2 = self._dp_moyens(4.0, "identification : butée 90°")
                 if m2 is None:
@@ -689,7 +723,7 @@ class Apprentissage:
                 rapport["mapping_iso_miller"] = mapping
                 rapport["dp_butee_0deg"] = [round(m1[0], 1), round(m1[1], 1)]
                 rapport["dp_butee_90deg"] = [round(m2[0], 1), round(m2[1], 1)]
-        self.pilote.mode_manuel_tension(0.0)
+        self._variateur(0.0)
 
         rapport["mapping_inverse"] = mapping == "inverse"
         defauts = [k for k, v in rapport.items()
@@ -714,7 +748,7 @@ class Apprentissage:
     def _mesure_palier(self, u: float, fenetre: int, tol: float,
                        timeout: float, statut: str) -> float | None:
         """Applique une tension, attend la stabilisation, renvoie le Re moyen."""
-        self.pilote.mode_manuel_tension(u)
+        self._variateur(u)
         série = []
         ok = self._attendre(
             lambda: (série.append(self.pilote.etat.get("re_mesure") or 0.0)
@@ -778,12 +812,12 @@ class Apprentissage:
             la fin du palier. Retourne (re_moyen, bruit_relatif) ou None si
             annulé."""
             duree = t_palier_s if duree is None else duree
-            self.pilote.commander_variateur_manuel(u)
+            self._variateur(u)
             série: list[float] = []
             t0 = time.monotonic()
             while time.monotonic() - t0 < duree:
-                if self._annule.is_set():
-                    self.etat["statut"] = "annulé"
+                if self._interrompu():
+                    self._statut_annule()
                     return None
                 re_actuel = self.pilote.etat.get("re_mesure") or 0.0
                 série.append(re_actuel)
@@ -832,7 +866,7 @@ class Apprentissage:
             re_a_derniere = re_moy
             pas_precedent = pas_actuel  # Mémoriser pour marge
 
-        self.pilote.commander_variateur_manuel(0.0)
+        self._variateur(0.0)
         u_min_reco = round(min(derniere_stable + pas_precedent, u_depart), 2)
         self.pilote.u_min_ventilateur = u_min_reco
 
@@ -857,21 +891,21 @@ class Apprentissage:
         # Monter par paliers jusqu'à dépasser le seuil
         while u_test < 10.0 and re_precedent < re_seuil_cible:
             u_test = round(u_test + pas_u, 2)
-            self.pilote.commander_variateur_manuel(u_test)
+            self._variateur(u_test)
             self.etat["statut"] = f"recherche u_seuil : test {u_test:.1f}V"
-            time.sleep(8.0)  # Stabilisation
+            self._pause(8.0)  # Stabilisation
 
             # Mesurer Re sur 10 échantillons
             re_mesures = []
             for _ in range(10):
-                if self._annule.is_set():
-                    self.etat["statut"] = "annulé"
+                if self._interrompu():
+                    self._statut_annule()
                     break
                 re_actuel = self.pilote.etat.get("re_mesure", 0.0)
                 re_mesures.append(re_actuel)
                 time.sleep(dt)
 
-            if self._annule.is_set():
+            if self._interrompu():
                 break
 
             if len(re_mesures) >= 5:
@@ -905,14 +939,14 @@ class Apprentissage:
 
         if t is not None:
             # Variateur à u_min (mesuré en Phase 1)
-            self.pilote.commander_variateur_manuel(u_min_reco)
+            self._variateur(u_min_reco)
 
             # PDC ouverte au départ
             self.pilote.commander_vanne_perte_charge_pct(100.0)
             ok = self._attendre_pdc_extreme(10.0, 90.0, "ouverture PDC")
 
             if ok is not None:
-                time.sleep(5.0)  # Stabilisation initiale
+                self._pause(5.0)  # Stabilisation initiale
 
                 # Descendre PDC par paliers adaptatifs : 10% au-dessus de 50%, 2% en dessous
                 pdc_derniere_stable = 100.0
@@ -923,19 +957,19 @@ class Apprentissage:
                 while pdc_pct > 0:
                     self.pilote.commander_vanne_perte_charge_pct(pdc_pct)
                     self.etat["statut"] = f"test PDC {pdc_pct:.0f}% (recherche min)"
-                    time.sleep(12.0)  # Stabilisation palier (procédé lent, cohérent avec Phase 1)
+                    self._pause(12.0)  # Stabilisation palier (procédé lent, cohérent avec Phase 1)
 
                     # Mesurer Re sur 10 échantillons
                     re_mesures = []
                     for _ in range(10):
-                        if self._annule.is_set():
-                            self.etat["statut"] = "annulé"
+                        if self._interrompu():
+                            self._statut_annule()
                             break
                         re_actuel = self.pilote.etat.get("re_mesure", 0.0)
                         re_mesures.append(re_actuel)
                         time.sleep(dt)
 
-                    if self._annule.is_set():
+                    if self._interrompu():
                         break
 
                     if len(re_mesures) >= 5:
@@ -987,7 +1021,7 @@ class Apprentissage:
 
                     if t is not None:
                         # Attendre stabilisation circuit
-                        time.sleep(5.0)
+                        self._pause(5.0)
 
                         # Montée progressive de u_seuil à 10V par paliers de 0.3V
                         pas_montee = 0.3
@@ -1015,7 +1049,7 @@ class Apprentissage:
                                 break
 
         # Arrêter variateur
-        self.pilote.commander_variateur_manuel(0.0)
+        self._variateur(0.0)
 
         self.resultats["re_mapping"] = {
             "u_min_exploitable_v": u_min_reco,
@@ -1078,12 +1112,12 @@ class Apprentissage:
             la fin du palier. Retourne (re_moyen, bruit_relatif) ou None si
             annulé."""
             duree = t_palier_s if duree is None else duree
-            self.pilote.commander_variateur_manuel(u)
+            self._variateur(u)
             série: list[float] = []
             t0 = time.monotonic()
             while time.monotonic() - t0 < duree:
-                if self._annule.is_set():
-                    self.etat["statut"] = "annulé"
+                if self._interrompu():
+                    self._statut_annule()
                     return None
                 re_actuel = self.pilote.etat.get("re_mesure") or 0.0
                 série.append(re_actuel)
@@ -1126,7 +1160,7 @@ class Apprentissage:
             re_a_derniere = re_moy
             pas_precedent = pas_actuel
 
-        self.pilote.commander_variateur_manuel(0.0)
+        self._variateur(0.0)
         u_min_reco = round(min(derniere_stable + pas_precedent, u_depart), 2)
         self.pilote.u_min_ventilateur = u_min_reco
 
@@ -1167,7 +1201,7 @@ class Apprentissage:
                 break
 
         # Arrêter variateur avant Phase 2
-        self.pilote.commander_variateur_manuel(0.0)
+        self._variateur(0.0)
 
         # ---- Phase 2 : mesure u_seuil ----
         self.etat["statut"] = "mesure u_seuil (tension au seuil bas-Re)"
@@ -1179,20 +1213,20 @@ class Apprentissage:
 
         while u_test < 10.0 and re_precedent < re_seuil_cible:
             u_test = round(u_test + pas_u, 2)
-            self.pilote.commander_variateur_manuel(u_test)
+            self._variateur(u_test)
             self.etat["statut"] = f"recherche u_seuil : test {u_test:.1f}V"
-            time.sleep(8.0)
+            self._pause(8.0)
 
             re_mesures = []
             for _ in range(10):
-                if self._annule.is_set():
-                    self.etat["statut"] = "annulé"
+                if self._interrompu():
+                    self._statut_annule()
                     break
                 re_actuel = self.pilote.etat.get("re_mesure", 0.0)
                 re_mesures.append(re_actuel)
                 time.sleep(dt)
 
-            if self._annule.is_set():
+            if self._interrompu():
                 break
 
             if len(re_mesures) >= 5:
@@ -1216,12 +1250,12 @@ class Apprentissage:
         paliers_pdc = []  # Table de gains PDC : [(pdc_pct, re), ...]
 
         if t is not None:
-            self.pilote.commander_variateur_manuel(u_min_reco)
+            self._variateur(u_min_reco)
             self.pilote.commander_vanne_perte_charge_pct(100.0)
             ok = self._attendre_pdc_extreme(10.0, 90.0, "ouverture PDC")
 
             if ok is not None:
-                time.sleep(5.0)
+                self._pause(5.0)
                 pdc_derniere_stable = 100.0
                 re_derniere_stable = None
                 pdc_pct = 100.0
@@ -1230,18 +1264,18 @@ class Apprentissage:
                 while pdc_pct > 0:
                     self.pilote.commander_vanne_perte_charge_pct(pdc_pct)
                     self.etat["statut"] = f"test PDC {pdc_pct:.0f}% (recherche min)"
-                    time.sleep(12.0)
+                    self._pause(12.0)
 
                     re_mesures = []
                     for _ in range(10):
-                        if self._annule.is_set():
-                            self.etat["statut"] = "annulé"
+                        if self._interrompu():
+                            self._statut_annule()
                             break
                         re_actuel = self.pilote.etat.get("re_mesure", 0.0)
                         re_mesures.append(re_actuel)
                         time.sleep(dt)
 
-                    if self._annule.is_set():
+                    if self._interrompu():
                         break
 
                     if len(re_mesures) >= 5:
@@ -1267,7 +1301,7 @@ class Apprentissage:
                 pdc_min_exploitable = min(pdc_derniere_stable + pas_pdc_precedent, 100.0)
                 re_min_exploitable = re_derniere_stable
 
-        self.pilote.commander_variateur_manuel(0.0)
+        self._variateur(0.0)
 
         # Sauvegarder résultats Miller
         self.resultats["re_mapping_miller"] = {
@@ -1326,12 +1360,12 @@ class Apprentissage:
             """Applique u, attend duree, mesure sur la fin. Retourne
             (re_moyen, bruit_relatif) ou None si annulé."""
             duree = t_palier_s if duree is None else duree
-            self.pilote.commander_variateur_manuel(u)
+            self._variateur(u)
             série: list[float] = []
             t0 = time.monotonic()
             while time.monotonic() - t0 < duree:
-                if self._annule.is_set():
-                    self.etat["statut"] = "annulé"
+                if self._interrompu():
+                    self._statut_annule()
                     return None
                 re_actuel = self.pilote.etat.get("re_mesure") or 0.0
                 série.append(re_actuel)
@@ -1370,7 +1404,7 @@ class Apprentissage:
         # capteur ΔP → re_mesure proche de 0 pendant tous les paliers ISO !
         self.pilote._position_initiale_lue = False
 
-        time.sleep(5.0)  # Stabilisation circuit
+        self._pause(5.0)  # Stabilisation circuit
 
         # ---- Phase 4a : descente ISO (pour couvrir en dessous du seuil 5000 Re) ----
         # Objectif : étendre la table ISO jusqu'à ~4000 Re pour créer un
@@ -1421,8 +1455,8 @@ class Apprentissage:
                     break
 
         # Arrêter variateur avant montée
-        self.pilote.commander_variateur_manuel(0.0)
-        time.sleep(3.0)  # Pause avant de relancer la montée
+        self._variateur(0.0)
+        self._pause(3.0)  # Pause avant de relancer la montée
 
         # ---- Phase 4b : montée progressive u_seuil → 10V ----
         # Pas adaptatif : gros pas en bas (montée rapide), pas fin en haut (précision saturation)
@@ -1469,7 +1503,7 @@ class Apprentissage:
             if paliers_plage_haute and u == paliers_plage_haute[-1][0]:
                 break
 
-        self.pilote.commander_variateur_manuel(0.0)
+        self._variateur(0.0)
 
         # Sauvegarder résultats ISO
         self.resultats["re_mapping_iso"] = {
@@ -1501,7 +1535,7 @@ class Apprentissage:
         fenêtre = max(6, int(5.0 / dt))      # ~5 s de mesures stables
 
         # 1) stabilisation au point de départ U1
-        self.pilote.mode_manuel_tension(u1)
+        self._variateur(u1)
         série = []
         ok = self._attendre(
             lambda: (série.append(self.pilote.etat.get("re_mesure") or 0.0)
@@ -1514,10 +1548,10 @@ class Apprentissage:
         # 2) échelon U1 -> U2, enregistrement
         t0 = time.monotonic()
         points = []                          # (t, re, dp)
-        self.pilote.mode_manuel_tension(u2)
+        self._variateur(u2)
         while time.monotonic() - t0 < duree_max:
-            if self._annule.is_set():
-                self.etat["statut"] = "annulé"
+            if self._interrompu():
+                self._statut_annule()
                 return
             e = self.pilote.etat
             points.append((time.monotonic() - t0,

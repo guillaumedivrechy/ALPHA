@@ -45,6 +45,18 @@ MODE_PDC_CONTROL = "pdc_control"  # Re < freq_min : bypass ouvert, Miller, tensi
 _U_MIN_VENTILATEUR_FALLBACK = 0.3  # V - Tension minimale par défaut si non configurée
 _RATIO_ANCRAGE_CONSIGNE_INTERNE = 0.2  # Ratio pour initialisation consigne filtrée (20% de la cible)
 
+def _seuil_saturation(valeur: float) -> float:
+    """Seuil de saturation ΔP, en fraction de la pleine échelle. La lecture
+    est écrêtée à la pleine échelle (io_banc/wago.py) : un seuil à 1 ou plus
+    ne serait jamais franchi, et toute la protection de saturation (plafond
+    de commande, arrêt des paliers d'apprentissage) serait inopérante."""
+    if 0.0 < valeur < 1.0:
+        return valeur
+    log.warning("saturation_dp_relative = %s hors ]0 ; 1[ : 0,95 utilisé "
+                "(la lecture ΔP est écrêtée à la pleine échelle)", valeur)
+    return 0.95
+
+
 # Mappings Enum → string pour publication état vannes vers IHM
 _MAP_DIAPHRAGME = {
     PositionDiaphragme.ISO: "iso",
@@ -352,7 +364,8 @@ class Pilote:
         self.echelon_reinit_ff = r.get("echelon_reinit_ff_relatif", 0.2)
         # fraction de la pleine échelle du capteur ΔP au-delà de laquelle
         # la mesure est considérée saturée (drapeau dp_sature)
-        self.saturation_dp = r.get("saturation_dp_relative", 0.9)
+        self.saturation_dp = _seuil_saturation(
+            r.get("saturation_dp_relative", 0.9))
         # fenêtre de moyennage du Re pour juger la convergence. Le bruit des
         # capteurs ΔP est du même ordre que la tolérance : un critère sur
         # échantillon isolé exige N tirages consécutifs dans la bande et
@@ -423,6 +436,7 @@ class Pilote:
         self.regulation_active = False
         self.mode_manuel = False
         self.tension_manuelle = 0.0
+        self.arrets = 0                    # arrêts et replis sûrs (cf. _latcher_arret)
 
         # séquence : profil (t_s, re_cible) suivi par la boucle, ou None
         self._sequence: dict | None = None
@@ -691,15 +705,38 @@ class Pilote:
             self.journal.ouvrir(time.monotonic())
         return None
 
-    def arreter_regulation(self) -> None:
-        """Arrêt du variateur : coupe la régulation, le mode manuel ET la
-        séquence (sinon la boucle réappliquerait une consigne au cycle
-        suivant — inacceptable pour un bouton d'arrêt)."""
+    def _latcher_arret(self) -> None:
+        """Coupe régulation, mode manuel et séquence, et compte l'arrêt.
+
+        Le mode manuel est coupé lui aussi : sinon, une fois le défaut
+        disparu (communication revenue, PT100 rebranchée), la boucle
+        réappliquait d'elle-même la tension manuelle. Le compteur `arrets`
+        permet aux séquences d'apprentissage, qui pilotent le ventilateur en
+        manuel, de détecter un arrêt survenu pendant leur déroulement."""
         with self._verrou:
             self.regulation_active = False
             self.mode_manuel = False
             self.tension_manuelle = 0.0
             self._sequence = None
+            self.arrets += 1
+
+    def _repli_sur(self) -> None:
+        """Repli sûr latché sur défaut : variateur 0 V et RUN retiré, après
+        avoir coupé toute commande (une écriture refusée laisse au moins
+        l'arrêt latché ; la boucle retentera au cycle suivant)."""
+        self._latcher_arret()
+        self.etat.update({"regulation": False, "manuel": False,
+                          "u_variateur": 0.0, "convergee": False,
+                          "sequence": None})
+        self.es.ecrire_variateur(0.0)
+        self.es.ecrire_variateur_run(False)
+        self._run_actif = False
+
+    def arreter_regulation(self) -> None:
+        """Arrêt du variateur : coupe la régulation, le mode manuel ET la
+        séquence (sinon la boucle réappliquerait une consigne au cycle
+        suivant — inacceptable pour un bouton d'arrêt)."""
+        self._latcher_arret()
         self._echelon_depuis = None        # PI remis à zéro : ne pas conserver
         self.etat["sequence"] = None
         self._historique_re.clear()
@@ -790,8 +827,8 @@ class Pilote:
                 "tolerance_consigne_v", self.tol_suivi_variateur)
             self.echelon_reinit_ff = r.get("echelon_reinit_ff_relatif",
                                            self.echelon_reinit_ff)
-            self.saturation_dp = r.get("saturation_dp_relative",
-                                       self.saturation_dp)
+            self.saturation_dp = _seuil_saturation(
+                r.get("saturation_dp_relative", self.saturation_dp))
             self.re_max_iso = r.get("re_max_iso", self.re_max_iso)
             self.tau_consigne = r.get("tau_consigne_s", self.tau_consigne)
             self.t_min_c = r.get("temperature_min_c", self.t_min_c)
@@ -1104,17 +1141,17 @@ class Pilote:
                     exc = f"erreur interne ({type(exc).__name__}: {exc})"
                 self.etat["erreur_com"] = str(exc)
                 # état sûr documenté : variateur 0 V ET ordre RUN retiré.
-                # On latche l'arrêt (regulation_active=False), comme les
+                # On latche l'arrêt (régulation ET mode manuel), comme les
                 # défauts variateur/vanne, pour ne pas relancer la soufflerie
                 # tout seul dès que la communication revient.
-                with self._verrou:
-                    self.regulation_active = False
+                self._latcher_arret()
                 # l'état publié doit dire la vérité : le cycle ayant échoué
                 # avant sa mise à jour, l'IHM continuait d'afficher
                 # « RÉGULATION » et une tension d'avant la coupure, alors
                 # que le banc venait d'être arrêté et verrouillé.
-                self.etat.update({"regulation": False, "convergee": False,
-                                  "u_variateur": 0.0, "manoeuvre": None})
+                self.etat.update({"regulation": False, "manuel": False,
+                                  "convergee": False, "u_variateur": 0.0,
+                                  "manoeuvre": None, "sequence": None})
                 try:
                     self.es.ecrire_variateur(0.0)
                 except (IOError, RuntimeError, OSError):
@@ -1295,11 +1332,7 @@ class Pilote:
                 mesures["temperature"] = T
                 self.etat["mesures_brutes"] = dict(mesures)
             else:
-                self.es.ecrire_variateur(0.0)
-                self.es.ecrire_variateur_run(False)
-                self._run_actif = False
-                with self._verrou:
-                    self.regulation_active = False
+                self._repli_sur()
                 self.etat.update({
                     "defaut_capteur": f"température invraisemblable ({T:.1f} °C, "
                                       f"attendu {self.t_min_c:.0f} à "
@@ -1339,11 +1372,7 @@ class Pilote:
         # Plage physique réaliste : -2000 à +5000 Pa effectifs (≈ 800-1050 mbar abs).
         # Hors bornes = capteur saturé, câblage, ou alimentation module défaillante.
         if not (-2000 <= p_amont <= 5000):
-            self.es.ecrire_variateur(0.0)
-            self.es.ecrire_variateur_run(False)
-            self._run_actif = False
-            with self._verrou:
-                self.regulation_active = False
+            self._repli_sur()
             self.etat.update({
                 "defaut_capteur": f"pression amont invraisemblable ({p_amont:.0f} Pa effectifs, "
                                   f"attendu -2000 à +5000 Pa) — capteur défaillant, "
@@ -1590,11 +1619,7 @@ class Pilote:
             elif maintenant > m["t_max"]:
                 # DÉFAUT VANNE : fin de course jamais atteinte -> repli sûr
                 # (variateur 0 V ET ordre RUN retiré, comme sur défaut variateur)
-                self.es.ecrire_variateur(0.0)
-                self.es.ecrire_variateur_run(False)
-                self._run_actif = False
-                with self._verrou:
-                    self.regulation_active = False
+                self._repli_sur()
                 cible = m["fc_attendue"] or f"butée {m['angle_attendu']}°"
                 self.etat.update({
                     "defaut_vanne": f"{m['motif']} : {cible} non atteinte "
@@ -1652,11 +1677,7 @@ class Pilote:
         # ΔP qui ne correspond plus à la position réelle de la vanne -> repli
         # sûr + latch (l'opérateur vérifie la vanne puis relance).
         if self.etat["incoherence_vanne"] and regul:
-            self.es.ecrire_variateur(0.0)
-            self.es.ecrire_variateur_run(False)
-            self._run_actif = False
-            with self._verrou:
-                self.regulation_active = False
+            self._repli_sur()
             self.etat.update({
                 "defaut_vanne": "position vanne 3 voies inexploitable hors "
                                 "manœuvre (aucune butée franche lue) — "
@@ -1704,15 +1725,19 @@ class Pilote:
                 self._cycles_signal_fige += 1
                 # Persistance : 10 cycles consécutifs (2s à 5 Hz) avant arrêt
                 if self._cycles_signal_fige >= 10:
-                    self.es.ecrire_variateur(0.0)
-                    self.es.ecrire_variateur_run(False)
-                    self._run_actif = False
-                    with self._verrou:
-                        self.regulation_active = False
+                    self._repli_sur()
+                    if dp_final >= 0.99 * self._dp_pleine_echelle[cle_dp]:
+                        # signal figé EN BUTÉE : le capteur est écrêté à sa
+                        # pleine échelle, il n'est pas défaillant
+                        motif = (f"ΔP en butée de pleine échelle ({dp_final:.0f} Pa) "
+                                 f"— débit au-delà de la plage du capteur {cle_dp} ; "
+                                 "réduire la consigne puis relancer")
+                    else:
+                        motif = (f"signal ΔP figé (variance={variance_dp:.4f} Pa² < 0.01 Pa²) "
+                                 f"— capteur défaillant ou câblage ; vérifier le capteur "
+                                 f"{cle_dp} puis relancer")
                     self.etat.update({
-                        "defaut_capteur": f"signal ΔP figé (variance={variance_dp:.4f} Pa² < 0.01 Pa²) "
-                                         f"— capteur défaillant ou câblage ; vérifier le capteur "
-                                         f"{cle_dp} puis relancer",
+                        "defaut_capteur": motif,
                         "regulation": False, "u_variateur": 0.0,
                         "convergee": False,
                     })
@@ -1730,11 +1755,7 @@ class Pilote:
         # Valeurs négatives acceptées (bruit, offset capteur) mais limitées à -50 Pa.
         # Hors bornes = capteur saturé, câblage, ou signal aberrant.
         if not (-50 <= dp_final <= 550):
-            self.es.ecrire_variateur(0.0)
-            self.es.ecrire_variateur_run(False)
-            self._run_actif = False
-            with self._verrou:
-                self.regulation_active = False
+            self._repli_sur()
             self.etat.update({
                 "defaut_capteur": f"ΔP invraisemblable ({dp_final:.1f} Pa, attendu -50 à +550 Pa) — "
                                   f"capteur saturé, câblage ou signal aberrant ; "
@@ -1798,11 +1819,7 @@ class Pilote:
         # déclarée "inverse" en config : un fil coupé se lit donc comme un
         # défaut, et non comme une absence de défaut.
         if mesures.get("defaut_variateur"):
-            self.es.ecrire_variateur(0.0)
-            self.es.ecrire_variateur_run(False)
-            self._run_actif = False
-            with self._verrou:
-                self.regulation_active = False
+            self._repli_sur()
             self.etat.update({
                 "defaut_variateur": "défaut signalé par le 3G3MV "
                                     "(relais MA/MB) — acquitter sur le "
@@ -1878,11 +1895,7 @@ class Pilote:
                 self._cycles_fc_incoherents += 1
                 # Persistance : 3 cycles consécutifs avant arrêt
                 if self._cycles_fc_incoherents >= 3:
-                    self.es.ecrire_variateur(0.0)
-                    self.es.ecrire_variateur_run(False)
-                    self._run_actif = False
-                    with self._verrou:
-                        self.regulation_active = False
+                    self._repli_sur()
                     self.etat.update({
                         "defaut_vanne": f"Fins de course incohérents : "
                                        f"diaphragme={etat_vannes.diaphragme.value}, "
@@ -2033,11 +2046,7 @@ class Pilote:
                 self._cycles_attente_vannes += 1
                 if self._cycles_attente_vannes > self._timeout_vannes_cycles:
                     # Timeout dépassé : arrêt sécurisé
-                    self.es.ecrire_variateur(0.0)
-                    self.es.ecrire_variateur_run(False)
-                    self._run_actif = False
-                    with self._verrou:
-                        self.regulation_active = False
+                    self._repli_sur()
 
                     # Diagnostic détaillé
                     msg_timeout = []

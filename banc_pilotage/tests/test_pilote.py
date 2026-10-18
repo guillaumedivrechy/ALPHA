@@ -569,7 +569,7 @@ def test_dp_sature_signale():
     """ΔP proche de la pleine échelle du capteur : le Re calculé plafonne au
     capteur, pas au banc — signalé (après debounce) pour que l'opérateur
     comprenne une non-convergence sur consigne trop haute.
-    MODIFIÉ : saturation_dp_relative=1.0, donc seuil à 500 Pa (100% de 500)."""
+    (500,1 Pa : au-delà de tout seuil de saturation valide, < 100 %)."""
     # fc_3voies_0=True seule -> position ISO (0°)
     es = StubES({"temperature": 20.0, "fc_3voies_0": True,
                  "dp_iso_500": 500.1})              # > 100 % de 500 Pa
@@ -647,7 +647,7 @@ def test_dp_sature_plafonne_la_tension():
     saturation dure. RÉGRESSION : le plafond était latché jusqu'à la consigne
     suivante (Re 23000 tenu à 21000 après un dépassement) ; il se relâche
     désormais une fois la mesure revenue sous le seuil.
-    MODIFIÉ : saturation_dp_relative=1.0, donc seuil à 500 Pa (100% de 500)."""
+    (500,1 Pa : au-delà de tout seuil de saturation valide, < 100 %)."""
     pilote, es = _pilote_en_position("fc_3voies_0")
     pilote.bas_re_actif = False
     pilote.table_gains = TableGains([(1.0, 3000.0), (9.0, 30000.0)])
@@ -987,3 +987,69 @@ def test_seuil_bas_re_derive_de_la_table_miller():
     pilote.table_gains_bas_re = TableGains([(1.5, 2000.0), (5.0, 7000.0)])
     assert pilote._seuil_bas_re() == pytest.approx(
         2000.0 * pilote.marge_seuil_bas_re)
+
+
+# ---- replis sûrs et arrêt total (revue complète) ---------------------------
+
+def test_repli_sur_coupe_aussi_le_mode_manuel():
+    """Un défaut latché doit couper le mode manuel : sinon, le défaut disparu
+    (PT100 rebranchée, communication revenue), la boucle réappliquait
+    d'elle-même la tension manuelle."""
+    pilote, es = _pilote_en_position("fc_3voies_0")
+    pilote.mode_manuel_tension(3.0)
+    pilote._cycle()
+    assert es.variateur[-1] == 3.0
+    es.mesures["temperature"] = -60.0                 # sonde coupée
+    for _ in range(max(3, int(2.0 / pilote.periode)) + 2):
+        pilote._cycle()
+    assert pilote.etat["defaut_capteur"]
+    es.mesures["temperature"] = 20.0                  # défaut disparu
+    for _ in range(3):
+        pilote._cycle()
+    assert pilote.mode_manuel is False
+    assert es.variateur[-1] == 0.0
+    assert es.run[-1] is False
+
+
+def test_apprentissage_ne_relance_pas_le_ventilateur_apres_un_arret():
+    """ARRÊT VARIATEUR pendant une séquence : le palier suivant ne doit pas
+    relancer le ventilateur (constaté : 5 V et RUN 25 s après l'arrêt), et
+    les attentes doivent s'interrompre."""
+    from core.apprentissage import Apprentissage
+    pilote, es = _pilote_en_position("fc_3voies_0")
+    app = Apprentissage(pilote, CFG, "inutilise.json")
+    app._arrets_debut = pilote.arrets
+    app._variateur(4.0)
+    assert pilote.mode_manuel and pilote.tension_manuelle == 4.0
+    pilote.arreter_regulation()                       # bouton ARRÊT
+    t0 = time.monotonic()
+    assert app._pause(10.0) is True                   # attente interrompue
+    assert time.monotonic() - t0 < 1.0
+    app._variateur(5.0)                               # palier suivant
+    assert pilote.mode_manuel is False
+    assert pilote.tension_manuelle == 0.0
+    assert app.etat["statut"].startswith("interrompu")
+
+
+def test_saturation_detectee_malgre_l_ecretage_du_capteur():
+    """La lecture ΔP est écrêtée à la pleine échelle (500 Pa) : avec un seuil
+    de saturation à 100 %, rien ne se déclenchait jamais. Le seuil est borné
+    sous 1 et un ΔP en butée est vu saturé."""
+    cfg = json.loads(json.dumps(CFG))
+    cfg["regulation"]["saturation_dp_relative"] = 1.0
+    es = StubES({"temperature": 20.0, "fc_3voies_0": True,
+                 "fc_bypass_ferme": True, "fc_pdc_ouvert": True,
+                 "dp_iso_500": 300.0})
+    pilote = Pilote(Banc(cfg), es, cfg)
+    assert pilote.saturation_dp < 1.0
+    pilote.bas_re_actif = False
+    pilote.table_gains = TableGains([(1.0, 3000.0), (9.0, 30000.0)])
+    pilote.definir_consigne(20000.0, "conduite")
+    pilote.demarrer_regulation()
+    for _ in range(15):
+        pilote._cycle()
+    es.mesures["dp_iso_500"] = 500.0                  # capteur écrêté
+    for _ in range(max(3, int(1.0 / pilote.periode)) + 1):
+        pilote._cycle()
+    assert pilote.etat["dp_sature"] is True
+    assert pilote.etat["plafond_u_sature"] is not None

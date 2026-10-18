@@ -63,7 +63,7 @@
     "tolerance_convergence_relative": 0.01,
     "echelon_reinit_ff_relatif": 0.2,
     "tau_consigne_s": 0.39,
-    "saturation_dp_relative": 1.0,
+    "saturation_dp_relative": 0.95,
     "fenetre_convergence_s": 5.0,
     "temperature_min_c": 2.0,
     "temperature_max_c": 45.0,

@@ -43,6 +43,11 @@ log = logging.getLogger(__name__)
 def _positif(v, _):
     return None if v > 0 else "doit être strictement positif"
 
+def _seuil_saturation(v, _):
+    # la lecture est écrêtée à la pleine échelle du capteur : un seuil à 100 %
+    # ou plus ne serait jamais franchi
+    return None if 0 < v < 1 else "doit être compris entre 0 et 1 (exclus)"
+
 def _positif_ou_nul(v, _):
     return None if v >= 0 else "doit être positif ou nul"
 
@@ -3062,7 +3067,7 @@ class Application(QMainWindow):
             (("regulation","temperature_max_c"),       "PT100 maxi",       "°C",
              "{:.1f}", None),
             (("regulation","saturation_dp_relative"),  "Seuil ΔP saturé",  "×",
-             "{:.2f}", _positif),
+             "{:.2f}", _seuil_saturation),
             (("regulation","recul_saturation_v_par_s"),"Recul si saturé", "V/s",
              "{:.2f}", _positif),
         ], col=0, row=7)
@@ -3108,10 +3113,19 @@ class Application(QMainWindow):
             u_aff = round(max(0.0, min(u_courant, 10.0)), 1)
             self._slider_u.setValue(round(u_aff * 10))
             self._inp_vman.setText(f"{u_aff:.1f}")
-            pdc_pct = round(max(0.0, min(pdc_v_courant * 10.0, 100.0)))
-            self._slider_pdc.setValue(pdc_pct)
-            self._inp_pdc.setText(str(pdc_pct))
-            self._lbl_pdc_v.setText(f"≙ {pdc_v_courant:.1f} V — 0 V = fermée")
+            # le champ est en % de FERMETURE (0 = ouverte), avec la même
+            # échelle que _on_pdc_slider : le pré-remplir avec l'ouverture
+            # faisait fermer la vanne au premier « Appliquer »
+            plage = self._pdc_umax - self._pdc_umin
+            pct_ferm = (self._pdc_umax - pdc_v_courant) / plage * 100.0 \
+                if plage > 0 else 0.0
+            pct_ferm = round(max(0.0, min(pct_ferm, 100.0)))
+            self._slider_pdc.blockSignals(True)
+            self._slider_pdc.setValue(pct_ferm)
+            self._slider_pdc.blockSignals(False)
+            self._inp_pdc.setText(str(pct_ferm))
+            self._lbl_pdc_v.setText(
+                f"≙ {pdc_v_courant:.2f} V — {self._pdc_umin:.1f}V = fermée")
         elif mode == "asservi":
             self.pilote.mode_asservi()
         elif mode == "sequence":
@@ -3174,22 +3188,28 @@ class Application(QMainWindow):
             except ValueError:
                 pass
 
-        # PdC toujours
-        try:
-            pct_ferm = float(self._inp_pdc.text().replace(",", "."))
-            pct_ferm = min(max(pct_ferm, 0.0), 100.0)
-            # Convertir % fermeture → % ouverture pour le pilote
-            pct_ouv = 100.0 - pct_ferm
-            self.pilote.commander_vanne_perte_charge_pct(pct_ouv)
-            self._log(f"PdC → {pct_ferm:.0f} % fermeture", "#FF9900")
-            self._dirty["pdc"] = False
-        except ValueError:
-            pass
+        # PdC : en manuel seulement. En asservi, la boucle la pilote (et la
+        # pré-positionne avant les manœuvres) : la commander ici court-
+        # circuitait ce pré-positionnement de sécurité.
+        if self._mode == "manuel":
+            try:
+                pct_ferm = float(self._inp_pdc.text().replace(",", "."))
+                pct_ferm = min(max(pct_ferm, 0.0), 100.0)
+                # Convertir % fermeture → % ouverture pour le pilote
+                pct_ouv = 100.0 - pct_ferm
+                self.pilote.commander_vanne_perte_charge_pct(pct_ouv)
+                self._log(f"PdC → {pct_ferm:.0f} % fermeture", "#FF9900")
+                self._dirty["pdc"] = False
+            except ValueError:
+                pass
 
         self._update_dirty()
 
     def _arreter(self) -> None:
-        # coupe régulation ET mode manuel (le pilote remet aussi RUN à 0)
+        # coupe régulation ET mode manuel (le pilote remet aussi RUN à 0),
+        # et toute séquence d'apprentissage en cours : elle relancerait
+        # sinon le ventilateur à son palier suivant
+        self.apprentissage.annuler()
         self.pilote.arreter_regulation()
         self._log("ARRÊT VARIATEUR", COLORS["error"])
 
