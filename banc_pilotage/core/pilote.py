@@ -13,9 +13,7 @@ Séquence quand l'opérateur valide une consigne Re :
 """
 
 from __future__ import annotations
-import json
 import logging
-import os
 import threading
 import time
 from pathlib import Path
@@ -33,8 +31,15 @@ from core.gestion_modes import (
 )
 from core.commandes_vannes import calculer_commandes_vannes
 from core.table_gains_pdc import TableGainsPDC
+from core.fichiers import ecrire_json_atomique
 
 log = logging.getLogger(__name__)
+
+# Dossier du programme : racine des chemins relatifs de données (journaux,
+# état du banc, apprentissages, log de diagnostic). Variable de module pour
+# que les tests la redirigent vers un dossier temporaire au lieu d'écrire
+# dans l'arborescence des sources.
+RACINE = Path(__file__).resolve().parent.parent
 
 # Modes de régulation (utilisés comme clés internes)
 MODE_NORMAL_HIGH = "normal_high"  # Re ≥ 5000 : bypass fermé, ISO, PI → tension
@@ -537,21 +542,20 @@ class Pilote:
         j = cfg.get("journal", {})
         dossier_j = Path(j.get("dossier", "journaux"))
         if not dossier_j.is_absolute():
-            dossier_j = Path(__file__).resolve().parent.parent / dossier_j
+            dossier_j = RACINE / dossier_j
         self.journal = JournalEssai(dossier_j, j.get("periode_s", 1.0)) \
             if j.get("actif", True) else None
 
         self._chemin_etat = Path(cfg.get("fichier_etat", "etat_banc.json"))
         if not self._chemin_etat.is_absolute():
             # relatif au dossier du programme, pas au répertoire de lancement
-            self._chemin_etat = (Path(__file__).resolve().parent.parent
-                                 / self._chemin_etat)
+            self._chemin_etat = RACINE / self._chemin_etat
 
         # ===== NOUVEAU GESTIONNAIRE APPRENTISSAGES =====
         # Architecture fichiers séparés (miller.json, iso.json) pour éviter
         # les pertes de données lors des sauvegardes successives
-        chemin_racine = Path(__file__).resolve().parent.parent
-        self.gestionnaire_apprentissages = GestionnaireApprentissages(chemin_racine)
+        self.gestionnaire_apprentissages = GestionnaireApprentissages(
+            RACINE, chemin_etat=self._chemin_etat)
 
         # Charger tous les apprentissages (fusion automatique depuis fichiers séparés)
         self._gain_re_par_volt: float | None = None
@@ -596,9 +600,13 @@ class Pilote:
         # ===== LOGGER DIAGNOSTIC RÉGULATION =====
         # Logger CSV pour diagnostic approfondi (regulation_debug.csv)
         # Activé/désactivé via IHM ou commande
-        self.logger_regulation = LoggerRegulation()
-        # TEMPORAIRE : Activer automatiquement au démarrage pour diagnostic
-        self.logger_regulation.activer()
+        # Désactivé par défaut (journal.diagnostic_regulation) : il écrit une
+        # ligne CSV à chaque cycle, sans limite de taille, dans le dossier du
+        # programme.
+        self.logger_regulation = LoggerRegulation(
+            RACINE / "regulation_debug.csv")
+        if j.get("diagnostic_regulation", False):
+            self.logger_regulation.activer()
 
         # ===== NOUVEAUX MODULES REFACTORÉS =====
         # Modes précédents (pour hystérésis)
@@ -1126,29 +1134,9 @@ class Pilote:
                 if self.u_min_ventilateur:
                     donnees["u_min_ventilateur_v"] = self.u_min_ventilateur
 
-                # Écriture atomique via fichier temporaire pour éviter corruption
-                import tempfile
-                fd, tmp_path = tempfile.mkstemp(
-                    dir=self._chemin_etat.parent,
-                    prefix='.tmp_etat_',
-                    suffix='.json',
-                    text=True
-                )
-                try:
-                    with os.fdopen(fd, 'w', encoding='utf-8') as f:
-                        json.dump(donnees, f, indent=2)
-                    # Replace atomique (POSIX et Windows >= Vista)
-                    Path(tmp_path).replace(self._chemin_etat)
-                except (OSError, IOError, ValueError) as e:
-                    # Nettoyer le fichier temporaire en cas d'erreur
-                    log.error(f"Erreur sauvegarde état : {e}")
-                    try:
-                        os.unlink(tmp_path)
-                    except OSError:  # Spécifier exception système
-                        pass  # Best-effort cleanup
-                    raise
-            except OSError:
-                pass
+                ecrire_json_atomique(self._chemin_etat, donnees)
+            except (OSError, ValueError) as e:
+                log.error(f"Erreur sauvegarde état : {e}")
 
     def _boucle(self) -> None:
         """Boucle de régulation principale (thread dédié)."""

@@ -297,8 +297,28 @@ def test_config_ecrite_avec_saut_de_ligne_final():
     et pollue les diffs."""
     src_appr = (RACINE / "core" / "apprentissage.py").read_text(encoding="utf-8")
     for nom, src in (("gui/app.py", SRC_GUI), ("core/apprentissage.py", src_appr)):
-        assert r'ensure_ascii=False) + "\n"' in src, nom
+        assert "ecrire_json_atomique(self.chemin_cfg" in src, nom
     assert (RACINE / "config.json").read_text(encoding="utf-8").endswith("\n")
+
+
+def test_ecriture_json_atomique(tmp_path):
+    """config.json et les apprentissages s'écrivent via un fichier
+    temporaire substitué d'un bloc : une écriture interrompue ne laisse
+    jamais un fichier tronqué (config illisible = démarrage impossible)."""
+    from core.fichiers import ecrire_json_atomique
+    cible = tmp_path / "config.json"
+    cible.write_text('{"ancien": 1}\n', encoding="utf-8")
+
+    class Inserialisable:
+        pass
+
+    with pytest.raises(TypeError):
+        ecrire_json_atomique(cible, {"x": Inserialisable()})
+    assert cible.read_text(encoding="utf-8") == '{"ancien": 1}\n'   # intact
+    assert list(tmp_path.iterdir()) == [cible]                       # pas de résidu
+    ecrire_json_atomique(cible, {"nouveau": "é"})
+    texte = cible.read_text(encoding="utf-8")
+    assert texte.endswith("\n") and "é" in texte
 
 
 def test_fenetre_de_convergence_lue_par_reference_locale():

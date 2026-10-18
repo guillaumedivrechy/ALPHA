@@ -10,12 +10,13 @@ arrêtée, et remettent toujours le banc dans un état sûr en sortie.
 """
 
 from __future__ import annotations
-import json
 import logging
 import statistics
 import threading
 import time
 from pathlib import Path
+
+from core.fichiers import ecrire_json_atomique
 
 log = logging.getLogger(__name__)
 
@@ -1892,7 +1893,5 @@ class Apprentissage:
         except OSError as e:
             log.error(f"Erreur lors de la sauvegarde: {e}")
             pass
-        self.chemin_cfg.write_text(
-            json.dumps(self.cfg, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8")
+        ecrire_json_atomique(self.chemin_cfg, self.cfg)
         return "Appliqué et enregistré : " + " ; ".join(lignes)

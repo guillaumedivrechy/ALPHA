@@ -27,6 +27,7 @@ from PySide6.QtCore import Qt, QTimer
 import pyqtgraph as pg
 
 from core.banc import Banc
+from core.fichiers import ecrire_json_atomique
 from core.pilote import Pilote
 from core.sequence import charger_sequence_csv
 from ui.theme import COLORS, BTN_QSS, SEG_OFF_QSS, SEG_ON_QSS
@@ -3461,16 +3462,26 @@ class Application(QMainWindow):
             "Enregistrer ces paramètres dans config.json ?")
         if rep != QMessageBox.StandardButton.Yes:
             return
+        # sur une copie : une géométrie refusée par le Banc (β ≥ 1…) ne doit
+        # être ni écrite sur disque — le démarrage suivant planterait — ni
+        # laissée dans la configuration en mémoire
+        candidat = json.loads(json.dumps(self.cfg))
         for chemin, v in valeurs.items():
-            _cfg_ecrire(self.cfg, chemin, v)
+            _cfg_ecrire(candidat, chemin, v)
         try:
-            self.chemin_cfg.write_text(
-                json.dumps(self.cfg, indent=2, ensure_ascii=False) + "\n",
-                encoding="utf-8")
+            banc = Banc(candidat)
+        except (ValueError, KeyError) as exc:
+            QMessageBox.critical(self, "Configuration invalide", str(exc))
+            return
+        try:
+            ecrire_json_atomique(self.chemin_cfg, candidat)
         except OSError as exc:
             QMessageBox.critical(self, "Écriture impossible", str(exc))
             return
-        self.pilote.appliquer_banc(Banc(self.cfg))
+        # mise à jour EN PLACE : le dict est partagé avec l'apprentissage
+        self.cfg.clear()
+        self.cfg.update(candidat)
+        self.pilote.appliquer_banc(banc)
         # le Banc ne porte que les geometries et les seuils de selection ;
         # gains, tolerances, chiens de garde et bornes capteurs sont mis en
         # cache par le pilote et doivent etre relus, sinon la saisie

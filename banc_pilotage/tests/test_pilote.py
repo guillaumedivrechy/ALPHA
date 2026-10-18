@@ -1150,3 +1150,22 @@ def test_arret_coupe_le_ventilateur_avant_la_position_de_repos(tmp_path):
     pilote.arreter()
     premier_3voies = next(i for i, e in enumerate(evenements) if e[0] == "3voies")
     assert ("variateur", 0.0) in evenements[:premier_3voies]
+
+
+def test_gain_appris_en_fonctionnement_relu_a_la_session_suivante():
+    """Le gain Re/V appris en marche est écrit à l'arrêt dans etat_banc.json,
+    qui n'était relu qu'à la migration initiale : dès que apprentissages/
+    existait, il était perdu à chaque redémarrage."""
+    import core.pilote
+    (core.pilote.RACINE / "apprentissages").mkdir(exist_ok=True)
+    (core.pilote.RACINE / "apprentissages" / "iso.json").write_text(
+        json.dumps({"tables": {}, "parametres": {"gain_re_par_volt": 3000.0}}),
+        encoding="utf-8")
+    es = StubES({"temperature": 20.0, "fc_3voies_0": True})
+    pilote = Pilote(Banc(CFG), es, CFG)
+    pilote.journal = None
+    assert pilote._gain_re_par_volt == 3000.0
+    pilote._gain_re_par_volt = 3550.0                # appris en marche
+    pilote.arreter()
+    suivant = Pilote(Banc(CFG), StubES({"temperature": 20.0}), CFG)
+    assert suivant._gain_re_par_volt == pytest.approx(3550.0)

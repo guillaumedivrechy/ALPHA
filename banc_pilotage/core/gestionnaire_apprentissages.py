@@ -27,21 +27,26 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .fichiers import ecrire_json_atomique
+
 log = logging.getLogger(__name__)
 
 
 class GestionnaireApprentissages:
     """Gère le chargement et la sauvegarde des apprentissages dans des fichiers séparés."""
 
-    def __init__(self, chemin_racine: Path):
+    def __init__(self, chemin_racine: Path, chemin_etat: Path | None = None):
         """Initialise le gestionnaire.
 
         Args:
             chemin_racine: Répertoire racine (banc_pilotage/)
+            chemin_etat: état de session du pilote (défaut : etat_banc.json
+                sous la racine)
         """
         self.chemin_racine = Path(chemin_racine)
         self.chemin_apprentissages = self.chemin_racine / "apprentissages"
-        self.chemin_ancien_etat = self.chemin_racine / "etat_banc.json"
+        self.chemin_ancien_etat = Path(chemin_etat) if chemin_etat \
+            else self.chemin_racine / "etat_banc.json"
 
         # Créer le dossier apprentissages si nécessaire
         self.chemin_apprentissages.mkdir(exist_ok=True)
@@ -94,7 +99,23 @@ class GestionnaireApprentissages:
         if indiciel_data:
             donnees.update(indiciel_data.get('parametres', {}))
 
+        # Gain Re/V appris EN FONCTIONNEMENT : le pilote l'écrit à l'arrêt
+        # dans l'état de session, plus récent que celui d'iso.json. Il
+        # n'était relu qu'à la migration initiale, donc perdu ensuite.
+        etat = self._lire_etat_session()
+        if etat.get("gain_re_par_volt"):
+            donnees["gain_re_par_volt"] = etat["gain_re_par_volt"]
+
         return donnees
+
+    def _lire_etat_session(self) -> dict:
+        if not self.chemin_ancien_etat.exists():
+            return {}
+        try:
+            return json.loads(self.chemin_ancien_etat.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            log.error(f"Erreur lecture {self.chemin_ancien_etat}: {e}")
+            return {}
 
     def sauvegarder_miller(self, tables: dict, parametres: dict,
                           temperature_c: float = None, pression_pa: float = None,
@@ -180,8 +201,7 @@ class GestionnaireApprentissages:
         chemin = self.fichiers[nom]
 
         try:
-            with open(chemin, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+            ecrire_json_atomique(chemin, data)
         except OSError as e:
             log.error(f"Erreur écriture {chemin}: {e}")
             raise

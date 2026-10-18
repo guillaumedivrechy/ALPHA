@@ -227,10 +227,11 @@
     "tolerance_consigne_v": 0.15
   },
   "journal": {
-    "_commentaire": "Journal CSV des conditions d'essai : un fichier par session de regulation, ecrit par le thread du pilote. Repond apres coup a 'dans quelles conditions ce point a-t-il ete releve, et ont-elles tenu pendant la mesure ?'. dossier relatif = par rapport au dossier du programme. periode_s = intervalle entre deux lignes.",
+    "_commentaire": "Journal CSV des conditions d'essai : un fichier par session de regulation, ecrit par le thread du pilote. Repond apres coup a 'dans quelles conditions ce point a-t-il ete releve, et ont-elles tenu pendant la mesure ?'. dossier relatif = par rapport au dossier du programme. periode_s = intervalle entre deux lignes. diagnostic_regulation : log CSV de diagnostic de la boucle (regulation_debug.csv, une ligne par cycle, sans limite de taille) ; a activer seulement pour un depannage.",
     "actif": true,
     "dossier": "journaux",
-    "periode_s": 1.0
+    "periode_s": 1.0,
+    "diagnostic_regulation": false
   },
   "apprentissage": {
     "courbe_gain_pas_v": 1.0,
