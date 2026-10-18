@@ -47,7 +47,11 @@ io_banc/
   wago.py              EntreesSorties (interface) + WagoModbus
   simulateur.py        banc virtuel (mêmes équations)
 gui/app.py             IHM — lit pilote.etat via QTimer, ne calcule rien
-tests/                 pytest — sans matériel ni Qt
+tests/                 pytest — sans matériel
+  banc_simule.py       pilote + simulateur à horloge accélérée, invariants
+                       vérifiés à chaque cycle ; banc caractérisé (donnees/)
+  faux_coupleur.py     serveur Modbus TCP local (teste le vrai wago.py)
+  test_ihm.py          IHM réelle hors écran (Qt offscreen) sur banc simulé
 ```
 
 ## Règles

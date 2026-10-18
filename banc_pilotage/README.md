@@ -72,6 +72,12 @@ python main.py --simulation     # banc simulé : test sans matériel
 python main.py                  # connexion au coupleur Wago (config.json)
 ```
 
+Tests : `python -m pytest tests/ -q` (≈ 1 min 30) — moteur de calcul,
+scénarios d'usage sur banc simulé (toutes consignes depuis tous les états,
+défauts injectés, arrêts pendant les apprentissages), couche Modbus réelle
+contre un faux coupleur, IHM hors écran. `python repetition_generale.py`
+déroule en simulation toute la mise en service (≈ 20 min).
+
 Le mode simulation reproduit la chaîne complète (ventilateur 1er ordre,
 ΔP générés par les mêmes équations, bruit capteur) : il permet de former
 les opérateurs et de régler les gains sans toucher au banc.
@@ -347,6 +353,9 @@ python -m pytest tests/ -q
 
 ## Documentation complémentaire
 
+- **MISE_EN_SERVICE.md** : check-list du banc réel (sécurités matérielles,
+  E/S, actionneurs, apprentissages, essais de défauts, régulation,
+  métrologie) — ce que les tests automatiques ne peuvent pas vérifier
 - **CLAUDE.md** : Contexte projet pour Claude Code (règles architecture, threading)
 - **apprentissages/*.json** : tables de gains apprises (Re mapping ISO/Miller, PdC), écrites par « Appliquer »
 - **etat_banc.json** : état de session (gain Re/V appris en fonctionnement), écrit à l'arrêt

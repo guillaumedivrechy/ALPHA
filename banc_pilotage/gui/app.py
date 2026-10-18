@@ -2200,8 +2200,10 @@ class Application(QMainWindow):
         hl.addWidget(self._foot_cnx)
 
         is_simu = mode.lower() == "simulation"
+        # adresse réelle du coupleur (config.json), pas une valeur figée
         lbl_wago = QLabel(
-            "SIMULATION" if is_simu else "Wago 750-362 · 192.168.1.10")
+            "SIMULATION" if is_simu else
+            f"Wago 750-362 · {self.cfg.get('modbus', {}).get('ip', '?')}")
         lbl_wago.setObjectName("foot-item")
         hl.addWidget(lbl_wago)
 
