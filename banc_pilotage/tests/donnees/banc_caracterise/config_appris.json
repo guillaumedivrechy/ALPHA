@@ -1,0 +1,21 @@
+{
+  "_commentaire": "Valeurs apprises par la répétition générale sur le banc simulé (zero_capteurs -> indiciel), appliquées par-dessus config.json pour les scénarios de tests/banc_simule.py.",
+  "actionneurs": {
+    "pdc_recopie_max_v": 9.928,
+    "pdc_recopie_min_v": 0.081,
+    "vanne_3voies_temps_s": 3.9,
+    "vanne_bypass_temps_s": 10.9,
+    "vanne_perte_charge_course_s": 16.0
+  },
+  "regulation": {
+    "kp": 2.0,
+    "ki": 1.11,
+    "tau_consigne_s": 1.8
+  },
+  "strategie_bas_re": {
+    "pdc_min_exploitable_pct": 4.0,
+    "re_min_exploitable": 504,
+    "u_min_ventilateur_v": 1.3,
+    "u_seuil_bas_re_v": 3.71
+  }
+}

@@ -685,6 +685,7 @@ class Pilote:
                        f"(re_max_iso configuré pour éviter saturation capteur ΔP ISO)")
 
         with self._verrou:
+            nouvelle = (re_limite, reference) != (self.re_cible, self.reference)
             self.re_cible = re_limite
             self.reference = reference
             # nouvelle consigne = nouvelle préparation (choix diaphragme,
@@ -692,6 +693,15 @@ class Pilote:
             # tourne : sans ce reset, un appel isolé laisserait le critère
             # bas-Re et le split-range calés sur l'ancienne consigne
             self._preparation_faite = False
+        if nouvelle:
+            self._oublier_convergence()
+
+    def _oublier_convergence(self) -> None:
+        """Nouvelle consigne : la moyenne glissante repart de zéro. Elle
+        mélangeait sinon les Re de l'ancienne consigne et de la nouvelle, et
+        passait « par » la consigne pendant la transition : faux RÉGULÉ ✓."""
+        self._historique_re.clear()
+        self._convergee_depuis = None
 
     def definir_reference_affichage(self, reference: str) -> None:
         """Référence (conduite / veine) du Re mesuré publié, choisie sur
@@ -1525,6 +1535,7 @@ class Pilote:
                     self.re_cible = pts[i][1]
                 # rechoix diaphragme + feed-forward sur le nouvel échelon
                 self._preparation_faite = False
+                self._oublier_convergence()
             terminee = t_ecoule >= pts[-1][0]
             self.etat["sequence"] = {
                 "t": min(t_ecoule, pts[-1][0]), "t_fin": pts[-1][0],
@@ -2271,8 +2282,19 @@ class Pilote:
             else min(re_cible, self._re_cible_max)
         tol = self.tolerance_sortie if self._convergee_depuis is not None \
             else self.tolerance
+        # pas de convergence sur un transitoire : la moyenne d'une fenêtre
+        # qui traverse la consigne peut tomber dessus (Re instantané à
+        # +35 %). Chaque demi-fenêtre doit déjà être dans la bande de sortie.
+        stable = False
+        if fenetre_pleine and re_effectif > 0:
+            moitie = len(fenetre) // 2
+            valeurs = list(fenetre)
+            stable = all(
+                abs(fmean(part) - re_effectif) / re_effectif
+                < self.tolerance_sortie
+                for part in (valeurs[:moitie], valeurs[moitie:]))
         convergee = bool(
-            regul and re_effectif > 0 and fenetre_pleine
+            regul and re_effectif > 0 and fenetre_pleine and stable
             and abs(re_moyen - re_effectif) / re_effectif < tol)
         if convergee:
             if self._convergee_depuis is None:
