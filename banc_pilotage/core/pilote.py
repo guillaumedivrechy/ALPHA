@@ -347,6 +347,11 @@ class Pilote:
             log.warning(f"Période très faible : {self.periode}s (< 10ms), risque surcharge CPU")
 
         self.tolerance = r.get("tolerance_convergence_relative", 0.01)
+        # hystérésis : convergence déclarée sous tolerance, retirée au-delà
+        # de cette seconde bande (sinon le voyant clignote au bruit près)
+        self.tolerance_sortie = max(
+            r.get("tolerance_sortie_convergence_relative", 2 * self.tolerance),
+            self.tolerance)
         # Gains nominaux (mode normal)
         self.kp_nominal = r["kp"]
         self.ki_nominal = r["ki"]
@@ -484,6 +489,10 @@ class Pilote:
         # PDC minimale exploitable (%) mesurée par apprentissage, défaut 50%
         # (limite physique décrochage observée empiriquement)
         self.pdc_min_exploitable_pct = srcfg.get("pdc_min_exploitable_pct", 50.0)
+        # écart commande / position de la vanne PdC [V] : en deçà, la vanne
+        # est arrivée (alarme « hors de portée » armée seulement en butée
+        # PHYSIQUE, pas dès que la commande y est)
+        self.ecart_course_pdc_v = srcfg.get("ecart_course_pdc_v", 0.5)
         # facteur (×) sur les gains PI en bas-Re. 1.0 = nominal (le séquencement
         # de démarrage suffit à maîtriser le dépassement) ; à réduire au banc si
         # la vraie vanne PdC fait osciller la boucle.
@@ -873,6 +882,9 @@ class Pilote:
             self.periode = r.get("periode_s", self.periode)
             self.tolerance = r.get("tolerance_convergence_relative",
                                    self.tolerance)
+            self.tolerance_sortie = max(r.get(
+                "tolerance_sortie_convergence_relative",
+                self.tolerance_sortie), self.tolerance)
             self.pi.kp = r.get("kp", self.pi.kp)
             self.pi.ki = r.get("ki", self.pi.ki)
             self.pi.dt = self.periode
@@ -943,6 +955,8 @@ class Pilote:
                 "marge_ventilateur_pdc", self.marge_ventilateur_pdc))
             self.pdc_min_exploitable_pct = sr.get("pdc_min_exploitable_pct",
                                                    self.pdc_min_exploitable_pct)
+            self.ecart_course_pdc_v = sr.get("ecart_course_pdc_v",
+                                             self.ecart_course_pdc_v)
             self.bas_re_scale = min(max(sr.get("gain_scale",
                                                self.bas_re_scale), 0.05), 1.0)
 
@@ -1642,6 +1656,12 @@ class Pilote:
             self.etat["defaut_pdc"] = self._pdc_cycles_divergents \
                 > max(3, int(5.0 / self.periode))
         else:
+            # sans recopie, les fins de course recalent le modèle : butées
+            # physiques certaines (l'estimée part sinon de 0 V, vanne fermée)
+            if mesures.get("fc_pdc_ouvert") and not mesures.get("fc_pdc_ferme"):
+                self._pdc_position_estimee = 10.0
+            elif mesures.get("fc_pdc_ferme") and not mesures.get("fc_pdc_ouvert"):
+                self._pdc_position_estimee = 0.0
             self.etat["pdc_position"] = self._pdc_position_estimee
             self.etat["defaut_pdc"] = False
 
@@ -2179,8 +2199,15 @@ class Pilote:
                 # consigne hors de portée : variateur figé à u_min, la vanne
                 # PdC en butée ne peut plus rapprocher le Re de la consigne.
                 # Sans alarme, la régulation attendait indéfiniment.
-                ouverte = pdc_v >= 10.0 - 1e-6 and re_mesure < re_vise * (1.0 - self.tolerance)
-                fermee = pdc_v <= 1e-6 and re_mesure > re_vise * (1.0 + self.tolerance)
+                # butée PHYSIQUE : commande en butée ET vanne arrivée (position
+                # estimée, recalée sur la recopie) ; la commande seule y est
+                # dès le début de la course, d'où une fausse alarme
+                pos = self._pdc_position_estimee
+                ouverte = pdc_v >= 10.0 - 1e-6 \
+                    and pos >= 10.0 - self.ecart_course_pdc_v \
+                    and re_mesure < re_vise * (1.0 - self.tolerance)
+                fermee = pdc_v <= 1e-6 and pos <= self.ecart_course_pdc_v \
+                    and re_mesure > re_vise * (1.0 + self.tolerance)
                 self._cycles_pdc_butee = self._cycles_pdc_butee + 1 \
                     if (ouverte or fermee) else 0
                 if self._cycles_pdc_butee > int(5.0 / self.periode):
@@ -2237,9 +2264,11 @@ class Pilote:
         # sur le plafond, mais comparé à la consigne saisie)
         re_effectif = re_cible if self._re_cible_max is None \
             else min(re_cible, self._re_cible_max)
+        tol = self.tolerance_sortie if self._convergee_depuis is not None \
+            else self.tolerance
         convergee = bool(
             regul and re_effectif > 0 and fenetre_pleine
-            and abs(re_moyen - re_effectif) / re_effectif < self.tolerance)
+            and abs(re_moyen - re_effectif) / re_effectif < tol)
         if convergee:
             if self._convergee_depuis is None:
                 self._convergee_depuis = maintenant

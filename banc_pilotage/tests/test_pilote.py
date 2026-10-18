@@ -1302,6 +1302,63 @@ def test_consigne_hors_de_portee_du_mode_pdc_signalee():
     assert "hors de portée" in (pilote.etat["alerte_pdc"] or "")
 
 
+def test_alarme_pdc_seulement_en_butee_physique(monkeypatch):
+    """Re au-dessus de la consigne : la commande PdC part en butée fermée
+    aussitôt, mais la vanne met une course à y arriver. Pas d'alarme
+    « hors de portée » pendant cette course (fausse alarme vue à 300 Re) ;
+    alarme une fois la vanne réellement en butée et le Re toujours haut."""
+    horloge = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: horloge[0])
+    pilote, es = _pilote_en_position("fc_3voies_90")
+    pilote.seuil_bas_re = 2000.0
+    pilote.u_min_ventilateur = 0.5
+    es.mesures["dp_diaph_500"] = 200.0               # Re bien au-dessus
+    es.mesures["pdc_recopie"] = 10.0
+    pilote.definir_consigne(300.0, "conduite")
+    pilote.demarrer_regulation()
+    alarmes_en_course = []
+    position = 10.0                                  # vanne réelle [V]
+    vitesse = 10.0 / pilote.t_vanne_pdc_course
+    for _ in range(int(40.0 / pilote.periode)):
+        horloge[0] += pilote.periode
+        pilote._cycle()
+        # vanne réelle : rejoint sa commande à la vitesse de course
+        pas = vitesse * pilote.periode
+        position += max(-pas, min(pas, pilote._pdc_consigne - position))
+        es.mesures["pdc_recopie"] = position
+        es.mesures["fc_pdc_ouvert"] = position >= 10.0
+        if position > pilote.ecart_course_pdc_v and pilote.etat.get("alerte_pdc"):
+            alarmes_en_course.append(round(position, 2))
+    assert pilote._mode_regulation == "pdc_control"
+    assert alarmes_en_course == []
+    assert "butée fermée" in (pilote.etat["alerte_pdc"] or "")
+
+
+def test_convergence_avec_hysteresis():
+    """Convergé : le reste tant que l'écart moyen reste sous la tolérance de
+    sortie (2 %) ; pas encore convergé : ne l'est que sous 1 %. Sans cette
+    bande, le voyant clignotait au bruit près à très bas Re."""
+    pilote, es = _pilote_en_position("fc_3voies_90")
+    es.mesures["dp_diaph_500"] = 50.0                # débit fixe
+    pilote.bas_re_actif = False
+    pilote.definir_consigne(2000.0, "conduite")
+    pilote.demarrer_regulation()
+    pilote._preparation_faite = True
+    pilote._cycle()
+    re_mesure = pilote.etat["re_mesure"] or 0.0
+    assert re_mesure > 0
+    # consigne placée à 1,5 % de la mesure (fixe, StubES)
+    pilote.re_cible = re_mesure / 1.015
+    pilote._re_cible_max = None
+    pilote._historique_re.clear()
+    pilote._convergee_depuis = None
+    for _ in range(pilote._historique_re.maxlen + 1):
+        pilote._cycle()
+    assert pilote.etat["convergee"] is False         # 1,5 % > 1 % : pas d'entrée
+    pilote._convergee_depuis = 1.0                     # déjà convergé
+    pilote._cycle()
+    assert pilote.etat["convergee"] is True           # 1,5 % < 2 % : maintenu
+
 def test_bypass_sans_fin_de_course_hors_manoeuvre_en_defaut():
     """Bypass sans aucune fin de course alors qu'aucune manœuvre n'est en
     cours (fil coupé) : défaut au bout d'une course chien de garde comprise,
