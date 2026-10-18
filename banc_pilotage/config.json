@@ -216,7 +216,7 @@
     "marge_ventilateur_pdc": 1.15,
     "gain_scale": 0.6,
     "u_min_ventilateur_v": 0.3,
-    "seuil_bas_re_mesure": 7547,
+    "seuil_bas_re_mesure": 0,
     "pdc_min_exploitable_pct": 24.0,
     "re_min_exploitable": 214,
     "u_seuil_bas_re_v": 5.35

@@ -990,6 +990,14 @@ class Pilote:
         de course."""
         self._bypass_commande = ouverte
         self.es.ecrire_vanne_bypass(ouverte)
+        # déjà en butée : ordre réaffirmé, sans manœuvre (comme la vanne 3
+        # voies) — sinon gel de la régulation pour la marge post-manœuvre
+        mesures = self.etat.get("mesures_brutes") or {}
+        fc = "fc_bypass_ouvert" if ouverte else "fc_bypass_ferme"
+        autre = "fc_bypass_ferme" if ouverte else "fc_bypass_ouvert"
+        if mesures.get(fc) and not mesures.get(autre):
+            self._manoeuvres.pop("bypass", None)
+            return
         self._demarrer_manoeuvre(
             motif="manœuvre bypass " + ("(ouverture)" if ouverte
                                         else "(fermeture)"),

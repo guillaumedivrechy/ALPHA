@@ -121,6 +121,18 @@ def test_plafond_capteur_dp_dans_la_reference_veine():
     assert "Re veine" in pilote.etat["consigne_limitee"]
 
 
+def test_bypass_deja_en_butee_pas_de_manoeuvre(pilote_stub):
+    """Ordre bypass vers la butée déjà lue : réaffirmé, mais aucune
+    manœuvre (ni gel de la régulation) ; vers l'autre butée : manœuvre."""
+    pilote, _ = pilote_stub
+    pilote.etat["mesures_brutes"] = {"fc_bypass_ouvert": True}
+    pilote.commander_bypass(True)
+    assert pilote._bypass_commande is True
+    assert "bypass" not in pilote._manoeuvres
+    pilote.commander_bypass(False)
+    assert pilote._manoeuvres["bypass"]["fc_attendue"] == "fc_bypass_ferme"
+
+
 def test_arret_coupe_aussi_le_mode_manuel(pilote_stub):
     """Bouton ARRÊT VARIATEUR : la tension manuelle ne doit pas être
     réappliquée au cycle suivant."""
