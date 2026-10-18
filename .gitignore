@@ -9,5 +9,9 @@ etat_banc.json
 # journaux d'essai (un CSV par session de régulation)
 journaux/
 
+# apprentissages persistés (propres à chaque machine) et log de diagnostic
+apprentissages/
+regulation_debug.csv
+
 # réglages locaux Claude Code
 **/.claude/settings.local.json
