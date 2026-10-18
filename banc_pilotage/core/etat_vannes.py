@@ -53,7 +53,8 @@ class EtatVannes:
     coherent: bool
 
 
-def lire_etat_vannes(mesures: dict) -> EtatVannes:
+def lire_etat_vannes(mesures: dict,
+                     diaphragme_par_angle: dict | None = None) -> EtatVannes:
     """
     Décode les signaux de fins de course pour déterminer la position physique des vannes.
 
@@ -63,11 +64,18 @@ def lire_etat_vannes(mesures: dict) -> EtatVannes:
     - Les deux désactivés → Position en transit (vanne en mouvement)
     - Les deux activés → Position incohérente (défaut capteur ou vanne bloquée)
 
+    La vanne 3 voies est décodée en BUTÉE (0° ou 90°), puis traduite en
+    diaphragme par diaphragme_par_angle (modbus.positions_vanne_3voies) : sur
+    une plomberie croisée, c'est le Miller qui est alimenté à 0°. La butée
+    180° (manœuvre manuelle uniquement) rend la position inexploitable.
+
     Args:
         mesures: Dictionnaire contenant les signaux FC booléens :
-            - fc_3voies_0, fc_3voies_90 (diaphragme)
-            - fc_bypass_o, fc_bypass_f (bypass)
-            - fc_pdc_o, fc_pdc_f (perte de charge)
+            - fc_3voies_0, fc_3voies_90, fc_3voies_180 (diaphragme)
+            - fc_bypass_ouvert, fc_bypass_ferme (bypass)
+            - fc_pdc_ouvert, fc_pdc_ferme (perte de charge)
+        diaphragme_par_angle: {"0": "iso"|"miller", "90": ...} ; par défaut
+            0° = ISO, 90° = Miller.
 
     Returns:
         EtatVannes contenant les positions des trois vannes et le flag de cohérence.
@@ -75,8 +83,8 @@ def lire_etat_vannes(mesures: dict) -> EtatVannes:
     Examples:
         >>> mesures = {
         ...     "fc_3voies_0": True, "fc_3voies_90": False,
-        ...     "fc_bypass_o": False, "fc_bypass_f": True,
-        ...     "fc_pdc_o": True, "fc_pdc_f": False
+        ...     "fc_bypass_ouvert": False, "fc_bypass_ferme": True,
+        ...     "fc_pdc_ouvert": True, "fc_pdc_ferme": False
         ... }
         >>> etat = lire_etat_vannes(mesures)
         >>> etat.diaphragme
@@ -89,6 +97,7 @@ def lire_etat_vannes(mesures: dict) -> EtatVannes:
     # Lecture des FC
     fc_3v_0 = mesures.get("fc_3voies_0", False)
     fc_3v_90 = mesures.get("fc_3voies_90", False)
+    fc_3v_180 = mesures.get("fc_3voies_180", False)
     fc_bypass_o = mesures.get("fc_bypass_ouvert", False)
     fc_bypass_f = mesures.get("fc_bypass_ferme", False)
     fc_pdc_o = mesures.get("fc_pdc_ouvert", False)
@@ -97,15 +106,21 @@ def lire_etat_vannes(mesures: dict) -> EtatVannes:
     # DEBUG
     log.debug(f"FC lus: 3v_0={fc_3v_0}, 3v_90={fc_3v_90}, bypass_o={fc_bypass_o}, bypass_f={fc_bypass_f}, pdc_o={fc_pdc_o}, pdc_f={fc_pdc_f}")
 
-    # Décodage diaphragme
-    if fc_3v_0 and not fc_3v_90:
-        diaphragme = PositionDiaphragme.ISO
-    elif not fc_3v_0 and fc_3v_90:
-        diaphragme = PositionDiaphragme.MILLER
-    elif not fc_3v_0 and not fc_3v_90:
+    # Décodage diaphragme : butée occupée, puis diaphragme alimenté à cette butée
+    par_angle = diaphragme_par_angle or {"0": "iso", "90": "miller"}
+    if fc_3v_0 and not fc_3v_90 and not fc_3v_180:
+        angle = "0"
+    elif fc_3v_90 and not fc_3v_0 and not fc_3v_180:
+        angle = "90"
+    else:
+        angle = None
+    if angle is not None:
+        diaphragme = PositionDiaphragme(par_angle[angle])
+    elif not (fc_3v_0 or fc_3v_90 or fc_3v_180):
         diaphragme = PositionDiaphragme.EN_TRANSIT
-    else:  # Les deux activés
-        log.warning("État incohérent diaphragme : fc_3voies_0=%s, fc_3voies_90=%s", fc_3v_0, fc_3v_90)
+    else:  # plusieurs butées, ou butée 180°
+        log.warning("État incohérent diaphragme : fc_3voies_0=%s, fc_3voies_90=%s, "
+                    "fc_3voies_180=%s", fc_3v_0, fc_3v_90, fc_3v_180)
         diaphragme = PositionDiaphragme.INCONNU
 
     # Décodage bypass

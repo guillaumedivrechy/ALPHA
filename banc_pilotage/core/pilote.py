@@ -856,10 +856,24 @@ class Pilote:
     def commander_vanne_perte_charge_pct(self, pct: float) -> None:
         """Consigne en % d'ouverture : 0 % = fermée, 100 % = ouverte.
         Utilise les butées calibrées pdc_recopie_min/max pour la conversion."""
+        self.commander_vanne_perte_charge(self._pdc_pct_vers_v(pct))
+
+    def _pdc_pct_vers_v(self, pct: float) -> float:
+        """Ouverture PdC en % -> consigne en volts, avec les butées calibrées
+        (même conversion que celle des paliers appris en %)."""
         pct_borne = min(max(pct, 0.0), 100.0)
-        # Conversion avec calibration : pct → volts en tenant compte des butées réelles
-        volts = self.pdc_recopie_min + (pct_borne / 100.0) * (self.pdc_recopie_max - self.pdc_recopie_min)
-        self.commander_vanne_perte_charge(volts)
+        return self.pdc_recopie_min + (pct_borne / 100.0) \
+            * (self.pdc_recopie_max - self.pdc_recopie_min)
+
+    def _pdc_ff_v(self, re_cond: float) -> float | None:
+        """Consigne PdC [V] d'équilibre pour un Re conduite, d'après la table
+        PdC apprise (paliers en % d'ouverture, variateur à u_min). Hors de la
+        plage apprise : palier extrême (pas d'extrapolation). None sans table."""
+        pts = self.table_gains_pdc._points_ff()
+        if len(pts) < 2:
+            return None
+        pct = TableGainsPDC(pts).v_pour_re(re_cond)
+        return self._pdc_pct_vers_v(pct)
 
     def commander_bypass(self, ouverte: bool) -> None:
         """Vanne TOR bypass : régulation gelée jusqu'à la fin de course
@@ -954,14 +968,14 @@ class Pilote:
 
     def _position_repos(self) -> None:
         """Met les vannes en position de repos (sécurité / démarrage) :
-        - Vanne 3 voies → Miller (90°, diaphragme de débit élevé)
+        - Vanne 3 voies → Miller (butée donnée par positions_vanne_3voies)
         - Vanne perte de charge → ouverte (10 V, pas de restriction)
         - Vanne bypass → ouverte (circuit dérivé, pas de mesure)"""
         try:
-            # Vanne 3 voies sur Miller (90°)
-            self.es.ecrire_vanne_diaphragme(False)  # False = 90° = Miller
+            angle_miller = self._angle_par_diaphragme.get("miller", "90")
+            self.es.ecrire_vanne_diaphragme(angle_miller == "0")
             self.etat["diaphragme"] = "miller"
-            self._diaphragme_commande = "90"
+            self._diaphragme_commande = angle_miller
 
             # Vanne perte de charge ouverte (10 V)
             self.commander_vanne_perte_charge(10.0)
@@ -1078,8 +1092,16 @@ class Pilote:
             try:
                 self._cycle()
                 self.etat["erreur_com"] = None
-            except (IOError, OSError, ConnectionError, TimeoutError, ValueError, KeyError, RuntimeError) as exc:
-                # Erreurs attendues : Modbus, capteurs, calculs → repli sûr
+            except Exception as exc:  # noqa: BLE001
+                # Erreurs attendues (Modbus, capteurs, calculs) ou défaut de
+                # programmation : repli sûr dans tous les cas. Une exception
+                # non rattrapée tuerait le thread en laissant le variateur
+                # sous tension, RUN actif, sans plus aucune supervision.
+                if not isinstance(exc, (IOError, OSError, ConnectionError,
+                                        TimeoutError, ValueError, KeyError,
+                                        RuntimeError)):
+                    log.exception("Erreur inattendue dans le cycle de régulation")
+                    exc = f"erreur interne ({type(exc).__name__}: {exc})"
                 self.etat["erreur_com"] = str(exc)
                 # état sûr documenté : variateur 0 V ET ordre RUN retiré.
                 # On latche l'arrêt (regulation_active=False), comme les
@@ -1610,43 +1632,38 @@ class Pilote:
                 return
         self.etat["manoeuvre"] = None
 
-        # ---- cohérence position vanne 3 voies / diaphragme attendu ---------
-        # Hors manœuvre, la butée lue doit être celle du diaphragme actif.
-        # ANCIEN MÉCANISME DE VÉRIFICATION COHÉRENCE DIAPHRAGME
-        # Désactivé car remplacé par le nouveau module etat_vannes.py (CORRECTION-3 lignes 1833-1850)
-        # qui gère la cohérence des FC de manière plus robuste et complète.
-        #
-        # Sinon : lecture invalide (rupture de fil, commun 24 V absent), vanne
-        # restée à 180° après une manœuvre manuelle, ou plomberie croisée.
-        # angle_lu = self._angle_vanne_3voies(mesures)
-        # angle_attendu = self._angle_par_diaphragme.get(diaph)
-        # if FC_3VOIES["0"] in mesures and angle_lu != angle_attendu:
-        #     self._cycles_incoherence += 1
-        # else:
-        #     self._cycles_incoherence = 0
-        # self.etat["incoherence_vanne"] = self._cycles_incoherence \
-        #     > max(3, int(3.0 / self.periode))
-        #
-        # # incohérence persistante en régulation : on réguerait sur un capteur
-        # # ΔP qui ne correspond plus à la position réelle de la vanne -> repli
-        # # sûr + latch (l'opérateur vérifie la vanne puis relance).
-        # if self.etat["incoherence_vanne"] and regul:
-        #     self.es.ecrire_variateur(0.0)
-        #     self.es.ecrire_variateur_run(False)
-        #     self._run_actif = False
-        #     with self._verrou:
-        #         self.regulation_active = False
-        #     self.etat.update({
-        #         "defaut_vanne": "position vanne 3 voies inexploitable ou "
-        #                         "incohérente avec le diaphragme actif "
-        #                         f"(butée lue : {angle_lu or 'aucune'}) — "
-        #                         "vérifier la vanne et son câblage, puis relancer",
-        #         "regulation": False, "u_variateur": 0.0, "convergee": False,
-        #     })
-        #     return
+        # ---- cohérence de la position de la vanne 3 voies -----------------
+        # Hors manœuvre, la vanne doit être sur une butée franche (0° ou 90°).
+        # Sinon : lecture invalide (rupture de fil, commun 24 V absent) ou
+        # vanne restée à 180° après une manœuvre manuelle. etat_vannes lit ce
+        # cas comme « en transit », ce qui ferait attendre une manœuvre que
+        # personne n'a commandée : on le traite ici comme un défaut.
+        # Une butée franche mais différente du diaphragme visé n'est pas un
+        # défaut : la gestion des modes commande alors la manœuvre.
+        angle_lu = self._angle_vanne_3voies(mesures)
+        if FC_3VOIES["0"] in mesures and angle_lu is None:
+            self._cycles_incoherence += 1
+        else:
+            self._cycles_incoherence = 0
+        self.etat["incoherence_vanne"] = self._cycles_incoherence \
+            > max(3, int(3.0 / self.periode))
 
-        # Réinitialiser le flag (pour compatibilité avec IHM)
-        self.etat["incoherence_vanne"] = False
+        # incohérence persistante en régulation : on régulerait sur un capteur
+        # ΔP qui ne correspond plus à la position réelle de la vanne -> repli
+        # sûr + latch (l'opérateur vérifie la vanne puis relance).
+        if self.etat["incoherence_vanne"] and regul:
+            self.es.ecrire_variateur(0.0)
+            self.es.ecrire_variateur_run(False)
+            self._run_actif = False
+            with self._verrou:
+                self.regulation_active = False
+            self.etat.update({
+                "defaut_vanne": "position vanne 3 voies inexploitable hors "
+                                "manœuvre (aucune butée franche lue) — "
+                                "vérifier la vanne et son câblage, puis relancer",
+                "regulation": False, "u_variateur": 0.0, "convergee": False,
+            })
+            return
 
         # ---- mesure du débit et des Reynolds -------------------------------
         # le diaphragme a pu changer pendant la préparation (vanne déjà en
@@ -1849,7 +1866,7 @@ class Pilote:
             # Cette architecture corrige définitivement CRITIQUE-1 et évite les cercles vicieux.
 
             # 1. LECTURE ÉTAT VANNES (nouveau module)
-            etat_vannes = lire_etat_vannes(mesures)
+            etat_vannes = lire_etat_vannes(mesures, self._diaphragme_par_angle)
 
             # Publier positions vannes vers IHM (mapping Enum → string)
             self.etat["diaphragme"] = _MAP_DIAPHRAGME.get(etat_vannes.diaphragme, "?")
@@ -1919,9 +1936,18 @@ class Pilote:
             mode_cible = MODE_MAP[mode_cible_enum]
             mode_effectif = MODE_MAP[mode_effectif_enum]
 
-            # Pour compatibilité avec le reste du code
-            mode = mode_cible  # Pour commandes vannes
-            mode_table = mode_effectif  # Pour table gains
+            # La stratégie de commande suit le mode CIBLE. Elle ne s'applique
+            # qu'une fois les vannes en place (vannes_pretes ci-dessous), donc
+            # avec le diaphragme physique du mode cible : c'est cette attente
+            # qui garantit la cohérence mode/diaphragme. Choisir la stratégie
+            # sur le Re MESURÉ (mode effectif) bouclait sur elle-même : au
+            # démarrage en Miller le Re mesuré est bas -> mode PdC -> variateur
+            # figé à u_min -> le Re reste bas, la consigne n'est jamais atteinte.
+            mode = mode_cible
+            mode_table = mode_cible
+            if mode_effectif != mode_cible:
+                log.debug("mode effectif %s, mode cible %s", mode_effectif,
+                          mode_cible)
 
             # Bascule de mode hors préparation : re-caler le PI
             # IMPORTANT : Re-caler sur mode_cible (où on VA), pas mode_effectif (où on EST)
@@ -2034,7 +2060,17 @@ class Pilote:
                 # Le feed-forward repartira de 0 sur sa rampe ; le biais de
                 # table appris (intégrale) est conservé.
                 u = 0.0
-                pdc_v = self._pdc_consigne if self._pdc_consigne is not None else 0.0
+                # Vanne PdC : tenue à sa position (pré-positionnée au plus bas,
+                # cf. _prepositionner_vanne_pdc_securitaire) tant que les
+                # vannes TOR manœuvrent ; une fois diaphragme et bypass en
+                # place, ouverte en grand, puisque tous les modes y attendent
+                # sa fin de course « ouverte ». Sans cette ouverture, une PdC
+                # restée à mi-course (sortie du mode PdC) n'atteignait jamais
+                # la fin de course attendue : blocage puis défaut vanne.
+                if diaphragme_ok and bypass_ok:
+                    pdc_v = 10.0
+                else:
+                    pdc_v = self._pdc_consigne
                 self._u_ff_applique = 0.0
                 self.trim.reinitialiser(0.0, self.trim.integrale)
                 self._consigne_interne = None
@@ -2044,15 +2080,9 @@ class Pilote:
                 self._cycles_attente_vannes = 0
 
             if vannes_pretes and mode_table == MODE_PDC_CONTROL:
-                # très bas Re : tension fixe au minimum, le PI règle la PdC
-                # CORRECTION CRITIQUE-1 : Utiliser mode_table (mode EFFECTIF basé sur diaphragme physique)
-                # pour choisir la stratégie de régulation (variateur fixe vs PdC variable)
-
-                # CORRECTION-4 : Réinitialiser PI lors du basculement variateur → PDC
-                if self._mode_regulation != MODE_PDC_CONTROL:
-                    log.info("Basculement variateur → PDC : réinitialisation PI")
-                    self.pi.reinitialiser(0.0, 0.0)  # Intégrale = 0
-
+                # très bas Re : tension fixe au minimum, le PI règle la PdC.
+                # Le PI a été calé sur le feed-forward PdC par _preparer_pi
+                # au changement de mode (plus haut).
                 if self.u_min_ventilateur:
                     u = self.u_min_ventilateur
                 else:
@@ -2061,26 +2091,22 @@ class Pilote:
                         f"{_U_MIN_VENTILATEUR_FALLBACK}V par défaut")
                     u = _U_MIN_VENTILATEUR_FALLBACK
 
-                # CORRECTION-5 : Feed-forward PDC depuis table gains (si disponible)
                 consigne_pi = self._reference_filtree(re_vise, re_mesure)
                 self.pi.u_max = 10.0          # sortie = vanne, pas variateur
-
-                # Feed-forward : tension PDC depuis table
-                if not self.table_gains_pdc.vide():
-                    v_ff_pdc = self.table_gains_pdc.v_pour_re(re_vise)
-                    # PI calcule la correction à partir du feed-forward
-                    erreur = consigne_pi - re_mesure
-                    correction_pi = self.pi.calculer(consigne_pi, re_mesure) - v_ff_pdc
-                    pdc_v = min(max(v_ff_pdc + correction_pi, 0.0), 10.0)
+                pdc_v = min(max(self.pi.calculer(consigne_pi, re_mesure),
+                                0.0), 10.0)
+                # feed-forward de la table PdC (Re conduite) : publié pour le
+                # diagnostic, la sortie du PI le contient déjà (intégrale
+                # pré-chargée par _preparer_pi)
+                v_ff_pdc = self._pdc_ff_v(re_vise * self._k_conversion)
+                if v_ff_pdc is not None:
                     self._diag = {
                         "phase": "FF+PI vanne PdC",
                         "pdc_v": round(pdc_v, 3),
                         "v_ff_pdc": round(v_ff_pdc, 3),
-                        "correction_pi": round(correction_pi, 3)
+                        "correction_pi": round(pdc_v - v_ff_pdc, 3)
                     }
                 else:
-                    # Pas de table : PI pur (ancien comportement)
-                    pdc_v = min(max(self.pi.calculer(consigne_pi, re_mesure), 0.0), 10.0)
                     self._diag = {"phase": "PI vanne PdC", "pdc_v": round(pdc_v, 3)}
             elif vannes_pretes:
                 # modes normaux : PdC grande ouverte, variateur =
@@ -2138,9 +2164,17 @@ class Pilote:
         # s'engage jamais. Silencieux jusqu'ici : le bypass ne s'ouvrait pas
         # sans que rien n'explique pourquoi.
         bas_re_motif = None
-        if self.bas_re_actif and (not seuil or self.u_min_ventilateur is None):
-            bas_re_motif = ("seuil bas-Re inconnu : lancer l'apprentissage "
-                            "« Re mapping » (ou fixer strategie_bas_re.seuil_re)")
+        if self.bas_re_actif:
+            motifs = []
+            if self._seuil_bas_re_config_invalide():
+                motifs.append(f"seuil bas-Re de config ({self.seuil_bas_re:.0f}) "
+                              f"au-delà du seuil Miller/ISO "
+                              f"({self.banc.seuil_re:.0f}) : ignoré — corriger "
+                              "strategie_bas_re")
+            if not seuil or self.u_min_ventilateur is None:
+                motifs.append("seuil bas-Re inconnu : lancer l'apprentissage "
+                              "« Re mapping » (ou fixer strategie_bas_re.seuil_re)")
+            bas_re_motif = " ; ".join(motifs) or None
 
         # Calculer systématiquement rho, mu, nu (même si dP=0)
         # pour affichage dans l'IHM, en utilisant T et P_amont actuels
@@ -2318,9 +2352,20 @@ class Pilote:
     def _seuil_bas_re(self) -> float:
         """Re en dessous duquel on bascule en stratégie bas-Re (bypass +
         split-range PdC). Valeur de config si fixée, sinon dérivée de la
-        tension mini exploitable et du gain (Re atteignable à u_min × marge)."""
-        if self.seuil_bas_re:
+        tension mini exploitable et du gain (Re atteignable à u_min × marge).
+
+        Un seuil configuré au-delà du seuil Miller/ISO est ignoré (cf.
+        _seuil_bas_re_config_invalide) : toute consigne Miller partirait en
+        mode PdC, variateur figé à u_min, et resterait inatteignable.
+
+        Le seuil dérivé vient en priorité de la table Miller (bypass ouvert,
+        configuration du mode PdC) ; la table ISO et le gain global ont été
+        mesurés bypass fermé et surestiment le Re tenu à u_min en Miller."""
+        if self.seuil_bas_re and not self._seuil_bas_re_config_invalide():
             return self.seuil_bas_re
+        if self.u_min_ventilateur and self.table_gains_bas_re.valide_ff():
+            return self.table_gains_bas_re.re_pour_u_ff(
+                self.u_min_ventilateur) * self.marge_seuil_bas_re
         if self.u_min_ventilateur and self.table_gains.est_valide():
             return self.table_gains.re_pour_tension(
                 self.u_min_ventilateur) * self.marge_seuil_bas_re
@@ -2328,6 +2373,11 @@ class Pilote:
             return self.u_min_ventilateur * self._gain_re_par_volt \
                 * self.marge_seuil_bas_re
         return 0.0
+
+    def _seuil_bas_re_config_invalide(self) -> bool:
+        """Seuil bas-Re de config (strategie_bas_re) au-delà du seuil
+        Miller/ISO : incompatible avec le mode Miller à variateur réglé."""
+        return bool(self.seuil_bas_re) and self.seuil_bas_re >= self.banc.seuil_re
 
     def _dp_corrige(self, mesures: dict, diaphragme: str) -> float:
         """ΔP du capteur correspondant au diaphragme actif, corrigé du zéro
@@ -2549,8 +2599,11 @@ class Pilote:
         amener la vanne à min(position actuelle, position cible) avant toute
         manœuvre TOR (diaphragme, bypass). Aucune manœuvre ne peut alors
         créer de surdébit transitoire."""
-        # Position actuelle (recopie ou estimée)
-        position_actuelle_v = self.etat.get("pdc_position", self._pdc_position_estimee)
+        # Position actuelle dans l'échelle de la CONSIGNE (la dernière
+        # commande). La recopie n'est pas dans cette échelle (butées
+        # calibrées pdc_recopie_min/max, ~9,2 V à pleine ouverture) : la
+        # renvoyer comme consigne refermait partiellement une vanne ouverte.
+        position_actuelle_v = self._pdc_consigne
 
         # Position cible selon mode
         if mode in (MODE_NORMAL_HIGH, MODE_NORMAL_LOW):
@@ -2581,16 +2634,8 @@ class Pilote:
         if mode == MODE_PDC_CONTROL:
             self.pi.gain_scale = self.bas_re_scale
             self.pi.rampe = self._rampe_bas_re()
-            pdc_ff = None
-            if self.table_gains_pdc.est_valide():
-                reg = self.table_gains_pdc.obtenir_regression()
-                if reg['valide'] and reg['r2'] is not None and reg['r2'] > 0.90:
-                    pdc_pct = self.table_gains_pdc.tension_pour_re_regression(re_cond_attendu)
-                else:
-                    pdc_pct = self.table_gains_pdc.tension_pour_re(re_cond_attendu)
-                if pdc_pct is not None:
-                    pdc_ff = pdc_pct * 0.1          # % -> 0-10 V
-            elif self.table_gains_bas_re.valide_ff():
+            pdc_ff = self._pdc_ff_v(re_cond_attendu)
+            if pdc_ff is None and self.table_gains_bas_re.valide_ff():
                 # approximation : fraction de u_min atteinte -> ouverture PdC
                 u_ff = self.table_gains_bas_re.u_pour_re_ff(re_cond_attendu)
                 u_min = self.u_min_ventilateur or 0.3
@@ -2598,7 +2643,7 @@ class Pilote:
                 # Si u_ff >= u_min, le variateur peut tenir le Re seul → PdC 100% ouverte (10V)
                 # Si u_ff < u_min, interpoler linéairement entre pdc_min et 10V
                 if u_ff < u_min:
-                    pdc_min_v = self.pdc_min_exploitable_pct * 0.1
+                    pdc_min_v = self._pdc_pct_vers_v(self.pdc_min_exploitable_pct)
                     ratio = max(0.0, min(1.0, u_ff / u_min))
                     pdc_ff = pdc_min_v + (10.0 - pdc_min_v) * ratio
                 else:

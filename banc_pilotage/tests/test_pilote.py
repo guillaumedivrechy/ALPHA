@@ -412,12 +412,12 @@ def test_separation_integrale_tant_que_la_mesure_bouge():
     pilote.bas_re_actif = False
     pilote.table_gains = TableGains([(1.0, 3000.0), (9.0, 30000.0)])
     pilote.tau_consigne = 0.0
-    es.mesures["dp_iso_500"] = 134.0                # Re ~13 % sous la cible
+    es.mesures["dp_iso_500"] = 115.0                # Re ~13 % sous la cible
     pilote.definir_consigne(15000.0, "conduite")
     pilote.demarrer_regulation()
     for _ in range(13):                             # rampe du feed-forward
         pilote._cycle()
-    dp = 134.0
+    dp = 115.0
     for k in range(10):                             # le procédé répond encore
         dp += 2.0
         es.mesures["dp_iso_500"] = dp
@@ -650,6 +650,7 @@ def test_dp_sature_plafonne_la_tension():
     MODIFIÉ : saturation_dp_relative=1.0, donc seuil à 500 Pa (100% de 500)."""
     pilote, es = _pilote_en_position("fc_3voies_0")
     pilote.bas_re_actif = False
+    pilote.table_gains = TableGains([(1.0, 3000.0), (9.0, 30000.0)])
     es.mesures["dp_iso_500"] = 300.0               # en plage
     pilote.definir_consigne(20000.0, "conduite")
     pilote.demarrer_regulation()
@@ -830,3 +831,159 @@ def test_appliquer_config_ignore_les_cles_commentaire():
     pilote, es = _pilote_en_position("fc_3voies_0")
     pilote.appliquer_config(cfg)
     assert pilote.zero_capteurs == {"dp_iso_500": 1.5}
+
+
+# ---- régressions de la refonte « 3 modes » ---------------------------------
+
+def test_cycle_inattendu_repli_sur_sans_tuer_la_boucle(tmp_path):
+    """Une exception imprévue (défaut de programmation) dans le cycle doit
+    produire le repli sûr, pas tuer le thread : sinon le variateur reste à sa
+    dernière tension, RUN actif, sans plus aucune supervision."""
+    class ESEnPanne(StubES):
+        def lire_mesures(self):
+            raise TypeError("défaut de programmation simulé")
+
+    es = ESEnPanne()
+    pilote = Pilote(Banc(CFG), es, CFG)
+    pilote._chemin_etat = tmp_path / "etat.json"
+    pilote.journal = None
+    pilote.demarrer()
+    time.sleep(0.5)
+    vivant = pilote._thread.is_alive()
+    pilote.arreter()
+    assert vivant
+    assert es.variateur and es.variateur[-1] == 0.0
+    assert es.run and es.run[-1] is False
+    assert "erreur interne" in pilote.etat["erreur_com"]
+
+
+def test_miller_ne_fige_pas_le_variateur_quand_le_re_mesure_est_bas():
+    """Consigne Miller au-dessus du seuil bas-Re, Re mesuré encore bas (le
+    ventilateur démarre) : la stratégie suit la consigne (variateur réglé).
+    RÉGRESSION : le Re mesuré faisait choisir le mode PdC, dont l'entrée
+    levait une TypeError (thread de régulation tué), et qui figeait sinon
+    le variateur à u_min : la consigne n'était jamais atteinte."""
+    pilote, es = _pilote_en_position("fc_3voies_90")
+    pilote.seuil_bas_re = 2000.0
+    pilote.u_min_ventilateur = 0.5
+    pilote.table_gains_bas_re = TableGains()
+    es.mesures["dp_diaph_500"] = 0.5
+    pilote.definir_consigne(3000.0, "conduite")
+    pilote.demarrer_regulation()
+    for _ in range(25):
+        pilote._cycle()
+    assert pilote.etat["re_mesure"] < 0.95 * 2000.0     # Re mesuré sous le seuil
+    assert pilote._mode_regulation == "normal_low"
+    assert pilote.etat["phase_regulation"] != "PI vanne PdC"
+    assert pilote.etat["u_variateur"] > pilote.u_min_ventilateur
+
+
+def test_feed_forward_pdc_depuis_la_table_apprise_en_pourcent():
+    """La table PdC est apprise en % d'ouverture (variateur à u_min). Le
+    feed-forward doit la convertir en volts avec les butées calibrées.
+    RÉGRESSION : AttributeError (v_pour_re absent de TableGains) qui tuait le
+    thread, et pré-positionnement lu comme des volts bornés à 10, donc
+    plafonné à 1 V (~10 % d'ouverture)."""
+    pilote, es = _pilote_en_position("fc_3voies_90")
+    pilote.seuil_bas_re = 2000.0
+    pilote.u_min_ventilateur = 0.5
+    pilote.table_gains_pdc = TableGains([(30.0, 300.0), (100.0, 1500.0)])
+    es.mesures["dp_diaph_500"] = 0.5
+    pilote.definir_consigne(1000.0, "conduite")
+    pilote.demarrer_regulation()
+    pilote._cycle()
+    pct = 30.0 + (1000.0 - 300.0) / (1500.0 - 300.0) * 70.0
+    v_attendu = pilote.pdc_recopie_min + pct / 100.0 * (
+        pilote.pdc_recopie_max - pilote.pdc_recopie_min)
+    assert pilote._mode_regulation == "pdc_control"
+    assert pilote.etat["phase_regulation"] == "FF+PI vanne PdC"
+    assert pilote._diag["v_ff_pdc"] == pytest.approx(v_attendu, abs=1e-3)
+    assert pilote.etat["u_variateur"] == pytest.approx(0.5)
+    assert pilote._pdc_consigne == pytest.approx(v_attendu, abs=0.2)
+
+
+def test_seuil_bas_re_de_config_au_dela_du_seuil_miller_ignore():
+    """config.json livrait seuil_bas_re_mesure = 7547, au-delà du seuil
+    Miller/ISO (5000) : toute consigne Miller partait en mode PdC, variateur
+    figé à u_min, consigne inatteignable et sans alarme. Le seuil est
+    désormais ignoré et le motif publié."""
+    pilote, es = _pilote_en_position("fc_3voies_90")
+    pilote.seuil_bas_re = 7547.0
+    pilote.u_min_ventilateur = 0.3
+    pilote.table_gains = TableGains()
+    pilote.table_gains_bas_re = TableGains()
+    pilote._gain_re_par_volt = None
+    es.mesures["dp_diaph_500"] = 0.5
+    pilote.definir_consigne(3000.0, "conduite")
+    pilote.demarrer_regulation()
+    for _ in range(25):
+        pilote._cycle()
+    assert pilote._mode_regulation == "normal_low"
+    assert pilote.etat["u_variateur"] > 0.3
+    assert "ignoré" in pilote.etat["bas_re_motif"]
+
+
+def test_plomberie_croisee_prise_en_compte_par_le_decodage():
+    """positions_vanne_3voies interverti (ISO alimenté à 90°) : la vanne en
+    butée 90° est sur l'ISO, la régulation ISO démarre sans manœuvre.
+    RÉGRESSION : etat_vannes codait 0° = ISO en dur, la boucle attendait une
+    butée que la vanne ne pouvait atteindre, jusqu'au timeout."""
+    cfg = json.loads(json.dumps(CFG))
+    cfg["modbus"]["positions_vanne_3voies"] = {
+        "diaphragme_a_0deg": "miller", "diaphragme_a_90deg": "iso"}
+    es = StubES({"temperature": 20.0, "fc_3voies_90": True,
+                 "fc_bypass_ferme": True, "fc_pdc_ouvert": True,
+                 "dp_iso_500": 100.0})
+    pilote = Pilote(Banc(cfg), es, cfg)
+    pilote.bas_re_actif = False
+    pilote.definir_consigne(8000.0, "conduite")
+    pilote.demarrer_regulation()
+    for _ in range(10):
+        pilote._cycle()
+    assert pilote.etat["diaphragme"] == "iso"
+    assert pilote.etat["phase_regulation"] != "attente vannes"
+    assert pilote.etat.get("defaut_vanne") is None
+    assert True not in es.coil_diaphragme         # jamais commandée vers 0°
+
+
+def test_vanne_pdc_rouverte_une_fois_les_vannes_tor_en_place():
+    """Sortie du mode PdC : vanne PdC à mi-course, consigne ISO. Les modes
+    normaux attendent sa fin de course « ouverte » : une fois diaphragme et
+    bypass en place, elle doit être commandée grande ouverte.
+    RÉGRESSION : elle restait à sa position pré-positionnée, la fin de course
+    n'arrivait jamais -> attente indéfinie puis défaut vanne."""
+    es = StubES({"temperature": 20.0, "fc_3voies_0": True,
+                 "fc_bypass_ferme": True, "fc_pdc_ouvert": False})
+    pilote = Pilote(Banc(CFG), es, CFG)
+    pilote.bas_re_actif = False
+    pilote._pdc_consigne = 3.0
+    pilote.definir_consigne(8000.0, "conduite")
+    pilote.demarrer_regulation()
+    pilote._cycle()
+    assert pilote.etat["phase_regulation"] == "attente vannes"
+    assert pilote.etat["u_variateur"] == 0.0
+    assert pilote._pdc_consigne == 10.0
+
+
+def test_prepositionnement_pdc_dans_l_echelle_de_la_consigne():
+    """La recopie de la PdC plafonne à ~9,2 V (butées calibrées) : la
+    reprendre comme consigne refermait partiellement une vanne ouverte."""
+    pilote, es = _pilote_en_position("fc_3voies_0")
+    pilote._pdc_consigne = 10.0
+    pilote.etat["pdc_position"] = pilote.pdc_recopie_max      # recopie ~9,15 V
+    pilote._prepositionner_vanne_pdc_securitaire("normal_high")
+    assert pilote._pdc_consigne == 10.0
+
+
+def test_seuil_bas_re_derive_de_la_table_miller():
+    """Le seuil dérivé doit venir de la table Miller (bypass ouvert, la
+    configuration du mode PdC), pas de la table ISO mesurée bypass fermé,
+    qui surestime le Re tenu à u_min et enverrait en PdC des consignes que
+    le variateur à u_min ne peut pas atteindre."""
+    pilote, es = _pilote_en_position("fc_3voies_90")
+    pilote.seuil_bas_re = 7547.0                         # config : ignoré
+    pilote.u_min_ventilateur = 1.5
+    pilote.table_gains = TableGains([(1.0, 3500.0), (9.0, 31500.0)])
+    pilote.table_gains_bas_re = TableGains([(1.5, 2000.0), (5.0, 7000.0)])
+    assert pilote._seuil_bas_re() == pytest.approx(
+        2000.0 * pilote.marge_seuil_bas_re)
