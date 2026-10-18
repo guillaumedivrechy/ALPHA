@@ -133,6 +133,30 @@ def test_bypass_deja_en_butee_pas_de_manoeuvre(pilote_stub):
     assert pilote._manoeuvres["bypass"]["fc_attendue"] == "fc_bypass_ferme"
 
 
+def test_capteur_dp_suit_la_butee_lue_de_la_vanne_3_voies():
+    """ΔP ISO exploité en butée ISO, ΔP Miller en butée Miller — d'après les
+    fins de course, jamais d'après l'ordre donné : en manuel, l'ordre Miller
+    basculait aussitôt sur le capteur Miller, vanne encore en ISO. Pendant
+    la course (aucune butée lue), la dernière butée lue est conservée."""
+    es = StubES({"temperature": 20.0, "fc_3voies_0": True,
+                 "dp_iso_500": 80.0, "dp_diaph_500": 15.0})
+    pilote = Pilote(Banc(CFG), es, CFG)
+    pilote.mode_manuel_tension(3.0)
+    pilote._cycle()
+    assert pilote.etat["diaphragme_mesure"] == "iso"
+    assert pilote.etat["dp"] == pytest.approx(80.0, abs=1.0)
+    pilote.commander_diaphragme("miller")          # ordre donné, vanne en 0°
+    pilote._cycle()
+    assert pilote.etat["dp"] == pytest.approx(80.0, abs=1.0)
+    es.mesures.pop("fc_3voies_0")                  # en course
+    pilote._cycle()
+    assert pilote.etat["diaphragme_mesure"] == "iso"
+    es.mesures["fc_3voies_90"] = True              # arrivée en butée Miller
+    pilote._cycle()
+    assert pilote.etat["diaphragme_mesure"] == "miller"
+    assert pilote.etat["dp"] == pytest.approx(15.0, abs=1.0)
+
+
 def test_arret_coupe_aussi_le_mode_manuel(pilote_stub):
     """Bouton ARRÊT VARIATEUR : la tension manuelle ne doit pas être
     réappliquée au cycle suivant."""

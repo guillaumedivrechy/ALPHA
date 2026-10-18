@@ -549,6 +549,9 @@ class Pilote:
         self._biais_ff: dict = {}          # mode -> (id table, biais relatif appris)
         self._t_ecart_variateur = None     # début de l'écart commande / recopie AM
         self._re_cible_max = None          # consigne max mesurable (None = pas de limite)
+        # dernière butée LUE de la vanne 3 voies (diaphragme dont le capteur
+        # ΔP est exploité) : tenue pendant une course, faute de butée lue
+        self._diaphragme_mesure_dernier: str | None = None
         self._diag: dict = {}              # grandeurs internes publiées / journalisées
         self._cycles_trim_sature = 0       # cycles consécutifs correction en butée
         self._cycles_pdc_butee = 0         # cycles consécutifs PdC en butée, consigne non atteinte
@@ -1498,7 +1501,9 @@ class Pilote:
 
         # Lecture préliminaire de ΔP pour usage pendant les manœuvres/défauts
         # (sera relu plus tard avec le diaphragme définitif pour le calcul du débit)
-        dp = self._dp_corrige(mesures, self.etat["diaphragme"])
+        diaph_mesure = self._diaphragme_mesure(mesures)
+        self.etat["diaphragme_mesure"] = diaph_mesure
+        dp = self._dp_corrige(mesures, diaph_mesure)
 
         # ---- déroulement de la séquence (profil temps -> Re cible) ----------
         # Avancé même pendant un gel de manœuvre : le profil est temporel.
@@ -1759,15 +1764,15 @@ class Pilote:
             return
 
         # ---- mesure du débit et des Reynolds -------------------------------
-        # le diaphragme a pu changer pendant la préparation (vanne déjà en
-        # position, sans manœuvre) : relire le ΔP sur le capteur correspondant
-        # au diaphragme finalement retenu, pas celui du début de cycle.
-        dp_final = self._dp_corrige(mesures, diaph)
+        # capteur ΔP et géométrie du diaphragme de la butée LUE (le
+        # diaphragme visé par la préparation n'est en ligne qu'une fois la
+        # vanne arrivée) : ISO en butée ISO, Miller en butée Miller
+        dp_final = self._dp_corrige(mesures, diaph_mesure)
         # capteur ΔP proche de sa pleine échelle : le Re calculé plafonne au
         # plafond du capteur, pas au banc — une consigne au-delà n'est plus
         # atteignable par la mesure (le PI pousserait le ventilateur à fond
         # sans jamais converger). Signalé à l'opérateur via etat[dp_sature].
-        cle_dp = CLE_DP.get(diaph, CLE_DP["miller"])
+        cle_dp = CLE_DP.get(diaph_mesure, CLE_DP["miller"])
         if dp_final > self.saturation_dp * self._dp_pleine_echelle[cle_dp]:
             self._cycles_dp_sature += 1
         else:
@@ -1837,7 +1842,7 @@ class Pilote:
             })
             return
 
-        resultat = self.banc.qm_depuis_mesures(diaph, dp_final, T, p_amont)
+        resultat = self.banc.qm_depuis_mesures(diaph_mesure, dp_final, T, p_amont)
         re_mesure = resultat["re_veine"] if reference == "veine" \
             else resultat["re_conduite"]
 
@@ -2526,6 +2531,18 @@ class Pilote:
         """Seuil bas-Re de config (strategie_bas_re) au-delà du seuil
         Miller/ISO : incompatible avec le mode Miller à variateur réglé."""
         return bool(self.seuil_bas_re) and self.seuil_bas_re >= self.banc.seuil_re
+
+    def _diaphragme_mesure(self, mesures: dict) -> str:
+        """Diaphragme dont le capteur ΔP et la géométrie servent à la mesure :
+        celui de la butée LUE sur les fins de course de la vanne 3 voies
+        (ISO en butée ISO, Miller en butée Miller), jamais la position
+        commandée ni visée. Vanne en course (aucune butée lue) : dernière
+        butée lue. Sans fin de course 3 voies (banc sans retour de
+        position) : diaphragme de l'état."""
+        angle = self._angle_vanne_3voies(mesures)
+        if angle in self._diaphragme_par_angle:
+            self._diaphragme_mesure_dernier = self._diaphragme_par_angle[angle]
+        return self._diaphragme_mesure_dernier or self.etat["diaphragme"]
 
     def _dp_corrige(self, mesures: dict, diaphragme: str) -> float:
         """ΔP du capteur correspondant au diaphragme actif, corrigé du zéro
