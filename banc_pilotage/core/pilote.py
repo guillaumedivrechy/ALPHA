@@ -835,8 +835,14 @@ class Pilote:
         self._convergee_depuis = None
         if self.journal is not None:
             self.journal.fermer()
-        self.es.ecrire_variateur(0.0)
-        self.es.ecrire_variateur_run(False)
+        # liaison coupée : l'arrêt est latché ci-dessus, la boucle réécrira
+        # 0 V et RUN off dès le retour du coupleur — le bouton ne doit pas
+        # lever d'exception dans l'IHM
+        try:
+            self.es.ecrire_variateur(0.0)
+            self.es.ecrire_variateur_run(False)
+        except OSError as exc:
+            log.warning(f"Arrêt : écriture variateur impossible ({exc})")
         self._run_actif = False
         self.pi.reinitialiser(0.0)
         # le biais de table appris (_biais_ff) est conservé : il traduit la
@@ -1272,16 +1278,17 @@ class Pilote:
             self.etat.update({"regulation": False, "manuel": False,
                               "convergee": False, "u_variateur": 0.0,
                               "manoeuvre": None, "sequence": None})
+            # écritures de repli : AUCUNE exception ne doit sortir d'ici (le
+            # thread de la boucle en mourrait, variateur à sa dernière
+            # consigne) ; la liaison absente, on retente au cycle suivant
             try:
                 self.es.ecrire_variateur(0.0)
-            except (IOError, RuntimeError, OSError):
-                # Si même écrire 0V échoue, on ne peut plus rien faire
+            except Exception:  # noqa: BLE001
                 pass
             try:
                 self.es.ecrire_variateur_run(False)
                 self._run_actif = False
-            except (IOError, RuntimeError, OSError):
-                # Tentative d'arrêt du RUN en repli, même si communication rompue
+            except Exception:  # noqa: BLE001
                 pass
 
     def _boucle(self) -> None:
@@ -1291,7 +1298,11 @@ class Pilote:
         self._ready.set()
         while not self._stop.is_set():
             debut = time.monotonic()
-            self._cycle_protege()
+            try:
+                self._cycle_protege()
+            except Exception:  # noqa: BLE001
+                # dernier filet : la supervision ne s'arrête jamais
+                log.exception("Exception hors du cycle protégé")
             # ---- journal des conditions d'essai ------------------------
             # Écrit ICI et non en fin de _cycle : le cycle a cinq sorties
             # anticipées (manœuvre en cours, défaut capteur, défaut vanne,

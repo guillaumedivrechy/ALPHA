@@ -30,9 +30,13 @@ import time
 
 try:
     from pymodbus.client import ModbusTcpClient
+    from pymodbus.exceptions import ModbusException
     PYMODBUS_DISPONIBLE = True
 except ImportError:  # le mode simulation fonctionne sans pymodbus
     PYMODBUS_DISPONIBLE = False
+
+    class ModbusException(Exception):          # noqa: N818 (repli sans pymodbus)
+        pass
 
 
 class EntreesSorties:
@@ -114,6 +118,19 @@ class WagoModbus(EntreesSorties):
                 f"Connexion impossible au coupleur Wago {cfg_modbus['ip']} "
                 f"après {tentatives} tentatives")
 
+    def _transaction(self, requete, **params):
+        """Transaction Modbus sous verrou. Les exceptions de pymodbus
+        (ConnectionException, ModbusIOException…) ne dérivent pas d'OSError :
+        sur une coupure du coupleur, elles passaient au travers des replis
+        sûrs (qui attrapent IOError/OSError) et tuaient le thread de la
+        boucle, laissant le variateur à sa dernière consigne. Elles sont
+        converties en ConnectionError (une OSError)."""
+        with self._verrou:
+            try:
+                return requete(**params)
+            except ModbusException as exc:
+                raise ConnectionError(f"liaison Modbus perdue : {exc}") from exc
+
     # ------------------------------------------------------------- lectures
 
     @staticmethod
@@ -150,9 +167,8 @@ class WagoModbus(EntreesSorties):
                  if not nom.startswith("_")}
         registres = {}
         for debut, nombre in self._blocs(v["adresse"] for v in voies.values()):
-            with self._verrou:
-                rr = self.client.read_input_registers(
-                    address=debut, count=nombre)
+            rr = self._transaction(self.client.read_input_registers,
+                                   address=debut, count=nombre)
             if rr.isError():
                 raise IOError(f"Erreur Modbus lecture AI @{debut}+{nombre}")
             for i in range(nombre):
@@ -178,9 +194,8 @@ class WagoModbus(EntreesSorties):
                if not nom.startswith("_")}
         bits = {}
         for debut, nombre in self._blocs(v["adresse"] for v in tor.values()):
-            with self._verrou:
-                rr = self.client.read_discrete_inputs(
-                    address=debut, count=nombre)
+            rr = self._transaction(self.client.read_discrete_inputs,
+                                   address=debut, count=nombre)
             if rr.isError():
                 raise IOError(f"Erreur Modbus lecture DI @{debut}+{nombre}")
             for i in range(nombre):
@@ -208,13 +223,13 @@ class WagoModbus(EntreesSorties):
         if precedent is not None and precedent[0] == brut \
                 and maintenant - precedent[1] < self._t_rafraichissement:
             return
+        rr = self._transaction(self.client.write_register,
+                               address=adresse, value=brut)
+        if rr.isError():
+            # ne PAS mettre en cache : une mise à 0 de sécurité refusée
+            # doit être retentée au cycle suivant, pas dédupliquée
+            raise IOError(f"Erreur Modbus écriture AO @{adresse}")
         with self._verrou:
-            rr = self.client.write_register(address=adresse, value=brut)
-            if rr.isError():
-                # ne PAS mettre en cache : une mise à 0 de sécurité refusée
-                # doit être retentée au cycle suivant, pas dédupliquée
-                raise IOError(f"Erreur Modbus écriture AO @{adresse}")
-            # Mise à jour cache DANS le verrou pour éviter race condition
             self._ao_cache[adresse] = (brut, maintenant)
 
     def _ecrire_coil(self, voie: dict, etat: bool) -> bool:
@@ -232,13 +247,13 @@ class WagoModbus(EntreesSorties):
         if precedent is not None and precedent[0] == etat \
                 and maintenant - precedent[1] < self._t_rafraichissement:
             return False
+        rr = self._transaction(self.client.write_coil,
+                               address=adresse, value=etat)
+        if rr.isError():
+            # ne PAS mettre en cache : un retrait de sécurité refusé doit
+            # être retenté au cycle suivant, pas dédupliqué
+            raise IOError(f"Erreur Modbus écriture coil @{adresse}")
         with self._verrou:
-            rr = self.client.write_coil(address=adresse, value=etat)
-            if rr.isError():
-                # ne PAS mettre en cache : un retrait de sécurité refusé doit
-                # être retenté au cycle suivant, pas dédupliqué
-                raise IOError(f"Erreur Modbus écriture coil @{adresse}")
-            # Mise à jour cache DANS le verrou pour éviter race condition
             self._coil_cache[adresse] = (etat, maintenant)
         return True
 
