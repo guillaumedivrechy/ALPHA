@@ -2224,9 +2224,14 @@ class Pilote:
         re_moyen = fmean(fenetre) if fenetre else None
         re_sigma = pstdev(fenetre) if len(fenetre) > 1 else None
 
+        # jugée sur la consigne effectivement visée : bornée au maximum
+        # mesurable, une consigne hors plage ne convergeait jamais (Re moyen
+        # sur le plafond, mais comparé à la consigne saisie)
+        re_effectif = re_cible if self._re_cible_max is None \
+            else min(re_cible, self._re_cible_max)
         convergee = bool(
-            regul and re_cible > 0 and fenetre_pleine
-            and abs(re_moyen - re_cible) / re_cible < self.tolerance)
+            regul and re_effectif > 0 and fenetre_pleine
+            and abs(re_moyen - re_effectif) / re_effectif < self.tolerance)
         if convergee:
             if self._convergee_depuis is None:
                 self._convergee_depuis = maintenant
@@ -2280,6 +2285,7 @@ class Pilote:
             "nu": nu_actuel,
             "C": resultat.get("C"), "u_variateur": u,
             "re_cible": re_cible, "reference": reference,
+            "re_vise": re_effectif,
             "re_mesure": re_mesure, "convergee": convergee,
             "regulation": regul, "manuel": manuel,
             "pdc_consigne": self._pdc_consigne,

@@ -3744,7 +3744,8 @@ class Application(QMainWindow):
         re = e.get("re_mesure")
         if not isinstance(re, (int, float)) or not math.isfinite(re):
             return
-        cible = e.get("re_cible", 0.0)
+        # consigne réellement visée (bornée au maximum mesurable)
+        cible = e.get("re_vise", e.get("re_cible", 0.0))
         if not isinstance(cible, (int, float)) or not math.isfinite(cible):
             cible = 0.0
         if self._t0_acq is None:
@@ -3901,6 +3902,10 @@ class Application(QMainWindow):
         # Légende scope
         re_val = f"{re:.0f}" if re is not None else "—"
         sp_val = f"{e.get('re_cible', 0.0):.0f}"
+        vise = e.get("re_vise")
+        if vise is not None and e.get("re_cible") and vise < e["re_cible"] - 0.5:
+            # consigne bornée au maximum mesurable : la valeur réellement visée
+            sp_val += f" → limitée à {vise:.0f}"
         self._scope_legend_re.setText(
             f"<span style='color:#00B8DE'>▬</span>"
             f" Re calculé  <b style='color:#00B8DE'>{re_val}</b>")

@@ -231,3 +231,21 @@ def test_aucune_consigne_tant_que_les_vannes_bougent(banc):
     t_pret = b.t_fc("fc_3voies_0", "fc_bypass_ferme", "fc_pdc_ouvert")
     assert all(v == 0.0 for t, v in b.ecritures("variateur") if t0 < t <= t_pret)
     assert all(v >= 10.0 - 1e-9 for t, v in b.ecritures("pdc") if t <= t_pret)
+
+
+def test_consigne_veine_hors_capteur_bornee_et_convergee(banc):
+    """15 000 Re veine ≈ 28 000 Re conduite : au-delà du capteur ΔP ISO.
+    La régulation vise le maximum mesurable EN RE VEINE et s'y stabilise,
+    déclarée convergée (Re moyen jugé sur la consigne limitée)."""
+    b = banc
+    # plafond un peu sous le seuil de saturation (0,95 × 0,95 × 500 Pa) :
+    # avec marge_consigne_dp_relative = 1,0, il tombe SUR le seuil et le
+    # recul sur saturation retient la mesure ~1 % en dessous
+    b.p.marge_consigne_dp = 0.95
+    b.p.definir_consigne(15000.0, "veine")
+    b.p.demarrer_regulation()
+    b.cycles(120.0)
+    e = b.p.etat
+    assert 13000 < e["re_vise"] < 15000                 # plafond en Re veine
+    assert e["re_moyen"] == pytest.approx(e["re_vise"], rel=0.01)
+    assert e["convergee"]

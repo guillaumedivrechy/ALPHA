@@ -126,9 +126,11 @@ def _cles_publiees_par_le_pilote() -> set:
     cles |= set(re.findall(r'"(\w+)"\s*:', SRC_PILOTE[
         SRC_PILOTE.find("self.etat = {"):SRC_PILOTE.find("self.etat = {") + 400]))
     for m in re.finditer(r'self\.etat\.update\(\{', SRC_PILOTE):
-        bloc = SRC_PILOTE[m.end():m.end() + 1600]
+        # fenêtre large, bornée par la fin du bloc : le bloc principal de
+        # publication du cycle dépasse 1 600 caractères
+        bloc = SRC_PILOTE[m.end():m.end() + 4000]
         fin = bloc.find("\n        })")
-        cles |= set(re.findall(r'"(\w+)"\s*:', bloc[:fin if fin > 0 else 1600]))
+        cles |= set(re.findall(r'"(\w+)"\s*:', bloc[:fin if fin > 0 else 4000]))
     return cles
 
 
