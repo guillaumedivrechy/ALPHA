@@ -3744,6 +3744,8 @@ class Application(QMainWindow):
         re = e.get("re_mesure")
         if not isinstance(re, (int, float)) or not math.isfinite(re):
             return
+        if e.get("diaphragme_lu") == "en_transit":
+            return                 # vanne 3 voies en course : pas de mesure
         # consigne réellement visée (bornée au maximum mesurable)
         cible = e.get("re_vise", e.get("re_cible", 0.0))
         if not isinstance(cible, (int, float)) or not math.isfinite(cible):
@@ -3843,7 +3845,11 @@ class Application(QMainWindow):
 
     def _tick_right(self, e: dict) -> None:
         re = e.get("re_mesure")
-        self._lbl_re_big.setText(f"{re:.0f}" if re is not None else "—")
+        # vanne 3 voies en course : le débit passe par les deux voies, aucun
+        # capteur ΔP ne le mesure -> pas de Re affiché
+        en_course = e.get("diaphragme_lu") == "en_transit"
+        self._lbl_re_big.setText(
+            "en cours" if en_course else f"{re:.0f}" if re is not None else "—")
         # hors régulation (manuel, arrêt), la mesure suit la référence choisie
         # sur l'IHM ; en régulation, celle de la consigne appliquée
         if not e.get("regulation") and e.get("reference") not in (None, self._ref_re):
@@ -3871,7 +3877,8 @@ class Application(QMainWindow):
         if depuis is not None:
             morceaux.append(f"{depuis:.0f} s" if depuis < 120
                             else f"{depuis / 60:.0f} min")
-        self._lbl_re_sub.setText("  ·  ".join(morceaux))
+        self._lbl_re_sub.setText(
+            "vanne 3 voies en course" if en_course else "  ·  ".join(morceaux))
 
         # State badge
         if e.get("manoeuvre"):
@@ -3900,7 +3907,7 @@ class Application(QMainWindow):
             f" background:{bg}; color:{fg};")
 
         # Légende scope
-        re_val = f"{re:.0f}" if re is not None else "—"
+        re_val = "en cours" if en_course else f"{re:.0f}" if re is not None else "—"
         sp_val = f"{e.get('re_cible', 0.0):.0f}"
         vise = e.get("re_vise")
         if vise is not None and e.get("re_cible") and vise < e["re_cible"] - 0.5:
