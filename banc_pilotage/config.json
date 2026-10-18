@@ -210,10 +210,10 @@
     }
   },
   "strategie_bas_re": {
-    "_commentaire": "Pilotage bas Reynolds : Miller avec bypass ouvert sous le seuil diaphragme (selection_diaphragme, avec hysteresis) ; sous le Re minimal tenu par le variateur seul (premier palier de la table Miller), variateur fixe a u_min et PI sur la vanne PdC (hysteresis +-5 %). seuil_re=0 -> seuil auto derive de la tension min exploitable (apprentissage 'freq_min'). marge_seuil = facteur applique a u_min pour ce seuil auto. gain_scale = facteur (<=1) applique aux gains PI de la vanne PdC. OPTIMISE: augmente de 0.3 a 0.6 pour convergence 2x plus rapide (surveiller oscillations au banc).",
+    "_commentaire": "Pilotage bas Reynolds : Miller avec bypass ouvert sous le seuil diaphragme (selection_diaphragme, avec hysteresis) ; sous le Re minimal tenu par le variateur seul (premier palier de la table Miller), variateur fixe a u_min et PI sur la vanne PdC (hysteresis +-5 %). seuil_bas_re_mesure (prioritaire s'il est sous le seuil Miller/ISO) ou seuil_re ; 0 -> seuil auto, a mi-chemin entre Re(u_min) et Re(u_pdc) dans la table Miller, pour que les deux modes couvrent la bande d'hysteresis. marge_ventilateur_pdc : tension du ventilateur en mode PdC = u_min x ce facteur (>= 1,11 pour couvrir l'hysteresis ; plus haut = Re minimal atteignable plus eleve). La table PdC est apprise a cette tension. gain_scale = facteur (<=1) applique aux gains PI de la vanne PdC. OPTIMISE: augmente de 0.3 a 0.6 pour convergence 2x plus rapide (surveiller oscillations au banc).",
     "actif": true,
     "seuil_re": 0,
-    "marge_seuil": 1.3,
+    "marge_ventilateur_pdc": 1.15,
     "gain_scale": 0.6,
     "u_min_ventilateur_v": 0.3,
     "seuil_bas_re_mesure": 7547,

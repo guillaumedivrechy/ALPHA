@@ -693,7 +693,7 @@ class Application(QMainWindow):
         """Arrête le timer d'initialisation si le dialog est fermé manuellement."""
         if hasattr(self, '_timer_verif_init') and self._timer_verif_init.isActive():
             self._timer_verif_init.stop()
-            self._log("Initialisation vannes annulée", COLORS["warning"])
+            self._log("Initialisation vannes annulée", COLORS["warn"])
 
     # ══════════════════════════════════════════════════════════════ HEADER
 
@@ -1706,9 +1706,10 @@ class Application(QMainWindow):
 
         # Stratégie bas-Re
         h = QHBoxLayout(); h.setSpacing(18)
-        h.addWidget(QLabel("Seuil bas-Re"))
+        h.addWidget(QLabel("Seuil mode PdC"))
         h.addWidget(spin_int("seuil_re", 0, 10000, " Re"))
-        h.addWidget(label_info("par défaut : 5000 Re | En dessous : bypass ouvert + Miller. 0 = auto depuis table"))
+        h.addWidget(label_info("0 = auto (table Miller) | En dessous : variateur fixe, vanne PdC régulée. "
+                               "Doit rester sous le seuil ISO/Miller"))
         h.addStretch()
         cl.addLayout(h)
 
@@ -1720,9 +1721,9 @@ class Application(QMainWindow):
         cl.addLayout(h)
 
         h = QHBoxLayout(); h.setSpacing(18)
-        h.addWidget(QLabel("Marge seuil"))
-        h.addWidget(spin_double("marge_seuil", 1.0, 2.0, 2))
-        h.addWidget(label_info("par défaut : 1.30 | Marge (×) appliquée à u_min pour dériver le seuil auto"))
+        h.addWidget(QLabel("Tension ventilateur PdC"))
+        h.addWidget(spin_double("marge_ventilateur_pdc", 1.0, 2.0, 2, " × u_min"))
+        h.addWidget(label_info("par défaut : 1.15 | ≥ 1.11 pour couvrir l'hystérésis ; ↑ = Re mini atteignable plus haut"))
         h.addStretch()
         cl.addLayout(h)
 
@@ -1803,8 +1804,8 @@ class Application(QMainWindow):
     def _mes_reg_charger(self) -> None:
         """Recharge les paramètres de régulation depuis config.json."""
         try:
-            cfg_path = Path(__file__).resolve().parent.parent / "config.json"
-            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+            # configuration en mémoire, celle du fichier passé par --config
+            cfg = self.cfg
             reg = cfg.get("regulation", {})
             sr = cfg.get("strategie_bas_re", {})
 
@@ -1818,13 +1819,13 @@ class Application(QMainWindow):
             # Note : gain_scheduling n'est plus dans l'IHM (widget retiré)
             # self._mes_reg_gain_scheduling.setChecked(reg.get("gain_scheduling", False))
 
-            self._mes_reg_widgets["seuil_re"].setValue(sr.get("seuil_re", 5000))
-            self._mes_reg_widgets["split_range_point"].setValue(sr.get("split_range_point", 5.0))
+            self._mes_reg_widgets["seuil_re"].setValue(sr.get("seuil_re", 0))
             self._mes_reg_widgets["gain_scale"].setValue(sr.get("gain_scale", 0.2))
-            self._mes_reg_widgets["marge_seuil"].setValue(sr.get("marge_seuil", 1.3))
+            self._mes_reg_widgets["marge_ventilateur_pdc"].setValue(
+                sr.get("marge_ventilateur_pdc", 1.15))
 
             self._mes_lbl_reg_status.setText(f"✓ Paramètres rechargés depuis config.json")
-            self._mes_lbl_reg_status.setStyleSheet(f"font-size:11px; color:{COLORS['success']}; background:transparent;")
+            self._mes_lbl_reg_status.setStyleSheet(f"font-size:11px; color:{COLORS['ok']}; background:transparent;")
             self._log("Maintenance : paramètres de régulation rechargés", COLORS["accentText"])
         except Exception as e:
             self._mes_lbl_reg_status.setText(f"✗ Erreur : {str(e)}")
@@ -1834,9 +1835,11 @@ class Application(QMainWindow):
     def _mes_reg_appliquer(self) -> None:
         """Applique les paramètres de régulation et les sauvegarde dans config.json."""
         try:
-            # Lire config actuelle
-            cfg_path = Path(__file__).resolve().parent.parent / "config.json"
-            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+            # Copie de la configuration EN MÉMOIRE (fichier de --config), et non
+            # relecture du config.json du dossier du programme : la sauvegarde
+            # suivante de l'onglet Configuration ou d'« Appliquer » écrivait
+            # sinon self.cfg, qui ignorait ces réglages, et les effaçait.
+            cfg = json.loads(json.dumps(self.cfg))
 
             # Mettre à jour les valeurs
             if "regulation" not in cfg:
@@ -1854,25 +1857,27 @@ class Application(QMainWindow):
             # cfg["regulation"]["gain_scheduling"] = self._mes_reg_gain_scheduling.isChecked()
 
             cfg["strategie_bas_re"]["seuil_re"] = self._mes_reg_widgets["seuil_re"].value()
-            cfg["strategie_bas_re"]["split_range_point"] = self._mes_reg_widgets["split_range_point"].value()
             cfg["strategie_bas_re"]["gain_scale"] = self._mes_reg_widgets["gain_scale"].value()
-            cfg["strategie_bas_re"]["marge_seuil"] = self._mes_reg_widgets["marge_seuil"].value()
+            cfg["strategie_bas_re"]["marge_ventilateur_pdc"] = \
+                self._mes_reg_widgets["marge_ventilateur_pdc"].value()
+            cfg["strategie_bas_re"].pop("split_range_point", None)   # réglage obsolète
 
-            # Sauvegarder config.json
-            cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+            ecrire_json_atomique(self.chemin_cfg, cfg)
+            self.cfg.clear()
+            self.cfg.update(cfg)              # dict partagé avec l'apprentissage
 
             # Appliquer immédiatement au pilote (gains, rampe, tau, bas-Re)
-            self.pilote.appliquer_config(cfg)
+            self.pilote.appliquer_config(self.cfg)
 
             self._mes_lbl_reg_status.setText(
                 f"✓ Paramètres appliqués et sauvegardés | "
                 f"Kp={cfg['regulation']['kp']:.2f}, Ki={cfg['regulation']['ki']:.3f}, "
                 f"Rampe={cfg['regulation']['rampe_v_par_s']:.1f} V/s")
-            self._mes_lbl_reg_status.setStyleSheet(f"font-size:11px; color:{COLORS['success']}; background:transparent;")
+            self._mes_lbl_reg_status.setStyleSheet(f"font-size:11px; color:{COLORS['ok']}; background:transparent;")
             self._log(
                 f"Maintenance : paramètres appliqués - "
                 f"Kp={cfg['regulation']['kp']:.2f}, Ki={cfg['regulation']['ki']:.3f}",
-                COLORS["success"])
+                COLORS["ok"])
         except Exception as e:
             self._mes_lbl_reg_status.setText(f"✗ Erreur : {str(e)}")
             self._mes_lbl_reg_status.setStyleSheet(f"font-size:11px; color:{COLORS['error']}; background:transparent;")

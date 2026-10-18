@@ -960,8 +960,10 @@ class Apprentissage:
         re_min_exploitable = None
 
         if t is not None:
-            # Variateur à u_min (mesuré en Phase 1)
-            self._variateur(u_min_reco)
+            # table PdC apprise à la tension du ventilateur EN MODE PdC
+            # (u_min × marge_ventilateur_pdc), celle où la boucle l'utilise
+            self._variateur(round(
+                u_min_reco * self.pilote.marge_ventilateur_pdc, 2))
 
             # PDC ouverte au départ
             self.pilote.commander_vanne_perte_charge_pct(100.0)
@@ -1045,9 +1047,13 @@ class Apprentissage:
                         # Attendre stabilisation circuit
                         self._pause(5.0)
 
-                        # Montée progressive de u_seuil à 10V par paliers de 0.3V
+                        # Montée à 10 V par paliers de 0,3 V depuis une tension
+                        # visant Re ≈ 4500 EN ISO (u_seuil, mesuré en Miller
+                        # bypass ouvert, y donne déjà ~11000 Re : la table ISO
+                        # commençait trop haut)
                         pas_montee = 0.3
-                        u = u_seuil
+                        gain_re_v = self.pilote._gain_re_par_volt or 2000.0
+                        u = round(max(1.5, min(3.0, 4500.0 / gain_re_v)), 2)
 
                         while u <= 10.0:
                             r = _palier(u, f"palier montant {u:.2f} V (plage haute)")
@@ -1284,7 +1290,10 @@ class Apprentissage:
         paliers_pdc = []  # Table de gains PDC : [(pdc_pct, re), ...]
 
         if t is not None:
-            self._variateur(u_min_reco)
+            # table PdC apprise à la tension du ventilateur EN MODE PdC
+            # (u_min × marge_ventilateur_pdc), celle où la boucle l'utilise
+            self._variateur(round(
+                u_min_reco * self.pilote.marge_ventilateur_pdc, 2))
             self.pilote.commander_vanne_perte_charge_pct(100.0)
             ok = self._attendre_pdc_extreme(10.0, 90.0, "ouverture PDC")
 
@@ -1371,13 +1380,13 @@ class Apprentissage:
 
         Arrêt automatique à ΔP > 495 Pa (99% pleine échelle capteur 500 Pa).
 
-        Phase 4a : Descente depuis u_seuil jusqu'à 3.5V (chevauchement avec Miller)
-        Phase 4b : Montée depuis u_seuil jusqu'à 10V ou saturation ΔP
+        Phase 4a : Descente depuis une tension de départ visant Re ≈ 4500
+                   (estimée par le gain appris) jusqu'à Re ≈ 3000
+                   (chevauchement avec Miller)
+        Phase 4b : Montée depuis ce point de départ jusqu'à 10V ou saturation ΔP
 
-        Nécessite u_seuil (tension au seuil Re=5000), soit :
-        - fourni en paramètre
-        - lu depuis config["strategie_bas_re"]["u_seuil_bas_re_v"]
-        - lu depuis resultats["re_mapping_miller"]["u_seuil_bas_re_v"]
+        u_seuil (tension Miller au seuil Re=5000, paramètre, config ou
+        résultats re_mapping_miller) n'est plus qu'informatif.
 
         Circuit : bypass fermé, PDC 100%, ISO (plage haute).
         Le chevauchement 4000-5000 Re permet de valider la cohérence avec Miller."""
@@ -1390,10 +1399,8 @@ class Apprentissage:
             u_seuil = self.cfg.get("strategie_bas_re", {}).get("u_seuil_bas_re_v")
         if u_seuil is None and "re_mapping_miller" in self.resultats:
             u_seuil = self.resultats["re_mapping_miller"].get("u_seuil_bas_re_v")
-        if u_seuil is None or u_seuil <= 0:
-            self.etat["statut"] = ("u_seuil manquant : lancez d'abord "
-                                   "re_mapping_miller ou spécifiez u_seuil")
-            return
+        # u_seuil (Miller) n'est plus qu'informatif : la plage ISO est
+        # parcourue depuis son propre point de départ (Phase 4a)
 
         def _palier(u: float, statut: str, duree: float | None = None):
             """Applique u, attend duree, mesure sur la fin. Retourne
@@ -1497,11 +1504,13 @@ class Apprentissage:
         self._variateur(0.0)
         self._pause(3.0)  # Pause avant de relancer la montée
 
-        # ---- Phase 4b : montée progressive u_seuil → 10V ----
+        # ---- Phase 4b : montée progressive → 10V ----
         # Pas adaptatif : gros pas en bas (montée rapide), pas fin en haut (précision saturation)
-        # Note : on part directement du premier pas au-dessus de u_seuil pour éviter doublon
-        pas_actuel = 0.1 if u_seuil >= 6.0 else pas
-        u = round(u_seuil + pas_actuel, 2)
+        # Départ juste au-dessus du palier de départ ISO (déjà mesuré), et non
+        # de u_seuil : mesuré en Miller bypass ouvert, il donne ~11000 Re en
+        # ISO et la table sautait de ~6000 à ~20000 Re sans point intermédiaire.
+        pas_actuel = 0.5 if u_depart_iso >= 6.0 else pas
+        u = round(u_depart_iso + pas_actuel, 2)
 
         while u <= 10.0:
             r = _palier(u, f"palier montant {u:.2f} V (plage haute)")
@@ -1555,8 +1564,9 @@ class Apprentissage:
         }
 
         self.etat["statut"] = (
-            f"terminé ISO : {len(paliers_plage_haute)} paliers depuis "
-            f"u_seuil={u_seuil:.1f}V (plage haute)")
+            f"terminé ISO : {len(paliers_plage_haute)} paliers "
+            f"de {paliers_plage_haute[0][0] if paliers_plage_haute else 0:.1f} V "
+            f"à {paliers_plage_haute[-1][0] if paliers_plage_haute else 0:.1f} V")
 
     # ------------------------------------------------- essai indiciel
 

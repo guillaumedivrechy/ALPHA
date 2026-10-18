@@ -487,7 +487,7 @@ def test_bascule_bas_re_en_cours_recale_le_pi():
     assert pilote._mode_regulation == "pdc_control"
     v_ff = pilote._pdc_ff_v(1000.0)
     assert appels and appels[0] == pytest.approx(v_ff)
-    assert pilote.etat["u_variateur"] == pytest.approx(0.5)
+    assert pilote.etat["u_variateur"] == pytest.approx(pilote._u_pdc())
 
 
 def test_duree_cycle_publiee(tmp_path):
@@ -912,7 +912,7 @@ def test_feed_forward_pdc_depuis_la_table_apprise_en_pourcent():
     assert pilote._mode_regulation == "pdc_control"
     assert pilote.etat["phase_regulation"] == "FF+PI vanne PdC"
     assert pilote._diag["v_ff_pdc"] == pytest.approx(v_attendu, abs=1e-3)
-    assert pilote.etat["u_variateur"] == pytest.approx(0.5)
+    assert pilote.etat["u_variateur"] == pytest.approx(pilote._u_pdc())
     assert pilote._pdc_consigne == pytest.approx(v_attendu, abs=0.2)
 
 
@@ -999,8 +999,38 @@ def test_seuil_bas_re_derive_de_la_table_miller():
     pilote.u_min_ventilateur = 1.5
     pilote.table_gains = TableGains([(1.0, 3500.0), (9.0, 31500.0)])
     pilote.table_gains_bas_re = TableGains([(1.5, 2000.0), (5.0, 7000.0)])
+    t = pilote.table_gains_bas_re
     assert pilote._seuil_bas_re() == pytest.approx(
-        2000.0 * pilote.marge_seuil_bas_re)
+        0.5 * (t.re_pour_u_ff(1.5) + t.re_pour_u_ff(pilote._u_pdc())))
+
+
+def test_seuil_derive_couvre_la_bande_d_hysteresis_des_deux_modes():
+    """Mode PdC : variateur à u_pdc, PdC ouverte -> Re maximal Re(u_pdc).
+    Mode Miller réglé : variateur >= u_min -> Re minimal Re(u_min). Chaque
+    mode doit couvrir sa moitié de la bande ±5 % autour du seuil.
+    RÉGRESSION : seuil = 1,3 × Re(u_min) avec le variateur figé à u_min,
+    les consignes entre Re(u_min) et 1,3 × Re(u_min) étaient inatteignables."""
+    pilote, es = _pilote_en_position("fc_3voies_90")
+    pilote.seuil_bas_re = 0.0
+    pilote.u_min_ventilateur = 1.5
+    pilote.table_gains_bas_re = TableGains([(1.5, 2000.0), (5.0, 7000.0)])
+    t = pilote.table_gains_bas_re
+    seuil = pilote._seuil_bas_re()
+    assert t.re_pour_u_ff(pilote._u_pdc()) >= 1.05 * seuil     # haut de bande en PdC
+    assert t.re_pour_u_ff(pilote.u_min_ventilateur) <= 0.95 * seuil  # bas de bande en Miller
+    assert pilote._u_pdc() > pilote.u_min_ventilateur
+
+
+def test_seuil_manuel_retenu_si_le_seuil_mesure_est_inutilisable():
+    """config.json : seuil_bas_re_mesure = 7547 (inutilisable, au-delà du
+    seuil Miller/ISO) masquait le seuil manuel réglé depuis l'IHM."""
+    cfg = json.loads(json.dumps(CFG))
+    cfg["strategie_bas_re"].update({"seuil_bas_re_mesure": 7547, "seuil_re": 1800})
+    pilote = Pilote(Banc(cfg), StubES({"temperature": 20.0}), cfg)
+    assert pilote.seuil_bas_re == 1800
+    cfg["strategie_bas_re"].update({"seuil_bas_re_mesure": 2500})
+    pilote.appliquer_config(cfg)
+    assert pilote.seuil_bas_re == 2500                # mesuré valide : prioritaire
 
 
 # ---- replis sûrs et arrêt total (revue complète) ---------------------------

@@ -34,8 +34,13 @@ deux fichiers** (qm, Re, C, ε, Y1).
    À chaque cycle, le logiciel lit ΔP, P_amont et T, recalcule le débit
    réel (ISO 5167 ou Miller, itératif comme dans Excel) et en déduit le Re
    calculé. La correction est gelée tant que la recopie du variateur n'a
-   pas rejoint la commande. Sous le Re minimal du variateur seul, celui-ci
-   est fixé à sa tension mini et un PI règle la vanne perte de charge.
+   pas rejoint la commande. Sous le seuil bas-Re (mode PdC), le variateur
+   est fixé un peu au-dessus de sa tension mini (u_min ×
+   `strategie_bas_re.marge_ventilateur_pdc`, 1,15 par défaut) et un PI règle
+   la vanne perte de charge. Le seuil automatique est placé à mi-chemin
+   entre le Re minimal du mode Miller (variateur à u_min) et le Re maximal
+   du mode PdC (PdC ouverte) : les deux modes couvrent ainsi la bande
+   d'hystérésis. La table PdC est apprise à cette même tension.
 4. Chaque voie ΔP et P_amont fournit un signal **0-10 V = 0-500 Pa**. Les
    voies **ΔP Miller** et **P_amont** embarquent deux capteurs montés
    **maître/esclave (50 Pa + 500 Pa)** : sous ~50 Pa la mesure provient du

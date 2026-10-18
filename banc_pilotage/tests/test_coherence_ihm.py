@@ -353,3 +353,13 @@ def test_chaque_section_daffichage_est_isolee():
     sect = SRC_GUI[d2:f2]
     assert "_sections_en_defaut" in sect
     assert "self._log(" in sect
+
+
+def test_couleurs_utilisees_definies_dans_le_theme():
+    """COLORS['success'] et COLORS['warning'] n'existaient pas : l'onglet
+    maintenance affichait « Erreur : 'success' » après un enregistrement
+    réussi, et l'annulation de l'initialisation des vannes levait KeyError."""
+    import re
+    from ui.theme import COLORS
+    utilisees = set(re.findall(r"COLORS\[['\"](\w+)['\"]\]", SRC_GUI))
+    assert utilisees - set(COLORS) == set()

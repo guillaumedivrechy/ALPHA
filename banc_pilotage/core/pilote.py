@@ -62,6 +62,26 @@ def _seuil_saturation(valeur: float) -> float:
     return 0.95
 
 
+def _seuil_bas_re_de_config(sr: dict, seuil_diaphragme: float,
+                            defaut: float) -> float:
+    """Seuil bas-Re fixé en config : seuil mesuré (seuil_bas_re_mesure)
+    prioritaire sur le seuil manuel (seuil_re), sauf s'il est inutilisable
+    (au-delà du seuil Miller/ISO) — le seuil manuel, celui que règle l'IHM,
+    restait sinon sans effet. 0 = seuil dérivé de u_min."""
+    mesure = sr.get("seuil_bas_re_mesure") or 0.0
+    manuel = sr.get("seuil_re", defaut) or 0.0
+    if mesure and (mesure < seuil_diaphragme or not manuel):
+        return mesure
+    return manuel
+
+
+def _marge_pdc(valeur: float) -> float:
+    """Facteur de tension du ventilateur en mode PdC. Sous ~1,11, le Re
+    maximal du mode PdC ne couvre plus la bande d'hystérésis (±5 %) du seuil
+    bas-Re ; au-delà de 2, le bas de plage serait inutilement sacrifié."""
+    return min(max(valeur, 1.0), 2.0)
+
+
 # Mappings Enum → string pour publication état vannes vers IHM
 _MAP_DIAPHRAGME = {
     PositionDiaphragme.ISO: "iso",
@@ -455,13 +475,12 @@ class Pilote:
         # l'apprentissage (sinon valeur de config, sinon désactivé).
         srcfg = cfg.get("strategie_bas_re", {})
         self.bas_re_actif = srcfg.get("actif", True)
-        # Seuil mesuré (prioritaire) sinon seuil manuel, sinon 0 = auto
-        self.seuil_bas_re = srcfg.get("seuil_bas_re_mesure",
-                                      srcfg.get("seuil_re", 0))
+        self.seuil_bas_re = _seuil_bas_re_de_config(
+            srcfg, banc.seuil_re, 0.0)
         self.u_min_ventilateur = srcfg.get("u_min_ventilateur_v", 0.0)
         self.u_seuil_bas_re = srcfg.get("u_seuil_bas_re_v", 0.0)
-        # marge (×) appliquée à u_min pour dériver le seuil bas-Re auto
-        self.marge_seuil_bas_re = srcfg.get("marge_seuil", 1.3)
+        # facteur (×) sur u_min : tension du ventilateur en mode PdC (cf. _u_pdc)
+        self.marge_ventilateur_pdc = _marge_pdc(srcfg.get("marge_ventilateur_pdc", 1.15))
         # PDC minimale exploitable (%) mesurée par apprentissage, défaut 50%
         # (limite physique décrochage observée empiriquement)
         self.pdc_min_exploitable_pct = srcfg.get("pdc_min_exploitable_pct", 50.0)
@@ -872,12 +891,11 @@ class Pilote:
 
             sr = cfg.get("strategie_bas_re", {})
             self.bas_re_actif = sr.get("actif", self.bas_re_actif)
-            # Seuil mesuré prioritaire sur seuil manuel
-            self.seuil_bas_re = sr.get("seuil_bas_re_mesure",
-                                       sr.get("seuil_re", self.seuil_bas_re))
+            self.seuil_bas_re = _seuil_bas_re_de_config(
+                sr, self.banc.seuil_re, self.seuil_bas_re)
             self.u_seuil_bas_re = sr.get("u_seuil_bas_re_v", self.u_seuil_bas_re)
-            self.marge_seuil_bas_re = sr.get("marge_seuil",
-                                             self.marge_seuil_bas_re)
+            self.marge_ventilateur_pdc = _marge_pdc(sr.get(
+                "marge_ventilateur_pdc", self.marge_ventilateur_pdc))
             self.pdc_min_exploitable_pct = sr.get("pdc_min_exploitable_pct",
                                                    self.pdc_min_exploitable_pct)
             self.bas_re_scale = min(max(sr.get("gain_scale",
@@ -2113,13 +2131,7 @@ class Pilote:
                 # très bas Re : tension fixe au minimum, le PI règle la PdC.
                 # Le PI a été calé sur le feed-forward PdC par _preparer_pi
                 # au changement de mode (plus haut).
-                if self.u_min_ventilateur:
-                    u = self.u_min_ventilateur
-                else:
-                    log.warning(
-                        f"u_min_ventilateur non configuré, utilisation de "
-                        f"{_U_MIN_VENTILATEUR_FALLBACK}V par défaut")
-                    u = _U_MIN_VENTILATEUR_FALLBACK
+                u = self._u_pdc()
 
                 consigne_pi = self._reference_filtree(re_vise, re_mesure)
                 self.pi.u_max = 10.0          # sortie = vanne, pas variateur
@@ -2217,6 +2229,10 @@ class Pilote:
             if not seuil or self.u_min_ventilateur is None:
                 motifs.append("seuil bas-Re inconnu : lancer l'apprentissage "
                               "« Re mapping » (ou fixer strategie_bas_re.seuil_re)")
+            bornes = self._re_bornes_bas_re()
+            if bornes and not self.seuil_bas_re and bornes[1] < 1.105 * bornes[0]:
+                motifs.append("marge_ventilateur_pdc trop faible : le mode PdC "
+                              "ne couvre plus la bande d'hystérésis du seuil")
             bas_re_motif = " ; ".join(motifs) or None
 
         # Calculer systématiquement rho, mu, nu (même si dP=0)
@@ -2307,19 +2323,8 @@ class Pilote:
         seuil = self.banc.seuil_re
         hyst = self.banc.hysteresis_re
 
-        # Re minimal tenu par le variateur seul en Miller (bypass ouvert).
-        # Un seuil manuel sous le seuil diaphragme est prioritaire (tests,
-        # forçage) ; sinon premier palier non nul de la table Miller.
-        if self.seuil_bas_re and self.seuil_bas_re < seuil:
-            freq_min_re = self.seuil_bas_re
-        elif self.table_gains_bas_re.valide_ff():
-            freq_min_re = self.table_gains_bas_re._points_ff()[0][1]
-        else:
-            freq_min_re = (self.u_min_ventilateur or 0.3) * \
-                (self._gain_re_par_volt or 1000)
-
-        if not self.bas_re_actif:
-            freq_min_re = 0.0              # stratégie désactivée : jamais de mode PdC
+        # même seuil bas-Re que la boucle (0 si la stratégie est désactivée)
+        freq_min_re = self._seuil_bas_re()
 
         courant = self._mode_regulation
         if courant is None:
@@ -2345,9 +2350,13 @@ class Pilote:
         return MODE_PDC_CONTROL if bas else MODE_NORMAL_LOW
 
     def _seuil_bas_re(self) -> float:
-        """Re en dessous duquel on bascule en stratégie bas-Re (bypass +
-        split-range PdC). Valeur de config si fixée, sinon dérivée de la
-        tension mini exploitable et du gain (Re atteignable à u_min × marge).
+        """Re en dessous duquel on bascule en mode PdC. Valeur de config si
+        fixée, sinon dérivée de u_min : à mi-chemin entre Re(u_min), le Re
+        minimal du mode Miller à variateur réglé, et Re(u_pdc), le Re maximal
+        du mode PdC (variateur à u_pdc, PdC grande ouverte). Les deux modes
+        couvrent ainsi la bande d'hystérésis (±5 %) : avant, le seuil valait
+        1,3 × Re(u_min) avec le variateur figé à u_min en mode PdC, et les
+        consignes entre Re(u_min) et 1,3 × Re(u_min) étaient inatteignables.
 
         Un seuil configuré au-delà du seuil Miller/ISO est ignoré (cf.
         _seuil_bas_re_config_invalide) : toute consigne Miller partirait en
@@ -2360,16 +2369,30 @@ class Pilote:
             return 0.0                     # stratégie désactivée : jamais de mode PdC
         if self.seuil_bas_re and not self._seuil_bas_re_config_invalide():
             return self.seuil_bas_re
-        if self.u_min_ventilateur and self.table_gains_bas_re.valide_ff():
-            return self.table_gains_bas_re.re_pour_u_ff(
-                self.u_min_ventilateur) * self.marge_seuil_bas_re
-        if self.u_min_ventilateur and self.table_gains.est_valide():
-            return self.table_gains.re_pour_tension(
-                self.u_min_ventilateur) * self.marge_seuil_bas_re
-        if self.u_min_ventilateur and self._gain_re_par_volt:
-            return self.u_min_ventilateur * self._gain_re_par_volt \
-                * self.marge_seuil_bas_re
-        return 0.0
+        bornes = self._re_bornes_bas_re()
+        return 0.5 * (bornes[0] + bornes[1]) if bornes else 0.0
+
+    def _u_pdc(self) -> float:
+        """Tension du ventilateur en mode PdC : u_min × marge_ventilateur_pdc."""
+        u_min = self.u_min_ventilateur or _U_MIN_VENTILATEUR_FALLBACK
+        return min(u_min * self.marge_ventilateur_pdc, 10.0)
+
+    def _re_bornes_bas_re(self) -> tuple[float, float] | None:
+        """(Re(u_min), Re(u_pdc)) en Miller, bypass ouvert, PdC ouverte :
+        table Miller en priorité ; la table ISO et le gain global, mesurés
+        bypass fermé, surestiment ces Re (repli faute de mieux)."""
+        if not self.u_min_ventilateur:
+            return None
+        u0, u1 = self.u_min_ventilateur, self._u_pdc()
+        if self.table_gains_bas_re.valide_ff():
+            t = self.table_gains_bas_re
+            return t.re_pour_u_ff(u0), t.re_pour_u_ff(u1)
+        if self.table_gains.est_valide():
+            t = self.table_gains
+            return t.re_pour_tension(u0), t.re_pour_tension(u1)
+        if self._gain_re_par_volt:
+            return u0 * self._gain_re_par_volt, u1 * self._gain_re_par_volt
+        return None
 
     def _configuration_modes(self) -> ConfigurationModes:
         """Seuils de la gestion des modes, alignés sur ceux du Banc
@@ -2637,7 +2660,7 @@ class Pilote:
           L'intégrale démarre sur le biais de table appris dans ce mode
           (rapporté au nouveau feed-forward) ; la sortie reste continue
           (le feed-forward appliqué repart de la commande courante).
-        - pdc_control : variateur à u_min, PI relatif sur la vanne PdC,
+        - pdc_control : variateur à u_pdc, PI relatif sur la vanne PdC,
           pré-positionné sur la table PdC si elle existe.
         Le PI relatif est aussi recalé sur le feed-forward dans les modes
         normaux : c'est le repli si la table devient inexploitable.
@@ -2649,13 +2672,12 @@ class Pilote:
             if pdc_ff is None and self.table_gains_bas_re.valide_ff():
                 # approximation : fraction de u_min atteinte -> ouverture PdC
                 u_ff = self.table_gains_bas_re.u_pour_re_ff(re_cond_attendu)
-                u_min = self.u_min_ventilateur or 0.3
-                # CORRECTION MINEUR-4 : u_ff < u_min (pas <=) pour feed-forward PDC correct
-                # Si u_ff >= u_min, le variateur peut tenir le Re seul → PdC 100% ouverte (10V)
-                # Si u_ff < u_min, interpoler linéairement entre pdc_min et 10V
-                if u_ff < u_min:
+                u_pdc = self._u_pdc()
+                # Si u_ff >= u_pdc, la PdC ouverte suffit (10 V) ; sinon
+                # interpoler entre l'ouverture minimale exploitable et 10 V
+                if u_ff < u_pdc:
                     pdc_min_v = self._pdc_pct_vers_v(self.pdc_min_exploitable_pct)
-                    ratio = max(0.0, min(1.0, u_ff / u_min))
+                    ratio = max(0.0, min(1.0, u_ff / u_pdc))
                     pdc_ff = pdc_min_v + (10.0 - pdc_min_v) * ratio
                 else:
                     pdc_ff = 10.0
