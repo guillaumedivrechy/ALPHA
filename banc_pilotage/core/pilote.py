@@ -523,6 +523,7 @@ class Pilote:
         self._re_cible_max = None          # consigne max mesurable (None = pas de limite)
         self._diag: dict = {}              # grandeurs internes publiées / journalisées
         self._cycles_trim_sature = 0       # cycles consécutifs correction en butée
+        self._cycles_pdc_butee = 0         # cycles consécutifs PdC en butée, consigne non atteinte
 
         # état courant (lu par l'IHM)
         # Initialiser rho, mu, nu avec des valeurs par défaut (air à 20°C, 101325 Pa)
@@ -2137,6 +2138,19 @@ class Pilote:
                     }
                 else:
                     self._diag = {"phase": "PI vanne PdC", "pdc_v": round(pdc_v, 3)}
+                # consigne hors de portée : variateur figé à u_min, la vanne
+                # PdC en butée ne peut plus rapprocher le Re de la consigne.
+                # Sans alarme, la régulation attendait indéfiniment.
+                ouverte = pdc_v >= 10.0 - 1e-6 and re_mesure < re_vise * (1.0 - self.tolerance)
+                fermee = pdc_v <= 1e-6 and re_mesure > re_vise * (1.0 + self.tolerance)
+                self._cycles_pdc_butee = self._cycles_pdc_butee + 1 \
+                    if (ouverte or fermee) else 0
+                if self._cycles_pdc_butee > int(5.0 / self.periode):
+                    self._diag["alerte_pdc"] = (
+                        f"consigne {re_vise:.0f} hors de portée du mode PdC "
+                        f"(vanne PdC en butée {'ouverte' if ouverte else 'fermée'}, "
+                        f"variateur fixé à {u:.2f} V) — ajuster "
+                        "strategie_bas_re (seuil, u_min) ou la consigne")
             elif vannes_pretes:
                 # modes normaux : PdC grande ouverte, variateur =
                 # feed-forward + correction PI en volts
@@ -2243,6 +2257,7 @@ class Pilote:
             "re_reference": self._diag.get("reference"),
             "phase_regulation": self._diag.get("phase"),
             "alerte_table_ff": self._diag.get("alerte_table_ff"),
+            "alerte_pdc": self._diag.get("alerte_pdc"),
         })
 
         # ===== LOGGER DIAGNOSTIC RÉGULATION =====

@@ -857,9 +857,13 @@ class Apprentissage:
         paliers = [(round(u, 2), round(re_a_derniere))]
         pas_precedent = pas  # Pour calcul marge finale
 
+        # décrochage franchi en pas grossier : on reprend au dernier palier
+        # stable en pas fin, sans quoi u_min (dernier stable + un pas) valait
+        # jusqu'à 1 V de trop (3,0 V pour un décrochage réel à 1,2 V)
+        pas_fin = False
         while u > 0.05:
             # Pas adaptatif : 0.1V en dessous de 1V pour zone PDC (optimisé)
-            pas_actuel = 0.1 if u <= 1.0 else pas
+            pas_actuel = 0.1 if (u <= 1.0 or pas_fin) else pas
             if u - pas_actuel < 0.05:  # Arrêt si prochain pas < 0.05V
                 break
             u = round(u - pas_actuel, 2)
@@ -876,6 +880,10 @@ class Apprentissage:
             # Critères de décrochage physiques uniquement (bruit ou non-monotonie)
             # Pas de limite basse arbitraire : descendre jusqu'au vrai décrochage
             if bruit > 0.12 or non_monotone:
+                if pas_actuel > 0.1:
+                    paliers.pop()                      # palier décroché : hors table
+                    u, pas_fin = derniere_stable, True
+                    continue
                 break                                  # décrochage détecté
             derniere_stable = u
             re_a_derniere = re_moy
@@ -1157,8 +1165,12 @@ class Apprentissage:
         paliers = [(round(u, 2), round(re_a_derniere))]
         pas_precedent = pas
 
+        # décrochage franchi en pas grossier : on reprend au dernier palier
+        # stable en pas fin, sans quoi u_min (dernier stable + un pas) valait
+        # jusqu'à 1 V de trop (3,0 V pour un décrochage réel à 1,2 V)
+        pas_fin = False
         while u > 0.05:
-            pas_actuel = 0.1 if u <= 1.0 else pas  # PDC : 0.05→0.1V (toujours dense)
+            pas_actuel = 0.1 if (u <= 1.0 or pas_fin) else pas  # PDC : 0.05→0.1V (toujours dense)
             if u - pas_actuel < 0.05:
                 break
             u = round(u - pas_actuel, 2)
@@ -1173,6 +1185,10 @@ class Apprentissage:
             # Critères de décrochage physiques uniquement (bruit ou non-monotonie)
             # Pas de limite basse arbitraire : descendre jusqu'au vrai décrochage
             if bruit > 0.12 or non_monotone:
+                if pas_actuel > 0.1:
+                    paliers.pop()                      # palier décroché : hors table
+                    u, pas_fin = derniere_stable, True
+                    continue
                 break
             derniere_stable = u
             re_a_derniere = re_moy

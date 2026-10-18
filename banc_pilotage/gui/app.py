@@ -466,6 +466,7 @@ class Application(QMainWindow):
         ("bas_re_motif",      "ℹ Stratégie bas-Re indisponible"),
         ("consigne_limitee",  "⚠ Consigne limitée au maximum mesurable"),
         ("alerte_table_ff",   "⚠ Table de gains à refaire"),
+        ("alerte_pdc",        "⚠ Consigne hors de portée du mode PdC"),
     ]
 
     def __init__(self, pilote: Pilote, mode: str, cfg: dict, chemin_cfg: Path):

@@ -1183,3 +1183,18 @@ def test_gain_appris_en_fonctionnement_relu_a_la_session_suivante():
     pilote.arreter()
     suivant = Pilote(Banc(CFG), StubES({"temperature": 20.0}), CFG)
     assert suivant._gain_re_par_volt == pytest.approx(3550.0)
+
+
+def test_consigne_hors_de_portee_du_mode_pdc_signalee():
+    """Variateur figé à u_min, PdC grande ouverte, Re toujours sous la
+    consigne : la régulation attendait indéfiniment sans rien signaler."""
+    pilote, es = _pilote_en_position("fc_3voies_90")
+    pilote.seuil_bas_re = 2000.0
+    pilote.u_min_ventilateur = 0.5
+    es.mesures["dp_diaph_500"] = 0.5                 # Re ~ 0
+    pilote.definir_consigne(1000.0, "conduite")
+    pilote.demarrer_regulation()
+    for _ in range(int(5.0 / pilote.periode) + 5):
+        pilote._cycle()
+    assert pilote._mode_regulation == "pdc_control"
+    assert "hors de portée" in (pilote.etat["alerte_pdc"] or "")
