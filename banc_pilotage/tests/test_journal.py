@@ -50,10 +50,10 @@ def test_entete_et_ligne(tmp_path):
     # de quelques milliers n'ont pas de sens physique. Le pilote, lui, garde
     # ses flottants.
     assert champs["Re consigne"] == "6000"
-    assert champs["Re mesure"] == "5987"        # 5987,3
+    assert champs["Re calculé"] == "5987"        # 5987,3
     assert champs["Re moyen"] == "5998"         # 5998,1
     assert champs["Re ecart-type"] == "28"      # 28,4
-    for col in ("Re consigne", "Re mesure", "Re moyen", "Re ecart-type"):
+    for col in ("Re consigne", "Re calculé", "Re moyen", "Re ecart-type"):
         assert "," not in champs[col], col
     # les autres colonnes gardent leurs decimales
     assert champs["dP [Pa]"] == "204,15"
@@ -183,7 +183,7 @@ def test_pilote_ouvre_et_ferme_le_journal(tmp_path):
         assert not pilote.journal.ouvert
         lignes = chemin.read_text(encoding="utf-8-sig").splitlines()
         assert len(lignes) >= 6                      # en-tête + cycles
-        assert "Re mesure" in lignes[0]
+        assert "Re calculé" in lignes[0]
 
         # une seconde session écrit un AUTRE fichier
         pilote.demarrer_regulation()

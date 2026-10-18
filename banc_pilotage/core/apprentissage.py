@@ -64,11 +64,10 @@ class Apprentissage:
                  "verif_cablage": self._test_verif_cablage}.get(test)
         if cible is None:
             return f"Test inconnu : {test}"
-        if test == "indiciel" and self.pilote.gain_scheduling \
-                and not self.pilote.table_gains.est_valide():
-            return ("Lancer d'abord la courbe de gain : sans table de "
-                    "gains, les kp/ki proposés par l'essai indiciel ne "
-                    "vaudraient qu'au point d'essai (gain scheduling actif).")
+        if test == "indiciel" and not self.pilote.table_gains.est_valide():
+            return ("Lancer d'abord la courbe de gain : les kp/ki proposés "
+                    "par l'essai indiciel s'appliquent à la correction en "
+                    "volts, qui s'appuie sur la pente de la table de gains.")
         self._annule.clear()
         self.etat.update({"en_cours": True, "test": test, "statut": "démarrage…"})
         self._thread = threading.Thread(target=self._executer,
@@ -92,8 +91,8 @@ class Apprentissage:
             try:
                 self.pilote.mode_manuel_tension(0.0)
                 self.pilote.arreter_regulation()
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning(f"Erreur mise en sécurité apprentissage : {e}")
             # les tests de vannes commandent es.* directement et peuvent laisser
             # etat["diaphragme"] désynchronisé (surtout si annulés en cours) :
             # on force la boucle à relire la position réelle sur les fins de
@@ -840,7 +839,7 @@ class Apprentissage:
         # ---- Phase 2 : mesure u_seuil (tension au seuil en mode bas-Re) ----
         # Trouver quelle tension variateur donne Re = seuil_cible (5000)
         # en config bas-Re (bypass ouvert, PDC 100%).
-        # Cette tension (u_seuil) sera utilisée dans split_range pour mapper
+        # Cette tension (u_seuil) est la tension variateur au seuil bas-Re, pour mapper
         # correctement la plage variateur.
         self.etat["statut"] = "mesure u_seuil (tension au seuil bas-Re)"
 
@@ -1290,10 +1289,14 @@ class Apprentissage:
 
     def _test_re_mapping_iso(self, u_seuil: float | None = None,
                              pas: float = 1.5, t_palier_s: float = 12.0) -> None:
-        """Caractérisation Re mapping ISO : plage haute 4000-25000 Re.
+        """Caractérisation Re mapping ISO : plage haute 4000-30000 Re.
 
-        Optimisé pour R² > 99.99% : 5-7 points suffisent (vs 17 avant).
-        Gain temps : ~70% (3.4 min → 1 min).
+        Optimisé pour R² > 99.99% avec pas adaptatif :
+        - 1.5V jusqu'à 6V (~20000 Re) : montée rapide
+        - 0.5V de 6V à 7V : transition
+        - 0.2V au-delà de 7V (~24000 Re) : détection précise saturation ΔP
+
+        Arrêt automatique à ΔP > 495 Pa (99% pleine échelle capteur 500 Pa).
 
         Phase 4a : Descente depuis u_seuil jusqu'à 3.5V (chevauchement avec Miller)
         Phase 4b : Montée depuis u_seuil jusqu'à 10V ou saturation ΔP
@@ -1422,7 +1425,7 @@ class Apprentissage:
         time.sleep(3.0)  # Pause avant de relancer la montée
 
         # ---- Phase 4b : montée progressive u_seuil → 10V ----
-        # Pas adaptatif : gros pas en bas (montée rapide), pas fin en haut (précision)
+        # Pas adaptatif : gros pas en bas (montée rapide), pas fin en haut (précision saturation)
         # Note : on part directement du premier pas au-dessus de u_seuil pour éviter doublon
         pas_actuel = 0.1 if u_seuil >= 6.0 else pas
         u = round(u_seuil + pas_actuel, 2)
@@ -1433,20 +1436,33 @@ class Apprentissage:
                 break
             re_moy, bruit = r
 
-            # Arrêt si ΔP ISO > 490 Pa (98% de 500 Pa, seuil urgence)
+            # Arrêt si ΔP ISO > 495 Pa (99% de 500 Pa, seuil urgence)
             # On utilise le ΔP brut directement, pas le drapeau dp_sature (qui est à 90%)
             # pour exploiter toute la plage du capteur ISO.
+            # Seuil relevé de 490→495 Pa pour maximiser la plage explorée.
             brutes = self.pilote.etat.get("mesures_brutes", {})
             dp_iso = brutes.get("dp_iso_500", 0.0)
-            if dp_iso > 490.0:
-                self.etat["statut"] = f"ΔP ISO saturé ({dp_iso:.0f} Pa) à {u:.1f}V"
+            if dp_iso > 495.0:
+                self.etat["statut"] = f"ΔP ISO saturé ({dp_iso:.0f} Pa) à {u:.1f}V, Re≈{re_moy:.0f}"
+                # Ajouter ce dernier point avant d'arrêter
+                paliers_plage_haute.append((u, round(re_moy)))
+                self.etat["paliers_plage_haute"] = list(paliers_plage_haute)
                 break
 
             paliers_plage_haute.append((u, round(re_moy)))
             self.etat["paliers_plage_haute"] = list(paliers_plage_haute)
 
-            # Pas adaptatif : 1.5V jusqu'à 6V, puis 0.3V au-delà (plus de points en haut)
-            pas_actuel = 0.3 if u >= 6.0 else pas
+            # Pas adaptatif progressif pour détecter précisément la saturation :
+            # - 1.5V jusqu'à 6V (montée rapide, zone connue)
+            # - 0.5V de 6V à 7V (transition)
+            # - 0.2V au-delà de 7V (zone critique >24000 Re, détection saturation)
+            if u >= 7.0:
+                pas_actuel = 0.2  # Très dense au-delà de ~24000 Re
+            elif u >= 6.0:
+                pas_actuel = 0.5  # Transition
+            else:
+                pas_actuel = pas  # Rapide (1.5V par défaut)
+
             u = round(u + pas_actuel, 2)
             if u > 10.0:
                 u = 10.0
@@ -1613,6 +1629,8 @@ class Apprentissage:
             reg["ki"] = r["ki_propose"]
             self.pilote.pi.kp = r["kp_propose"]
             self.pilote.pi.ki = r["ki_propose"]
+            self.pilote.trim.kp = r["kp_propose"]
+            self.pilote.trim.ki = r["ki_propose"]
             # mise en forme de référence calée sur le tau mesuré du procédé
             # (la consigne interne suit alors la trajectoire naturelle)
             reg["tau_consigne_s"] = r["tau_s"]

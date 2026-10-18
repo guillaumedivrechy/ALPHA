@@ -30,10 +30,8 @@ CLES_PRODUITES = {
     "vanne_bypass":    {"ouverture_s", "fermeture_s", "max_s"},
     "vanne_pdc":       {"ouverture_s", "fermeture_s", "max_s"},
     "calibration_pdc": {"v_min_recopie", "v_max_recopie", "plage_v"},
-    "freq_min":        {"u_min_exploitable_v", "derniere_stable_v",
-                        "re_a_u_min", "paliers_V_Re"},
-    "courbe_gain":     {"gain_moyen", "non_linearite_pct", "sature_a_v",
-                        "verdict"},
+    "re_mapping":      {"u_min_exploitable_v", "u_seuil_bas_re_v",
+                        "re_a_u_min", "paliers_V_Re", "paliers_plage_haute"},
     "indiciel":        {"u1_v", "u2_v", "re1", "re2", "gain_re_par_v",
                         "temps_mort_s", "tau_s", "t_stabilisation_s",
                         "kp_propose", "ki_propose"},
@@ -169,13 +167,13 @@ def test_page_mise_en_service_branchee():
     assert "_build_mise_en_service" in SRC_GUI
     assert "self._stack.addWidget(self._build_mise_en_service())" in SRC_GUI
     assert "self._tick_mise_en_service" in SRC_GUI
-    assert "Mise en service" in SRC_GUI.split("_NAV_LABELS")[1][:200]
+    assert "Maintenance" in SRC_GUI.split("_NAV_LABELS")[1][:200]
     # l'index teste dans le tick doit correspondre a la position d'empilement
     ordre = re.findall(r'self\._stack\.addWidget\(self\._build_(\w+)\(\)\)',
                        SRC_GUI)
     assert ordre.index("mise_en_service") == 5
-    assert "PAGE_MISE_EN_SERVICE = 5" in SRC_GUI
-    assert "self._stack.currentIndex() != self.PAGE_MISE_EN_SERVICE" in SRC_GUI
+    assert "PAGE_MAINTENANCE = 5" in SRC_GUI
+    assert "self._stack.currentIndex() != self.PAGE_MAINTENANCE" in SRC_GUI
     # quitter la page doit rendre la main a la boucle : sinon le maintien
     # des ordres TOR, suspendu par les commandes de vannes, le reste
     assert "self.pilote.reprendre_maintien_tor()" in SRC_GUI.split(

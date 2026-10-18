@@ -23,6 +23,8 @@ IHM, apprentissage) : chaque transaction est protégée par un verrou.
 """
 
 from __future__ import annotations
+import logging
+import sys
 import threading
 import time
 
@@ -92,12 +94,25 @@ class WagoModbus(EntreesSorties):
         self._coil_cache: dict[int, tuple[bool, float]] = {}
         self._t_rafraichissement = cfg_modbus.get(
             "rafraichissement_sorties_s", 2.0)
+        # Délai après fermeture socket pour éviter TIME_WAIT (reconnexion rapide)
+        self._delai_fermeture_s = cfg_modbus.get("delai_fermeture_s", 0.05)
+        # Créer le client Modbus TCP
         self.client = ModbusTcpClient(
             host=cfg_modbus["ip"], port=cfg_modbus.get("port", 502),
             timeout=cfg_modbus.get("timeout_s", 1.0))
-        if not self.client.connect():
+
+        # Tentatives de connexion avec retry (robustesse à la reconnexion)
+        tentatives = 3
+        delai_s = 0.5
+        for i in range(tentatives):
+            if self.client.connect():
+                break
+            if i < tentatives - 1:
+                time.sleep(delai_s)
+        else:
             raise ConnectionError(
-                f"Connexion impossible au coupleur Wago {cfg_modbus['ip']}")
+                f"Connexion impossible au coupleur Wago {cfg_modbus['ip']} "
+                f"après {tentatives} tentatives")
 
     # ------------------------------------------------------------- lectures
 
@@ -195,11 +210,12 @@ class WagoModbus(EntreesSorties):
             return
         with self._verrou:
             rr = self.client.write_register(address=adresse, value=brut)
-        if rr.isError():
-            # ne PAS mettre en cache : une mise à 0 de sécurité refusée
-            # doit être retentée au cycle suivant, pas dédupliquée
-            raise IOError(f"Erreur Modbus écriture AO @{adresse}")
-        self._ao_cache[adresse] = (brut, maintenant)
+            if rr.isError():
+                # ne PAS mettre en cache : une mise à 0 de sécurité refusée
+                # doit être retentée au cycle suivant, pas dédupliquée
+                raise IOError(f"Erreur Modbus écriture AO @{adresse}")
+            # Mise à jour cache DANS le verrou pour éviter race condition
+            self._ao_cache[adresse] = (brut, maintenant)
 
     def _ecrire_coil(self, voie: dict, etat: bool) -> None:
         """Écriture d'une sortie TOR, même politique que les sorties
@@ -215,11 +231,12 @@ class WagoModbus(EntreesSorties):
             return
         with self._verrou:
             rr = self.client.write_coil(address=adresse, value=etat)
-        if rr.isError():
-            # ne PAS mettre en cache : un retrait de sécurité refusé doit
-            # être retenté au cycle suivant, pas dédupliqué
-            raise IOError(f"Erreur Modbus écriture coil @{adresse}")
-        self._coil_cache[adresse] = (etat, maintenant)
+            if rr.isError():
+                # ne PAS mettre en cache : un retrait de sécurité refusé doit
+                # être retenté au cycle suivant, pas dédupliqué
+                raise IOError(f"Erreur Modbus écriture coil @{adresse}")
+            # Mise à jour cache DANS le verrou pour éviter race condition
+            self._coil_cache[adresse] = (etat, maintenant)
 
     def ecrire_variateur(self, volts: float) -> None:
         self._ecrire_ao_volts(self.cfg["sorties"]["variateur"], volts)
@@ -239,6 +256,9 @@ class WagoModbus(EntreesSorties):
         autre = "vanne_diaphragme_90deg" if vers_0deg else "vanne_diaphragme_0deg"
         # relâcher avant de coller : jamais les deux ordres ensemble
         self._ecrire_coil(s[autre], False)
+        # Délai minimal pour que la carte GF3 reçoive le nouvel ordre avant
+        # de réagir au relâchement de l'ancien (évite demi-tour 0°→90°)
+        time.sleep(0.05)  # 50 ms
         self._ecrire_coil(s[cible], True)
 
     def ecrire_vanne_bypass(self, ouverte: bool) -> None:
@@ -246,9 +266,60 @@ class WagoModbus(EntreesSorties):
             self._ecrire_coil(self.cfg["sorties"]["vanne_bypass"], ouverte)
 
     def fermer(self) -> None:
+        """Fermeture propre de la connexion Modbus.
+
+        Arrête d'abord le variateur (sécurité), puis ferme la connexion TCP.
+        Log les erreurs critiques mais ne lève pas d'exception (best-effort).
+        """
+        erreurs_critiques = []
+
+        # Tentative 1 : arrêter signal RUN (priorité critique)
+        for tentative in range(3):
+            try:
+                self.ecrire_variateur_run(False)
+                break
+            except (IOError, OSError, ConnectionError, TimeoutError) as e:
+                if tentative == 2:  # Dernier essai
+                    msg = f"SHUTDOWN CRITIQUE : Signal RUN non désactivé après 3 tentatives : {e}"
+                    erreurs_critiques.append(msg)
+                    logging.error(msg)
+                time.sleep(0.05)  # 50ms entre tentatives
+
+        # Tentative 2 : forcer tension à 0V (priorité haute)
+        for tentative in range(3):
+            try:
+                self.ecrire_variateur(0.0)
+                break
+            except (IOError, OSError, ConnectionError, TimeoutError) as e:
+                if tentative == 2:
+                    msg = f"SHUTDOWN CRITIQUE : Tension variateur non mise à 0V après 3 tentatives : {e}"
+                    erreurs_critiques.append(msg)
+                    logging.error(msg)
+                time.sleep(0.05)
+
+        # Fermeture connexion TCP (best-effort, erreurs attendues si déjà déconnecté)
         try:
-            self.ecrire_variateur_run(False)
-            self.ecrire_variateur(0.0)
-        finally:
             with self._verrou:
-                self.client.close()
+                if self.client.connected:
+                    self.client.close()
+                # Laisser un court délai pour que le socket TCP se ferme
+                # proprement côté OS (évite TIME_WAIT bloquant la reconnexion).
+                # TCP FIN/ACK prend typiquement 10-50ms selon l'OS.
+                time.sleep(self._delai_fermeture_s)
+        except (IOError, OSError, ConnectionError) as e:
+            # Erreur acceptable (connexion déjà fermée, timeout réseau, etc.)
+            logging.debug(f"Fermeture connexion Modbus (erreur ignorée) : {e}")
+
+        # Si échecs critiques, les signaler ET lever exception
+        if erreurs_critiques:
+            msg_complet = f"FERMETURE INCOMPLETE : {len(erreurs_critiques)} erreurs critiques"
+            logging.critical(msg_complet)
+            for err in erreurs_critiques:
+                print(f"[ERREUR SHUTDOWN] {err}", file=sys.stderr)
+
+            # CRITIQUE : Lever exception pour forcer intervention opérateur
+            # Ne PAS ignorer silencieusement un variateur qui reste actif
+            raise RuntimeError(
+                f"Arrêt sécurisé impossible : {'; '.join(erreurs_critiques)}\n"
+                f"INTERVENTION REQUISE : Vérifier état variateur et arrêt manuel si nécessaire"
+            )

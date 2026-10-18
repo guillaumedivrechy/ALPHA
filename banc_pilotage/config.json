@@ -2,35 +2,41 @@
   "_commentaire": "Configuration du banc — toutes les constantes sont ici, aucun code à modifier.",
   "patm_pa": 101325.0,
   "diaphragme_iso": {
-    "_commentaire": "Norme NFX 10-102 / ISO 5167-1, prises d'angle. Valeurs du classeur ISO V12.",
-    "D20_mm": 81.4,
+    "_commentaire": "Norme NFX 10-102 / ISO 5167-1, prises d'angle. D mesuré: tube 90x6.7 => Dint=76.6mm.",
+    "D20_mm": 76.6,
     "d20_mm": 41.018,
     "alpha_conduite": 2.4e-05,
     "alpha_diaphragme": 2.4e-05,
     "formule_C": "RHG"
   },
   "diaphragme_miller": {
-    "_commentaire": "Corrélation Miller, faible Re. Valeurs du classeur Miller V1-13.",
-    "D20_mm": 81.4,
+    "_commentaire": "Corrélation Miller, faible Re. D mesuré: tube 90x6.7 => Dint=76.6mm.",
+    "D20_mm": 76.6,
     "d20_mm": 21.113,
     "alpha_conduite": 8e-05,
     "alpha_diaphragme": 1.7e-05
   },
   "veine": {
-    "_commentaire": "A AJUSTER : section de passage de la veine d'essai et longueur caractéristique utilisée pour le Reynolds veine (hauteur de veine, diamètre hydraulique, corde du profil...).",
-    "section_m2": 0.04,
-    "longueur_caracteristique_m": 0.2
+    "_commentaire": "Veine rectangulaire. Section S=H×W, périmètre P=2×(H+W), Dh=4×S/P.",
+    "hauteur_m": 0.05,
+    "largeur_m": 0.175,
+    "section_m2": 0.008749999999999999,
+    "longueur_caracteristique_m": 0.07777777777777778
   },
   "fluide": {
-    "_commentaire": "rho et mu calculés en continu (gaz parfait + Sutherland) depuis P_amont et PT100. Renseigner rho_force / mu_force uniquement pour figer des valeurs.",
+    "_commentaire": "rho et mu calculés en continu (gaz parfait + Sutherland) depuis P_amont et PT100. Renseigner rho_force / mu_force uniquement pour figer des valeurs. humidite_relative (0-100%) : si > 0, utilise les formules air humide au lieu de air sec.",
     "gamma": 1.40273,
     "rho_force": null,
-    "mu_force": null
+    "mu_force": null,
+    "sutherland_mu_ref": 1.72e-05,
+    "sutherland_t_ref": 273.15,
+    "sutherland_s": 110.4,
+    "humidite_relative": 50.0
   },
   "zero_capteurs": {
     "_commentaire": "Offsets de zero des capteurs Delta-P (Pa), mesures a debit nul par l'apprentissage 'zero_capteurs' et soustraits des mesures par la boucle. Decisif en bas-Re (Delta-P utile de quelques Pa).",
-    "dp_diaph_500": 0.0,
-    "dp_iso_500": 0.0
+    "dp_diaph_500": 0.01,
+    "dp_iso_500": 0.02
   },
   "selection_diaphragme": {
     "_commentaire": "Miller si Re conduite attendu < seuil, ISO sinon. Hysteresis contre les commutations répétées.",
@@ -39,34 +45,39 @@
   },
   "actionneurs": {
     "_commentaire": "Temps de course des vannes motorisees ER20, utilises comme chien de garde (defaut vanne si la fin de course n'arrive pas dans 1,5x ce temps). ER20 standard : 11 s pour 90 deg. ER20 POSI (vanne perte de charge) : 25 s pour 90 deg.",
-    "vanne_3voies_temps_s": 11.0,
-    "vanne_bypass_temps_s": 12.7,
-    "vanne_perte_charge_course_s": 26.3,
+    "vanne_3voies_temps_s": 3.6,
+    "vanne_bypass_temps_s": 9.7,
+    "vanne_perte_charge_course_s": 16.2,
     "marge_apres_manoeuvre_s": 2.0,
     "facteur_chien_garde": 1.5,
-    "pdc_recopie_min_v": 0.008,
-    "pdc_recopie_max_v": 9.993
+    "pdc_recopie_min_v": 2.389,
+    "pdc_recopie_max_v": 9.153
   },
   "regulation": {
-    "_commentaire": "echelon_reinit_ff_relatif : saut de consigne relatif au-dela duquel un echelon de sequence reinitialise le PI sur le feed-forward ; en deca, l'etat PI (integrale) est conserve. gain_scheduling_actif : compense la variation du gain de boucle avec le point de fonctionnement (gains multiplies par la tension d'equilibre estimee, si table de gains ou gain appris disponible) ; desactiver pour retrouver des gains fixes. tau_consigne_s : mise en forme de reference (consigne interne filtree au 1er ordre suivie par le PI) ; regler = tau du procede (mesure par l'essai indiciel, reporte par Appliquer) ; 0 = echelon brut. saturation_dp_relative : fraction de la pleine echelle du capteur Delta-P au-dela de laquelle la mesure est consideree saturee (drapeau dp_sature de la boucle, exclusion des paliers de courbe_gain ; la commande est alors ramenee vers le maximum mesurable a recul_saturation_v_par_s, puis maintenue jusqu'a la consigne suivante). fenetre_convergence_s : duree sur laquelle le Re est moyenne pour juger la convergence et publier sa dispersion ; le bruit capteur etant du meme ordre que la tolerance, un critere sur echantillon isole ferait clignoter le voyant. temperature_min_c / temperature_max_c : bornes de vraisemblance de la PT100 ; hors bornes = sonde coupee ou module sature (le coupleur Modbus n'a pas acces aux octets de statut du 750-450, ce test est la seule detection possible) -> repli sur. Le banc travaille en ambiance, 5 a 30 degC ; les bornes gardent de la marge de part et d'autre (hall non chauffe en hiver, echauffement de l'air en fin d'essai) car les franchir ARRETE le banc. Le mini est a 2 et non 0 pour attraper le cas d'une voie non cablee ou mal adressee : un registre lu a 0 donne exactement 0.0 degC, qui passerait pour une ambiance plausible. Une aberration isolee ne declenche pas : la derniere valeur valide est tenue quelques secondes.",
+    "_commentaire": "Modes normaux (variateur) : u = feed-forward + correction PI en volts. Le feed-forward est la tension d'equilibre interpolee dans la table apprise (Re mapping ISO ou Miller selon le mode), rejointe a rampe_v_par_s. La correction poursuit un modele de reference : le Re que produirait ce feed-forward, filtre a tau_consigne_s ; l'erreur est ramenee en volts par la pente de la table, donc kp/ki valent sur toute la plage et les kp/ki de l'essai indiciel s'appliquent tels quels. kp, ki : gains de la correction (et du PI relatif de la vanne PdC, multiplies par strategie_bas_re.gain_scale). trim_max_v : borne de la correction autour du feed-forward ; correction en butee plus de 5 s = alerte 'table de gains a refaire'. suivi_variateur_max_s : tant que la recopie AM du variateur s'ecarte de la commande de plus de variateur.tolerance_consigne_v, la correction est gelee (le ventilateur suit encore la rampe interne du 3G3MV), au plus cette duree. bande_morte_relative : bande ou le terme P ne reagit pas au bruit ; l'integrale continue de moyenner. Separation d'integrale : au-dela d'un ecart relatif bande_integration_relative, l'integrale n'avance que si la mesure est stable (moyenne variant de moins de seuil_stabilite_relatif en 1 s) ; sinon le procede repond encore et integrer ce retard produirait un depassement. echelon_reinit_ff_relatif : saut de consigne relatif au-dela duquel un echelon de sequence recale les regulateurs ; en deca, la correction est conservee. Le biais table/banc appris par l'integrale est memorise par mode et reutilise a la consigne suivante. tau_consigne_s : constante de temps du procede (essai indiciel, reportee par Appliquer) ; 0 = pas de filtre. saturation_dp_relative : fraction de la pleine echelle du capteur Delta-P au-dela de laquelle la mesure est consideree saturee (drapeau dp_sature, exclusion des paliers de courbe_gain). Une consigne dont le Delta-P attendu depasse marge_consigne_dp_relative x ce seuil est bornee au maximum mesurable (alerte 'consigne limitee'). En saturation, la commande est plafonnee et recule a recul_saturation_v_par_s ; revenue sous le seuil, le plafond se releve a recul/5 puis disparait. fenetre_convergence_s : duree sur laquelle le Re est moyenne pour juger la convergence et publier sa dispersion ; le bruit capteur etant du meme ordre que la tolerance, un critere sur echantillon isole ferait clignoter le voyant. temperature_min_c / temperature_max_c : bornes de vraisemblance de la PT100 ; hors bornes = sonde coupee ou module sature (le coupleur Modbus n'a pas acces aux octets de statut du 750-450, ce test est la seule detection possible) -> repli sur. Le banc travaille en ambiance, 5 a 30 degC ; les bornes gardent de la marge de part et d'autre (hall non chauffe en hiver, echauffement de l'air en fin d'essai) car les franchir ARRETE le banc. Le mini est a 2 et non 0 pour attraper le cas d'une voie non cablee ou mal adressee : un registre lu a 0 donne exactement 0.0 degC, qui passerait pour une ambiance plausible. Une aberration isolee ne declenche pas : la derniere valeur valide est tenue quelques secondes.",
     "periode_s": 0.2,
-    "kp": 1.5,
-    "ki": 0.5,
-    "rampe_v_par_s": 1.0,
-    "bande_morte_relative": 0.002,
+    "kp": 0.5,
+    "ki": 0.62,
+    "rampe_v_par_s": 2.0,
+    "bande_morte_relative": 0.005,
     "tolerance_convergence_relative": 0.01,
     "echelon_reinit_ff_relatif": 0.2,
-    "gain_scheduling_actif": true,
-    "tau_consigne_s": 2.0,
-    "saturation_dp_relative": 0.9,
+    "tau_consigne_s": 0.39,
+    "saturation_dp_relative": 1.0,
     "fenetre_convergence_s": 5.0,
     "temperature_min_c": 2.0,
     "temperature_max_c": 45.0,
-    "recul_saturation_v_par_s": 0.5
+    "recul_saturation_v_par_s": 0.5,
+    "trim_max_v": 1.5,
+    "suivi_variateur_max_s": 15.0,
+    "marge_consigne_dp_relative": 1.0,
+    "bande_integration_relative": 0.03,
+    "seuil_stabilite_relatif": 0.005,
+    "re_max_iso": 26878
   },
   "modbus": {
     "_commentaire": "Coupleur Wago 750-362. Ordre du rail : alim 24VDC / 750-362 / 497 / 496 / 450 / 597 / 602 / 1405 / 515 / 515 / 515 / 1504 / 600. Les modules 'mot' (AI, AO, RTD) sont adresses en premier depuis le mot 0 dans l'ordre physique, puis les modules 'bit' (DI, relais, DO). AI: FC4 ; AO: FC6/16 ; DI: FC2 ; DO: FC5. A VERIFIER avec WAGO I/O CHECK apres montage.",
-    "ip": "192.168.1.10",
+    "ip": "192.168.1.80",
     "port": 502,
     "timeout_s": 1.0,
     "rafraichissement_sorties_s": 2.0,
@@ -134,17 +145,16 @@
         "adresse": 3
       },
       "fc_3voies_0": {
-        "_commentaire": "DI 5 : vanne 3 voies FC2 (bornes 6&9), ferme a 0 deg",
+        "_commentaire": "DI 5 : vanne 3 voies FC2 - position 0 deg (ISO). Contact NO, ferme uniquement a 0 deg (commande F). Codage un-parmi-trois.",
         "adresse": 4
       },
       "fc_3voies_180": {
-        "_commentaire": "DI 6 : vanne 3 voies FC1 (bornes 4&8), ferme a 180 deg",
+        "_commentaire": "DI 6 : vanne 3 voies FC1 - position 180 deg (non utilisee). Contact NO, jamais active sur cette installation.",
         "adresse": 5
       },
       "fc_3voies_90": {
-        "_commentaire": "DI 7 : vanne 3 voies FC3 (bornes F4&F9), contact NF ouvert en position intermediaire -> inverse pour lire 1 a 90 deg",
-        "adresse": 6,
-        "inverse": true
+        "_commentaire": "DI 7 : vanne 3 voies FC3 - position 90 deg (MILLER). Contact NO, ferme uniquement a 90 deg (commande I). Codage un-parmi-trois.",
+        "adresse": 6
       },
       "defaut_variateur": {
         "_commentaire": "DI 8 : 3G3MV contact NF MB (MC au +24V). Contact ferme en marche normale, ouvert sur defaut ET sur rupture de fil -> repli sur defaut",
@@ -182,11 +192,11 @@
         "pleine_echelle_v": 10.0
       },
       "vanne_diaphragme_0deg": {
-        "_commentaire": "750-515 n.1 voie 1 (coil 0) -> borne 3 (F) de la carte GF3 : amene la vanne a 0 deg",
+        "_commentaire": "750-515 borne 14 (coil 0) -> commande F de la vanne : position 0 deg (ISO), active FC2 uniquement",
         "adresse": 0
       },
       "vanne_diaphragme_90deg": {
-        "_commentaire": "750-515 n.1 voie 2 (coil 1) -> borne 4 (I) de la carte GF3 : amene la vanne a 90 deg",
+        "_commentaire": "750-515 borne 24 (coil 1) -> commande I de la vanne : position 90 deg (MILLER), active FC3 uniquement",
         "adresse": 1
       },
       "vanne_bypass": {
@@ -200,12 +210,16 @@
     }
   },
   "strategie_bas_re": {
-    "_commentaire": "Pilotage bas Reynolds : sous le seuil, ouverture du bypass et split-range variateur/vanne PdC. seuil_re=0 -> seuil auto derive de la tension min exploitable (apprentissage 'freq_min'). marge_seuil = facteur applique a u_min pour ce seuil auto. split_range_point (0..10) = bascule PdC->variateur dans la commande PI unique (bas: PdC, haut: variateur). gain_scale = facteur (<=1) applique aux gains PI en bas-Re. 1.0 = nominal (la sequence de demarrage suffit a maitriser le depassement) ; a baisser au banc seulement si la vraie vanne PdC fait osciller la boucle.",
+    "_commentaire": "Pilotage bas Reynolds : Miller avec bypass ouvert sous le seuil diaphragme (selection_diaphragme, avec hysteresis) ; sous le Re minimal tenu par le variateur seul (premier palier de la table Miller), variateur fixe a u_min et PI sur la vanne PdC (hysteresis +-5 %). seuil_re=0 -> seuil auto derive de la tension min exploitable (apprentissage 'freq_min'). marge_seuil = facteur applique a u_min pour ce seuil auto. gain_scale = facteur (<=1) applique aux gains PI de la vanne PdC. OPTIMISE: augmente de 0.3 a 0.6 pour convergence 2x plus rapide (surveiller oscillations au banc).",
     "actif": true,
     "seuil_re": 0,
     "marge_seuil": 1.3,
-    "split_range_point": 5.0,
-    "gain_scale": 1.0
+    "gain_scale": 0.6,
+    "u_min_ventilateur_v": 0.3,
+    "seuil_bas_re_mesure": 7547,
+    "pdc_min_exploitable_pct": 24.0,
+    "re_min_exploitable": 214,
+    "u_seuil_bas_re_v": 5.35
   },
   "variateur": {
     "_commentaire": "Grandeurs du 3G3MV necessaires a l'affichage, pas au calcul : la boucle regule un Reynolds et ne raisonne jamais en Hz. frequence_max_hz = parametre n011 du variateur (fFrequence atteinte a 10 V) ; le defaut usine est 60,0 alors que le moteur SD42 est un 50 Hz, 2800 min-1. Suppose les gains d'entree usine n060=100 et n061=0, soit f = FMAX x V/10. tolerance_consigne_v = ecart entre la consigne et la recopie AM (sortie moniteur, image 0-10 V de la frequence de sortie) en deca duquel la consigne est declaree atteinte ; remplace la DI 'frequence atteinte' du variateur, non cablee (P1/P2 laissees libres, PC etant le 0V de l'optocoupleur).",

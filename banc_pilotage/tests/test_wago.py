@@ -90,14 +90,14 @@ def test_lire_mesures_complet(wago):
 
 def test_entrees_tor_inversees(wago):
     """Le drapeau 'inverse' de config.json complémente la lecture : le contact
-    NF MB du variateur et le contact NF FC3 de la vanne 3 voies sont lus dans
-    le sens attendu par le code métier, sans condition dans core/."""
+    NF MB du variateur est lu dans le sens attendu par le code métier, sans
+    condition dans core/. FC3 (fc_3voies_90) est un contact NO, pas NF."""
     inversees = {nom for nom, voie in CFG_MODBUS["entrees_tor"].items()
                  if not nom.startswith("_") and voie.get("inverse")}
-    assert inversees == {"defaut_variateur", "fc_3voies_90"}
+    assert inversees == {"defaut_variateur"}
     mesures = wago.lire_mesures()               # le faux client renvoie True
     assert mesures["defaut_variateur"] is False  # contact fermé = pas de défaut
-    assert mesures["fc_3voies_90"] is False      # FC3 fermé = hors position 90°
+    assert mesures["fc_3voies_90"] is True       # FC3 fermé = position stable (0° ou 180°)
 
 
 def test_regroupement_en_blocs():

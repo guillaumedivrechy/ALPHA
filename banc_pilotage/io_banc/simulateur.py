@@ -100,7 +100,7 @@ class _Vanne3Voies:
 
 class SimulateurBanc(EntreesSorties):
     def __init__(self, banc: Banc, cfg_simu: dict | None = None,
-                 cfg_modbus: dict | None = None):
+                 cfg_modbus: dict | None = None, cfg_actionneurs: dict | None = None):
         cfg_simu = cfg_simu or {}
         # facultatif : permet de reconstituer l'image process (registres
         # bruts) que le coupleur fournirait, pour que la page de mise en
@@ -124,17 +124,21 @@ class SimulateurBanc(EntreesSorties):
 
         # vanne 3 voies : 3 positions (0°=ISO, 90°=Miller, 180°=fermeture)
         # t_course_3voies_s = demi-course (0°→90° ou 90°→180°)
+        # Position repos sécurité (cohérent avec pilote._position_repos) : Miller (90°)
+        # IMPORTANT : Utiliser les temps de course de la config ACTIONNEURS (cohérent avec pilote)
+        act_cfg = cfg_actionneurs or {}
         self._v3 = _Vanne3Voies(
-            t_90deg_s=cfg_simu.get("t_course_3voies_s", 11.0),
-            angle_initial=0.0,   # départ sur la butée 0°
+            t_90deg_s=act_cfg.get("vanne_3voies_temps_s", 11.0),
+            angle_initial=90.0,   # départ sur la butée Miller (position repos)
         )
         # bypass : True = ouvert
-        self._bypass = _VanneTOR(cfg_simu.get("t_course_bypass_s", 11.0),
-                                 position_initiale=False)
+        # Position repos sécurité (cohérent avec pilote._position_repos) : ouvert
+        self._bypass = _VanneTOR(act_cfg.get("vanne_bypass_temps_s", 11.0),
+                                 position_initiale=True)
         # vanne perte de charge : actionneur lent + recopie
-        self._pdc_t_course = cfg_simu.get("t_course_pdc_s", 25.0)
-        self._pdc_consigne = 0.0
-        self._pdc_position = 0.0
+        self._pdc_t_course = act_cfg.get("vanne_perte_charge_course_s", 25.0)
+        self._pdc_consigne = 10.0  # Démarre grande ouverte (position repos)
+        self._pdc_position = 10.0  # Démarre grande ouverte (cohérent avec banc réel)
         self._pdc_t_prec = time.monotonic()
         # fractions de débit atteignant la veine (modèle de la PdC en série et
         # du by-pass). PdC (carte P6, sens usine) : 0 V = fermée (étranglée),

@@ -10,8 +10,11 @@ Deux sens de calcul pour chaque diaphragme :
 """
 
 from __future__ import annotations
+import logging
 import math
 from dataclasses import dataclass
+
+log = logging.getLogger(__name__)
 
 
 # ----------------------------------------------------------------------------
@@ -25,6 +28,25 @@ class GeometrieDiaphragme:
     d20: float                 # diamètre orifice à 20 °C [m]
     alpha_conduite: float      # coeff. dilatation thermique conduite [°C^-1]
     alpha_diaphragme: float    # coeff. dilatation thermique diaphragme [°C^-1]
+
+    def __post_init__(self):
+        """Valide les dimensions du diaphragme."""
+        if self.D20 <= 0:
+            raise ValueError(f"Diamètre conduite invalide: D20={self.D20} m (doit être > 0)")
+        if self.d20 <= 0:
+            raise ValueError(f"Diamètre orifice invalide: d20={self.d20} m (doit être > 0)")
+
+        beta = self.d20 / self.D20
+        if beta >= 1.0:
+            raise ValueError(
+                f"Diamètre orifice ({self.d20:.4f} m) >= diamètre conduite ({self.D20:.4f} m). "
+                f"Beta = {beta:.3f}, doit être < 1.0 pour éviter division par zéro dans 1-beta⁴."
+            )
+        if beta >= 0.95:
+            log.warning(
+                f"Beta = {beta:.3f} très proche de 1 (d={self.d20:.4f}, D={self.D20:.4f}). "
+                f"Risque de valeurs extrêmes dans les calculs (E = 1/sqrt(1-beta⁴))."
+            )
 
     def diametres_a_T(self, T_celsius: float) -> tuple[float, float]:
         """Diamètres corrigés de la dilatation thermique (réf. 20 °C)."""
@@ -78,7 +100,9 @@ def iso_qm_depuis_dP(geo: GeometrieDiaphragme, dP: float, T_celsius: float,
     Itératif (le coefficient de décharge dépend de Re, qui dépend de qm),
     identique aux colonnes "1ère itér. / 2è itér. / 3è itér." du classeur.
     """
-    if dP <= 0:
+    # Seuil de bruit : si ΔP < 0.3 Pa, débit considéré nul
+    # Évite racine négative si offset capteur > ΔP mesuré
+    if dP < 0.3:
         return {"qm": 0.0, "ReD": 0.0, "C": float("nan"), "epsilon": 1.0,
                 "v": 0.0, "iterations": 0}
     D, d = geo.diametres_a_T(T_celsius)
@@ -90,6 +114,7 @@ def iso_qm_depuis_dP(geo: GeometrieDiaphragme, dP: float, T_celsius: float,
     qm = qm_init
     C = float("nan")
     n = 0
+    converged = False
     for n in range(1, max_iter + 1):
         v = 4.0 * qm / (rho * math.pi * D**2)          # vitesse conduite amont
         ReD = max(v * D / nu, 100.0)                    # Reynolds conduite
@@ -100,8 +125,13 @@ def iso_qm_depuis_dP(geo: GeometrieDiaphragme, dP: float, T_celsius: float,
         qm_new = C * E * eps * aire_orifice * math.sqrt(2.0 * dP * rho)
         if abs(qm_new - qm) < tol:
             qm = qm_new
+            converged = True
             break
         qm = qm_new
+
+    if not converged:
+        log.warning(f"ISO qm_depuis_dP: convergence non atteinte après {max_iter} "
+                    f"itérations (dP={dP:.1f} Pa, erreur={abs(qm_new - qm):.2e} kg/s)")
 
     v = 4.0 * qm / (rho * math.pi * D**2)
     ReD = v * D / nu
@@ -134,13 +164,20 @@ def iso_dP_depuis_qm(geo: GeometrieDiaphragme, qm: float, T_celsius: float,
 
     eps = 1.0
     dP = 0.0
+    converged_dP = False
     for _ in range(max_iter):
         dP_new = (qm / (C * E * eps * aire_orifice)) ** 2 / (2.0 * rho)
         eps = _epsilon_iso(beta, dP_new, P1_abs, gamma)
         if abs(dP_new - dP) < tol:
             dP = dP_new
+            converged_dP = True
             break
         dP = dP_new
+
+    if not converged_dP:
+        log.warning(f"ISO dP_depuis_qm: convergence non atteinte après {max_iter} "
+                    f"itérations (qm={qm:.4f} kg/s, erreur={abs(dP_new - dP):.2e} Pa)")
+
     return {"dP": dP, "ReD": ReD, "C": C, "epsilon": eps, "v": v, "beta": beta}
 
 
@@ -169,7 +206,8 @@ def miller_qm_depuis_dP(geo: GeometrieDiaphragme, dP: float, T_celsius: float,
 
     NB : la dilatation thermique du classeur Miller est référencée à 293,15 K.
     """
-    if dP <= 0:
+    # Seuil de bruit : si ΔP < 0.3 Pa, débit considéré nul
+    if dP < 0.3:
         return {"qm": 0.0, "ReD": 0.0, "C": float("nan"), "Y1": 1.0}
     TK = T_celsius + 273.15
     D = geo.D20 * (1.0 + geo.alpha_conduite * (TK - 293.15))
@@ -198,12 +236,19 @@ def miller_dP_depuis_qm(geo: GeometrieDiaphragme, qm: float, T_celsius: float,
 
     Y1 = 1.0
     dP = 0.0
+    converged_miller = False
     for _ in range(max_iter):
         dP_new = (qm / (K * Y1)) ** 2 / rho
         Y1 = _Y1_miller(beta, dP_new, P1_abs, gamma)
         if abs(dP_new - dP) < tol:
             dP = dP_new
+            converged_miller = True
             break
         dP = dP_new
+
+    if not converged_miller:
+        log.warning(f"Miller dP_depuis_qm: convergence non atteinte après {max_iter} "
+                    f"itérations (qm={qm:.4f} kg/s, erreur={abs(dP_new - dP):.2e} Pa)")
+
     ReD = 4.0 * qm / (math.pi * D * mu)
     return {"dP": dP, "ReD": ReD, "C": C, "Y1": Y1, "beta": beta}

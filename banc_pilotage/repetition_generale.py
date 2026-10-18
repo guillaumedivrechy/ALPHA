@@ -50,7 +50,7 @@ def main() -> int:
     cfg["fichier_etat"] = str(dossier / "etat_banc.json")
 
     banc = Banc(cfg)
-    es = SimulateurBanc(banc, cfg.get("simulation"))
+    es = SimulateurBanc(banc, cfg.get("simulation"), cfg.get("modbus"), cfg.get("actionneurs"))
     pilote = Pilote(banc, es, cfg)
     pilote.demarrer()
     app = Apprentissage(pilote, cfg, dossier / "config.json")

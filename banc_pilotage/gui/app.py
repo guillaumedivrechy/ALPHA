@@ -49,6 +49,9 @@ def _positif_ou_nul(v, _):
 def _alpha(v, _):
     return None if 0 <= v < 1e-3 else "coefficient de dilatation invraisemblable"
 
+def _humidite_relative(v, _):
+    return None if 0 <= v <= 100 else "doit être entre 0 et 100 %"
+
 def _d_inferieur_D(prefixe):
     def f(v, valeurs):
         D = valeurs.get((prefixe, "D20_mm"))
@@ -94,16 +97,53 @@ PARAMETRES = [
 ]
 
 def _cfg_lire(cfg, chemin):
+    """Lit une valeur dans un dict imbriqué via un chemin de clés.
+
+    Args:
+        cfg: Dict de configuration
+        chemin: Liste de clés pour naviguer dans le dict (ex: ["regulation", "kp"])
+
+    Returns:
+        La valeur trouvée, ou None si le chemin n'existe pas
+
+    Raises:
+        KeyError: Si une clé du chemin n'existe pas (avec message explicite)
+    """
     v = cfg
-    for k in chemin:
-        v = v[k]
-    return v
+    try:
+        for k in chemin:
+            v = v[k]
+        return v
+    except KeyError as e:
+        # Construire chemin lisible pour diagnostic (ex: "regulation.kp")
+        chemin_str = ".".join(str(k) for k in chemin)
+        raise KeyError(
+            f"Clé manquante dans config.json : {chemin_str} "
+            f"(échec à '{e.args[0]}' dans {chemin})"
+        ) from e
 
 def _cfg_ecrire(cfg, chemin, valeur):
+    """Écrit une valeur dans un dict imbriqué via un chemin de clés.
+
+    Args:
+        cfg: Dict de configuration
+        chemin: Liste de clés (ex: ["regulation", "kp"])
+        valeur: Valeur à écrire
+
+    Raises:
+        KeyError: Si une clé du chemin (sauf la dernière) n'existe pas
+    """
     v = cfg
-    for k in chemin[:-1]:
-        v = v[k]
-    v[chemin[-1]] = valeur
+    try:
+        for k in chemin[:-1]:
+            v = v[k]
+        v[chemin[-1]] = valeur
+    except KeyError as e:
+        chemin_str = ".".join(str(k) for k in chemin)
+        raise KeyError(
+            f"Clé parente manquante dans config.json : {chemin_str} "
+            f"(échec à '{e.args[0]}' dans {chemin[:-1]})"
+        ) from e
 
 def _hsep():
     sep = QFrame()
@@ -353,24 +393,34 @@ _NAV_LABELS = ["Graphique", "Voies", "Séquence", "Apprentissage",
 
 # (clé etat/brutes, nom affiché, max barre, format, couleur barre)
 # Les clés "dp_iso" et "dp_miller" sont résolues dans _tick_left via mesures_brutes
-_CHANNELS = [
-    ("re_mesure",   "Re calculé",                 25000, "{:.0f}", "#00B8DE"),
-    ("p_amont",     "P amont [Pa]",              500,   "{:.2f}", "#FF9900"),
-    ("dp_iso",      "ΔP ISO [Pa]",    500,   "{:.2f}", "#1E8FB0"),
-    ("dp_miller",   "ΔP Miller [Pa]", 500,   "{:.2f}", "#FF9900"),
-    ("temperature", "Température [°C]",          50,    "{:.1f}", "#FF9900"),
-    ("u_variateur", "Recopie variateur [V]",     10,    "{:.2f}", "#00B8DE"),
+# Section CALCULS - Temps réel (couleur violette)
+_CALCULS = [
+    ("qv",          "Qv [m³/s]",     0.05,    "{:.6f}", "#9B59B6"),
+    ("rho",         "ρ [kg/m³]",     2.0,     "{:.3f}", "#9B59B6"),
+    ("mu",          "μ [Pa·s]",      0.00003, "{:.5e}", "#9B59B6"),
+    ("nu",          "ν [m²/s]",      0.00002, "{:.5e}", "#9B59B6"),
 ]
-# méta pour l'onglet Voies (unité, plage affichée)
-_CH_UNIT  = ["—",  "Pa",  "Pa",  "Pa",  "°C",  "V"]
-_CH_RANGE = ["0 – 25 000", "0 – 500", "0 – 500", "0 – 500", "0 – 50", "0 – 10"]
 
-# (clé interne, nom, couleur dot, clé valeur, max bar)
+# Section PRESSIONS - Temps réel (couleur orange)
+_PRESSIONS = [
+    ("p_amont",     "P amont [Pa]",   500,   "{:.2f}", "#FF9900"),
+    ("dp_iso",      "ΔP ISO [Pa]",    500,   "{:.2f}", "#FF9900"),
+    ("dp_miller",   "ΔP Miller [Pa]", 500,   "{:.2f}", "#FF9900"),
+]
+
+# Compatibilité : fusion des deux sections pour l'onglet Voies
+_CHANNELS = _CALCULS + _PRESSIONS
+# méta pour l'onglet Voies (unité, plage affichée)
+_CH_UNIT  = ["m³/s",  "kg/m³", "Pa·s", "m²/s", "Pa",  "Pa",  "Pa"]
+_CH_RANGE = ["0 – 0,05", "0 – 2", "0 – 3×10⁻⁵", "0 – 2×10⁻⁵", "0 – 500", "0 – 500", "0 – 500"]
+
+# (clé interne, nom, couleur dot/barre, clé valeur, max bar)
+# Couleur verte pour toutes les jauges des actionneurs
 _ACTUATORS = [
-    ("variateur", "Variateur soufflerie", "#00B8DE", "u_variateur",  10.0),
-    ("vanne3",    "Vanne Diaphragme",     "#FF9900", "diaphragme",   None),
-    ("bypass",    "Vanne By-Pass",        "#00B8DE", "bypass_state", None),
-    ("pdc",       "Vanne Perte de Charge","#FF9900", "pdc_position", 10.0),
+    ("variateur", "Variateur soufflerie", "#27AE60", "u_variateur",  10.0),
+    ("vanne3",    "Vanne Diaphragme",     "#27AE60", "diaphragme",   None),
+    ("bypass",    "Vanne By-Pass",        "#27AE60", "bypass_state", None),
+    ("pdc",       "Vanne Perte de Charge","#27AE60", "pdc_position", 10.0),
 ]
 
 
@@ -408,6 +458,8 @@ class Application(QMainWindow):
         ("dp_sature",         "⚠ ΔP saturé — Re au-delà de la plage "
                               "mesurable du capteur"),
         ("bas_re_motif",      "ℹ Stratégie bas-Re indisponible"),
+        ("consigne_limitee",  "⚠ Consigne limitée au maximum mesurable"),
+        ("alerte_table_ff",   "⚠ Table de gains à refaire"),
     ]
 
     def __init__(self, pilote: Pilote, mode: str, cfg: dict, chemin_cfg: Path):
@@ -420,7 +472,8 @@ class Application(QMainWindow):
         self._action_log: deque[dict] = deque(maxlen=20)
         self._t0_acq: datetime | None = None
         self._mode = "asservi"   # "manuel" | "asservi" | "sequence"
-        self._ref_re = "conduite"   # référence de la consigne Re : conduite | veine
+        self._ref_re = "veine"      # référence de la consigne Re : conduite | veine (défaut: veine)
+        self._echelle_re = 250.0    # échelle slider Re (sera recalculée selon référence)
         self._recording = False
         self._alertes_actives: set[str] = set()
         self._sections_en_defaut: set[str] = set()
@@ -484,6 +537,9 @@ class Application(QMainWindow):
         self._update_mode_seg()
         self._update_controls_enabled()
 
+        # Initialiser l'échelle du slider Re selon la référence par défaut
+        self._set_ref_re(self._ref_re)
+
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(PERIODE_IHM_MS)
@@ -525,8 +581,8 @@ class Application(QMainWindow):
         self._timer.stop()
         try:
             self.pilote.arreter_regulation()   # 0 V + RUN retire, mode manuel coupe
-        except Exception:                      # noqa: BLE001
-            pass                               # la fermeture ne doit jamais echouer
+        except Exception as e:                 # noqa: BLE001
+            log.warning(f"Erreur arrêt régulation (closeEvent) : {e}")  # la fermeture ne doit jamais echouer
         self.pilote.arreter()
         event.accept()
 
@@ -575,7 +631,8 @@ class Application(QMainWindow):
             self.pilote.commander_diaphragme("miller")
             self.pilote.commander_bypass(True)
             self.pilote.commander_vanne_perte_charge_pct(100.0)  # 100% ouverture (0% fermeture)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"Erreur initialisation vannes : {e}")
             self._dialog_init.close()
             return
 
@@ -749,24 +806,76 @@ class Application(QMainWindow):
         vl.setContentsMargins(16, 14, 16, 14)
         vl.setSpacing(0)
 
-        # ── VOIES ──────────────────────────────────────────────
+        # ── CALCULS — TEMPS RÉEL ───────────────────────────────
         hdr1 = QWidget()
         h1 = QHBoxLayout(hdr1)
         h1.setContentsMargins(0, 0, 0, 8)
-        lbl_v = QLabel("⏳ VOIES — TEMPS RÉEL")
-        lbl_v.setObjectName("section-hdr")
-        h1.addWidget(lbl_v)
+        lbl_c = QLabel("🎓 CALCULS — TEMPS RÉEL")
+        lbl_c.setObjectName("section-hdr")
+        h1.addWidget(lbl_c)
         h1.addStretch()
-        lbl_v6 = QLabel(str(len(_CHANNELS)))
-        lbl_v6.setStyleSheet(
+        lbl_c_count = QLabel(str(len(_CALCULS)))
+        lbl_c_count.setStyleSheet(
             "font-size:10px; font-family:'IBM Plex Mono',monospace;"
             f" color: #14223C; background:transparent;")
-        h1.addWidget(lbl_v6)
+        h1.addWidget(lbl_c_count)
         vl.addWidget(hdr1)
 
         self._ch_rows: list[tuple] = []
 
-        for key, name, max_val, fmt, color in _CHANNELS:
+        # Afficher les calculs (Qv, ρ, μ, ν)
+        for key, name, max_val, fmt, color in _CALCULS:
+            w = QWidget()
+            wvl = QVBoxLayout(w)
+            wvl.setContentsMargins(0, 11, 0, 11)
+            wvl.setSpacing(7)
+            w.setStyleSheet("border-bottom:1px solid #E9EEF1;")
+
+            # name | value
+            top = QWidget()
+            top.setStyleSheet("border:none;")
+            thl = QHBoxLayout(top)
+            thl.setContentsMargins(0, 0, 0, 0)
+            thl.setSpacing(8)
+            ln = QLabel(name)
+            ln.setObjectName("ch-name")
+            thl.addWidget(ln, 1)
+            lv = QLabel("—")
+            lv.setObjectName("ch-val")
+            lv.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            thl.addWidget(lv)
+            wvl.addWidget(top)
+
+            # progress bar
+            bar = QProgressBar()
+            bar.setRange(0, 1000)
+            bar.setValue(0)
+            bar.setTextVisible(False)
+            bar.setStyleSheet(
+                f"QProgressBar {{ background:rgba(20,34,60,.09); border:none;"
+                f" border-radius:3px; max-height:6px; min-height:6px; }}"
+                f"QProgressBar::chunk {{ background:{color}; border-radius:3px; }}")
+            wvl.addWidget(bar)
+            vl.addWidget(w)
+            self._ch_rows.append((key, lv, bar, fmt, max_val))
+
+        # ── PRESSIONS — TEMPS RÉEL ─────────────────────────────
+        hdr_p = QWidget()
+        h_p = QHBoxLayout(hdr_p)
+        h_p.setContentsMargins(0, 32, 0, 8)  # Marge haut augmentée pour espacement
+        lbl_p = QLabel("💨 PRESSIONS — TEMPS RÉEL")
+        lbl_p.setObjectName("section-hdr")
+        h_p.addWidget(lbl_p)
+        h_p.addStretch()
+        lbl_p_count = QLabel(str(len(_PRESSIONS)))
+        lbl_p_count.setStyleSheet(
+            "font-size:10px; font-family:'IBM Plex Mono',monospace;"
+            f" color: #14223C; background:transparent;")
+        h_p.addWidget(lbl_p_count)
+        vl.addWidget(hdr_p)
+
+        # Afficher les pressions (P amont, ΔP ISO, ΔP Miller)
+        for key, name, max_val, fmt, color in _PRESSIONS:
             w = QWidget()
             wvl = QVBoxLayout(w)
             wvl.setContentsMargins(0, 11, 0, 11)
@@ -804,7 +913,7 @@ class Application(QMainWindow):
         # ── ACTIONNEURS ────────────────────────────────────────
         hdr2 = QWidget()
         h2 = QHBoxLayout(hdr2)
-        h2.setContentsMargins(0, 16, 0, 8)
+        h2.setContentsMargins(0, 32, 0, 8)  # Marge haut augmentée pour espacement
         la = QLabel("⚡ ACTIONNEURS — ÉTAT")
         la.setObjectName("section-hdr")
         h2.addWidget(la)
@@ -1025,7 +1134,7 @@ class Application(QMainWindow):
         ref_seg, self._ref_btns = self._seg(["Conduite", "Veine"])
         self._ref_btns[0].clicked.connect(lambda: self._set_ref_re("conduite"))
         self._ref_btns[1].clicked.connect(lambda: self._set_ref_re("veine"))
-        self._seg_set(self._ref_btns, 0)
+        self._seg_set(self._ref_btns, 1)  # Défaut: Veine (index 1)
         rvl.addWidget(ref_seg)
         vl.addWidget(ref_outer)
 
@@ -1044,8 +1153,8 @@ class Application(QMainWindow):
             sub_lbl=None,
         ))
 
-        # CONSIGNES ACTIONNEURS
-        lbl_ca = QLabel("CONSIGNES ACTIONNEURS")
+        # CONSIGNES VANNES
+        lbl_ca = QLabel("CONSIGNES VANNES")
         lbl_ca.setObjectName("section-hdr")
         vl.addWidget(lbl_ca)
 
@@ -1386,6 +1495,18 @@ class Application(QMainWindow):
         h.addWidget(val("pt100_verdict"))
         h.addStretch()
         cl.addLayout(h)
+        # Paramètres calculés (ρ, μ)
+        h2 = QHBoxLayout(); h2.setSpacing(18)
+        lbl_rho = QLabel("ρ (air) :")
+        lbl_rho.setStyleSheet("font-size:12px; color:#3A4D60;")
+        h2.addWidget(lbl_rho)
+        h2.addWidget(val("pt100_rho", 110))
+        lbl_mu = QLabel("μ (air) :")
+        lbl_mu.setStyleSheet("font-size:12px; color:#3A4D60;")
+        h2.addWidget(lbl_mu)
+        h2.addWidget(val("pt100_mu", 110))
+        h2.addStretch()
+        cl.addLayout(h2)
         vl.addWidget(c)
 
         # ── 3. FCO432 ─────────────────────────────────────────────────
@@ -1537,20 +1658,20 @@ class Application(QMainWindow):
         h = QHBoxLayout(); h.setSpacing(18)
         h.addWidget(QLabel("Kp (gain proportionnel)"))
         h.addWidget(spin_double("kp", 0.0, 5.0, 2))
-        h.addWidget(label_info("par défaut : 0.30 | ↑ = réaction plus rapide mais risque oscillations"))
+        h.addWidget(label_info("par défaut : 0.50 | correction en volts autour du feed-forward ; ↑ = plus vif, risque d'oscillation"))
         h.addStretch()
         cl.addLayout(h)
 
         h = QHBoxLayout(); h.setSpacing(18)
         h.addWidget(QLabel("Ki (gain intégral)"))
         h.addWidget(spin_double("ki", 0.0, 2.0, 3))
-        h.addWidget(label_info("par défaut : 0.15 | ↑ = élimine erreur statique mais risque overshoot"))
+        h.addWidget(label_info("par défaut : 0.62 /s | annule l'écart table/banc ; ↑ = plus rapide, risque de dépassement"))
         h.addStretch()
         cl.addLayout(h)
 
         # Rampe et tau_consigne
         h = QHBoxLayout(); h.setSpacing(18)
-        h.addWidget(QLabel("Rampe PI"))
+        h.addWidget(QLabel("Rampe variateur"))
         h.addWidget(spin_double("rampe_v_par_s", 0.0, 10.0, 2, " V/s"))
         h.addWidget(label_info("par défaut : 2.0 V/s | ↑ = montée plus rapide, ↓ = plus douce (évite à-coups)"))
         h.addStretch()
@@ -1559,17 +1680,21 @@ class Application(QMainWindow):
         h = QHBoxLayout(); h.setSpacing(18)
         h.addWidget(QLabel("Tau consigne"))
         h.addWidget(spin_double("tau_consigne_s", 0.0, 2.0, 2, " s"))
-        h.addWidget(label_info("par défaut : 0.0 s | ↑ = filtre la consigne (évite saut brutal), 0 = pas de filtre"))
+        h.addWidget(label_info("= constante de temps du procédé (essai indiciel) | modèle de référence suivi par la correction"))
         h.addStretch()
         cl.addLayout(h)
 
-        # Gain scheduling
         h = QHBoxLayout(); h.setSpacing(18)
-        self._mes_reg_gain_scheduling = QCheckBox("Gain scheduling actif")
-        self._mes_reg_gain_scheduling.setStyleSheet("background:transparent; color:#E0E0E0;")
-        self._mes_actionneurs.append(self._mes_reg_gain_scheduling)
-        h.addWidget(self._mes_reg_gain_scheduling)
-        h.addWidget(label_info("par défaut : désactivé | Adapte les gains selon le point de fonctionnement"))
+        h.addWidget(QLabel("Tolérance convergence"))
+        h.addWidget(spin_double("tolerance_convergence_relative", 0.001, 0.1, 3))
+        h.addWidget(label_info("par défaut : 0.01 (1%) | erreur relative Re tolérée pour déclarer la convergence ; ↓ = plus strict"))
+        h.addStretch()
+        cl.addLayout(h)
+
+        h = QHBoxLayout(); h.setSpacing(18)
+        h.addWidget(QLabel("Fenêtre convergence"))
+        h.addWidget(spin_double("fenetre_convergence_s", 0.5, 10.0, 1, " s"))
+        h.addWidget(label_info("par défaut : 2.0 s | durée pendant laquelle Re doit rester dans la tolérance ; ↑ = plus stable"))
         h.addStretch()
         cl.addLayout(h)
 
@@ -1580,13 +1705,6 @@ class Application(QMainWindow):
         h.addWidget(QLabel("Seuil bas-Re"))
         h.addWidget(spin_int("seuil_re", 0, 10000, " Re"))
         h.addWidget(label_info("par défaut : 5000 Re | En dessous : bypass ouvert + Miller. 0 = auto depuis table"))
-        h.addStretch()
-        cl.addLayout(h)
-
-        h = QHBoxLayout(); h.setSpacing(18)
-        h.addWidget(QLabel("Split-range point"))
-        h.addWidget(spin_double("split_range_point", 0.1, 9.9, 1, " V"))
-        h.addWidget(label_info("par défaut : 5.0 V | Point de bascule PDC/variateur en mode bas-Re"))
         h.addStretch()
         cl.addLayout(h)
 
@@ -1691,7 +1809,10 @@ class Application(QMainWindow):
             self._mes_reg_widgets["ki"].setValue(reg.get("ki", 0.15))
             self._mes_reg_widgets["rampe_v_par_s"].setValue(reg.get("rampe_v_par_s", 2.0))
             self._mes_reg_widgets["tau_consigne_s"].setValue(reg.get("tau_consigne_s", 0.0))
-            self._mes_reg_gain_scheduling.setChecked(reg.get("gain_scheduling_actif", False))
+            self._mes_reg_widgets["tolerance_convergence_relative"].setValue(reg.get("tolerance_convergence_relative", 0.01))
+            self._mes_reg_widgets["fenetre_convergence_s"].setValue(reg.get("fenetre_convergence_s", 2.0))
+            # Note : gain_scheduling n'est plus dans l'IHM (widget retiré)
+            # self._mes_reg_gain_scheduling.setChecked(reg.get("gain_scheduling", False))
 
             self._mes_reg_widgets["seuil_re"].setValue(sr.get("seuil_re", 5000))
             self._mes_reg_widgets["split_range_point"].setValue(sr.get("split_range_point", 5.0))
@@ -1723,7 +1844,10 @@ class Application(QMainWindow):
             cfg["regulation"]["ki"] = self._mes_reg_widgets["ki"].value()
             cfg["regulation"]["rampe_v_par_s"] = self._mes_reg_widgets["rampe_v_par_s"].value()
             cfg["regulation"]["tau_consigne_s"] = self._mes_reg_widgets["tau_consigne_s"].value()
-            cfg["regulation"]["gain_scheduling_actif"] = self._mes_reg_gain_scheduling.isChecked()
+            cfg["regulation"]["tolerance_convergence_relative"] = self._mes_reg_widgets["tolerance_convergence_relative"].value()
+            cfg["regulation"]["fenetre_convergence_s"] = self._mes_reg_widgets["fenetre_convergence_s"].value()
+            # Note : gain_scheduling n'est plus dans l'IHM (widget retiré)
+            # cfg["regulation"]["gain_scheduling"] = self._mes_reg_gain_scheduling.isChecked()
 
             cfg["strategie_bas_re"]["seuil_re"] = self._mes_reg_widgets["seuil_re"].value()
             cfg["strategie_bas_re"]["split_range_point"] = self._mes_reg_widgets["split_range_point"].value()
@@ -1733,8 +1857,8 @@ class Application(QMainWindow):
             # Sauvegarder config.json
             cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
 
-            # Appliquer immédiatement au pilote via recharger_config
-            self.pilote.recharger_config(cfg)
+            # Appliquer immédiatement au pilote (gains, rampe, tau, bas-Re)
+            self.pilote.appliquer_config(cfg)
 
             self._mes_lbl_reg_status.setText(
                 f"✓ Paramètres appliqués et sauvegardés | "
@@ -1826,6 +1950,8 @@ class Application(QMainWindow):
         if T is None:
             mets("pt100_valeur", "—")
             mets("pt100_verdict", "voie absente", COLORS["error"])
+            mets("pt100_rho", "—")
+            mets("pt100_mu", "—")
         else:
             mets("pt100_valeur", f"{T:.2f} °C".replace(".", ","))
             if tmin <= T <= tmax:
@@ -1836,6 +1962,14 @@ class Application(QMainWindow):
                 mets("pt100_verdict",
                      f"HORS BORNES {tmin:.0f}–{tmax:.0f} °C — sonde coupee, "
                      "module sature ou voie mal adressee", COLORS["error"])
+
+            # Calcul ρ (densité) et μ (viscosité)
+            P_abs = e.get("p_amont") or self.pilote.banc.patm_pa
+            from core.fluide import rho_air, mu_air
+            rho = rho_air(P_abs, T)
+            mu = mu_air(T)
+            mets("pt100_rho", f"{rho:.4f} kg/m³".replace(".", ","))
+            mets("pt100_mu", f"{mu:.2e} Pa·s".replace(".", ","))
 
         # -- FCO432 --
         zeros = self.cfg.get("zero_capteurs", {})
@@ -2676,21 +2810,45 @@ class Application(QMainWindow):
         reg = cfg.get("regulation", {})
         mdb = cfg.get("modbus", {})
 
-        # colonne gauche
-        _grp("Banc & Fluide", [
-            (("patm_pa",),                      "Pression atmosphérique", "Pa",   "{:.2f}", _positif),
-            (("fluide","gamma"),                "γ (gaz)",                "—",    "{:.5f}", _positif),
-            (("veine","section_m2"),            "Section veine",          "m²",   "{:.4f}", _positif),
-            (("veine","longueur_caracteristique_m"),"Longueur caract.",   "m",    "{:.3f}", _positif),
-        ], col=0, row=0)
+        # ═══════════════════════════════════════════════════════════════
+        # SECTION A : CALCUL REYNOLDS (paramètres physiques des formules)
+        # ═══════════════════════════════════════════════════════════════
 
+        # Titre section A
+        titre_a = QLabel("CALCUL REYNOLDS — Paramètres physiques")
+        titre_a.setStyleSheet(
+            f"font-size:13px; font-weight:700; color:{COLORS['accent']};"
+            " background:transparent; padding:12px 0 8px 0;")
+        gl.addWidget(titre_a, 0, 0, 1, 2)  # span 2 colonnes
+
+        # colonne gauche - section A
+        _grp("Fluide", [
+            (("patm_pa",),                      "Pression atmosphérique", "Pa",   "{:.2f}", _positif),
+            (("fluide","gamma"),                "γ (rapport Cp/Cv)",      "—",    "{:.5f}", _positif),
+            (("fluide","humidite_relative"),    "Humidité relative",      "%",    "{:.1f}", _humidite_relative),
+        ], col=0, row=1)
+
+        _grp("Viscosité dynamique (Sutherland)", [
+            (("fluide","sutherland_mu_ref"),  "μ référence",      "Pa·s", "{:.2e}", _positif),
+            (("fluide","sutherland_t_ref"),   "T référence",      "K",    "{:.2f}", _positif),
+            (("fluide","sutherland_s"),       "Constante S",      "K",    "{:.1f}", _positif),
+        ], col=0, row=2)
+
+        _grp("Géométrie veine d'essai (rectangulaire)", [
+            (("veine","hauteur_m"),             "Hauteur H",        "m",    "{:.3f}", _positif),
+            (("veine","largeur_m"),             "Largeur W",        "m",    "{:.3f}", _positif),
+            (("veine","section_m2"),            "Section S = H×W",  "m²",   "{:.5f}", None),
+            (("veine","longueur_caracteristique_m"),"Dh = 4S/P",    "m",    "{:.6f}", None),
+        ], col=0, row=3)
+
+        # colonne droite - section A
         _grp("Diaphragme ISO 5167", [
             (("diaphragme_iso","D20_mm"),          "D conduite",       "mm",   "{:.2f}", _positif),
             (("diaphragme_iso","d20_mm"),           "d orifice",        "mm",   "{:.3f}", _beta_iso),
             (("diaphragme_iso","alpha_conduite"),   "α conduite",       "1/°C", "{:.2e}", _alpha),
             (("diaphragme_iso","alpha_diaphragme"), "α diaphragme",     "1/°C", "{:.2e}", _alpha),
             (("diaphragme_iso","formule_C"),        "Formule C",        "—",    "{}",     None),
-        ], col=0, row=1)
+        ], col=1, row=1)
 
         _grp("Diaphragme Miller", [
             (("diaphragme_miller","D20_mm"),          "D conduite",   "mm",   "{:.2f}", _positif),
@@ -2698,8 +2856,195 @@ class Application(QMainWindow):
              _d_inferieur_D("diaphragme_miller")),
             (("diaphragme_miller","alpha_conduite"),   "α conduite",   "1/°C", "{:.2e}", _alpha),
             (("diaphragme_miller","alpha_diaphragme"), "α diaphragme", "1/°C", "{:.2e}", _alpha),
-        ], col=0, row=2)
+        ], col=1, row=2)
 
+        # Encart caractéristiques de l'air (temps réel) - section A
+        air_card = QWidget()
+        air_card.setStyleSheet(
+            "QWidget { background:#FFFFFF; border:1px solid #DBE5EA; border-radius:10px; }")
+        acl = QVBoxLayout(air_card)
+        acl.setContentsMargins(0, 0, 0, 0)
+        acl.setSpacing(0)
+        # titre
+        ath = QWidget()
+        ath.setStyleSheet("background:transparent; border-bottom:1px solid #DBE5EA;")
+        athl = QHBoxLayout(ath)
+        athl.setContentsMargins(16, 12, 16, 12)
+        alt = QLabel("CARACTÉRISTIQUES DE L'AIR (TEMPS RÉEL)")
+        alt.setStyleSheet(
+            f"font-size:10px; font-weight:700; letter-spacing:.12em;"
+            f" color:{COLORS['accent']}; background:transparent; border:none;")
+        athl.addWidget(alt)
+        acl.addWidget(ath)
+
+        # Température (temps réel, capteur)
+        arow_t = QWidget()
+        arow_t.setStyleSheet("background:transparent; border-bottom:1px solid #E9EEF1;")
+        artl = QHBoxLayout(arow_t)
+        artl.setContentsMargins(16, 11, 16, 11)
+        artl.setSpacing(8)
+        albl_t = QLabel("Température")
+        albl_t.setStyleSheet("font-size:12.5px; color:#3A4D60; background:transparent; border:none;")
+        artl.addWidget(albl_t)
+        artl.addStretch()
+        self._lbl_air_temp = QLabel("—")
+        self._lbl_air_temp.setStyleSheet(
+            "font-family:'IBM Plex Mono',monospace; font-size:12px; font-weight:600;"
+            " color:#14223C; background:transparent; border:none;")
+        artl.addWidget(self._lbl_air_temp)
+        albl_tu = QLabel("°C")
+        albl_tu.setStyleSheet("font-size:11px; color:#6B7E8E; background:transparent; border:none;")
+        albl_tu.setFixedWidth(46)
+        albl_tu.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        artl.addWidget(albl_tu)
+        acl.addWidget(arow_t)
+
+        # Masse volumique (ρ)
+        arow_rho = QWidget()
+        arow_rho.setStyleSheet("background:transparent; border-bottom:1px solid #E9EEF1;")
+        arhol = QHBoxLayout(arow_rho)
+        arhol.setContentsMargins(16, 11, 16, 11)
+        arhol.setSpacing(8)
+        albl_rho = QLabel("Masse volumique ρ")
+        albl_rho.setStyleSheet("font-size:12.5px; color:#3A4D60; background:transparent; border:none;")
+        arhol.addWidget(albl_rho)
+        arhol.addStretch()
+        self._lbl_air_rho = QLabel("—")
+        self._lbl_air_rho.setStyleSheet(
+            "font-family:'IBM Plex Mono',monospace; font-size:12px; font-weight:600;"
+            f" color:{COLORS['accent']}; background:transparent; border:none;")
+        arhol.addWidget(self._lbl_air_rho)
+        albl_rhou = QLabel("kg/m³")
+        albl_rhou.setStyleSheet("font-size:11px; color:#6B7E8E; background:transparent; border:none;")
+        albl_rhou.setFixedWidth(46)
+        albl_rhou.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        arhol.addWidget(albl_rhou)
+        acl.addWidget(arow_rho)
+
+        # Viscosité dynamique (μ)
+        arow_mu = QWidget()
+        arow_mu.setStyleSheet("background:transparent; border-bottom:1px solid #E9EEF1;")
+        armul = QHBoxLayout(arow_mu)
+        armul.setContentsMargins(16, 11, 16, 11)
+        armul.setSpacing(8)
+        albl_mu = QLabel("Viscosité dynamique μ")
+        albl_mu.setStyleSheet("font-size:12.5px; color:#3A4D60; background:transparent; border:none;")
+        armul.addWidget(albl_mu)
+        armul.addStretch()
+        self._lbl_air_mu = QLabel("—")
+        self._lbl_air_mu.setStyleSheet(
+            "font-family:'IBM Plex Mono',monospace; font-size:12px; font-weight:600;"
+            f" color:{COLORS['accent']}; background:transparent; border:none;")
+        armul.addWidget(self._lbl_air_mu)
+        albl_muu = QLabel("Pa·s")
+        albl_muu.setStyleSheet("font-size:11px; color:#6B7E8E; background:transparent; border:none;")
+        albl_muu.setFixedWidth(46)
+        albl_muu.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        armul.addWidget(albl_muu)
+        acl.addWidget(arow_mu)
+
+        # Viscosité cinématique (ν)
+        arow_nu = QWidget()
+        arow_nu.setStyleSheet("background:transparent;")
+        arnul = QHBoxLayout(arow_nu)
+        arnul.setContentsMargins(16, 11, 16, 11)
+        arnul.setSpacing(8)
+        albl_nu = QLabel("Viscosité cinématique ν")
+        albl_nu.setStyleSheet("font-size:12.5px; color:#3A4D60; background:transparent; border:none;")
+        arnul.addWidget(albl_nu)
+        arnul.addStretch()
+        self._lbl_air_nu = QLabel("—")
+        self._lbl_air_nu.setStyleSheet(
+            "font-family:'IBM Plex Mono',monospace; font-size:12px; font-weight:600;"
+            f" color:{COLORS['accent']}; background:transparent; border:none;")
+        arnul.addWidget(self._lbl_air_nu)
+        albl_nuu = QLabel("m²/s")
+        albl_nuu.setStyleSheet("font-size:11px; color:#6B7E8E; background:transparent; border:none;")
+        albl_nuu.setFixedWidth(46)
+        albl_nuu.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        arnul.addWidget(albl_nuu)
+        acl.addWidget(arow_nu)
+
+        # Section repliable "Détails" pour Pvs, Pv, x, v, h
+        # Bouton pour afficher/masquer les détails
+        self._air_details_visible = False
+        arow_toggle = QWidget()
+        arow_toggle.setStyleSheet("background:transparent; border-top:1px solid #E9EEF1;")
+        atogl = QHBoxLayout(arow_toggle)
+        atogl.setContentsMargins(16, 8, 16, 8)
+        self._btn_air_details = QPushButton("▸ Afficher les détails")
+        self._btn_air_details.setStyleSheet(
+            "QPushButton { font-size:11px; color:#6B7E8E; background:transparent; "
+            "border:none; text-align:left; padding:0; }"
+            "QPushButton:hover { color:#3A4D60; }")
+        self._btn_air_details.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_air_details.clicked.connect(self._basculer_air_details)
+        atogl.addWidget(self._btn_air_details)
+        atogl.addStretch()
+        acl.addWidget(arow_toggle)
+
+        # Container des détails (initialement masqué)
+        self._air_details_container = QWidget()
+        self._air_details_container.setStyleSheet("background:transparent;")
+        self._air_details_container.setVisible(False)
+        adetails = QVBoxLayout(self._air_details_container)
+        adetails.setContentsMargins(0, 0, 0, 0)
+        adetails.setSpacing(0)
+
+        # Pvs - Pression de vapeur saturante
+        def _make_detail_row(label, unit):
+            row = QWidget()
+            row.setStyleSheet("background:transparent; border-bottom:1px solid #E9EEF1;")
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(16, 8, 16, 8)
+            rl.setSpacing(8)
+            lbl = QLabel(label)
+            lbl.setStyleSheet("font-size:11px; color:#6B7E8E; background:transparent; border:none;")
+            rl.addWidget(lbl)
+            rl.addStretch()
+            val_lbl = QLabel("—")
+            val_lbl.setStyleSheet(
+                "font-family:'IBM Plex Mono',monospace; font-size:11px;"
+                " color:#6B7E8E; background:transparent; border:none;")
+            rl.addWidget(val_lbl)
+            u_lbl = QLabel(unit)
+            u_lbl.setStyleSheet("font-size:10px; color:#9EAAB5; background:transparent; border:none;")
+            u_lbl.setFixedWidth(46)
+            u_lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            rl.addWidget(u_lbl)
+            return row, val_lbl
+
+        pvs_row, self._lbl_air_Pvs = _make_detail_row("Pvs (vapeur saturante)", "Pa")
+        adetails.addWidget(pvs_row)
+
+        pv_row, self._lbl_air_Pv = _make_detail_row("Pv (partielle vapeur)", "Pa")
+        adetails.addWidget(pv_row)
+
+        x_row, self._lbl_air_x = _make_detail_row("x (humidité spécifique)", "kg/kg")
+        adetails.addWidget(x_row)
+
+        v_row, self._lbl_air_v = _make_detail_row("v (volume spécifique)", "m³/kg")
+        adetails.addWidget(v_row)
+
+        h_row, self._lbl_air_h = _make_detail_row("h (enthalpie)", "kJ/kg")
+        adetails.addWidget(h_row)
+
+        acl.addWidget(self._air_details_container)
+
+        gl.addWidget(air_card, 4, 0)
+
+        # ═══════════════════════════════════════════════════════════════
+        # SECTION B : PILOTAGE & RÉGULATION (paramètres techniques)
+        # ═══════════════════════════════════════════════════════════════
+
+        # Titre section B
+        titre_b = QLabel("PILOTAGE & RÉGULATION — Paramètres techniques")
+        titre_b.setStyleSheet(
+            f"font-size:13px; font-weight:700; color:{COLORS['accent']};"
+            " background:transparent; padding:24px 0 8px 0;")
+        gl.addWidget(titre_b, 5, 0, 1, 2)  # span 2 colonnes
+
+        # colonne gauche - section B
         _grp("Régulation PI", [
             (("regulation","periode_s"),      "Période",          "s",    "{:.1f}", _positif),
             (("regulation","kp"),             "Kp",               "—",    "{:.2f}", _positif_ou_nul),
@@ -2707,20 +3052,7 @@ class Application(QMainWindow):
             (("regulation","rampe_v_par_s"),  "Rampe variateur",  "V/s",  "{:.1f}", _positif),
             (("regulation","tolerance_convergence_relative"), "Tolérance conv.", "%",
              lambda v, _: f"{v*100:.0f}", None),
-        ], col=0, row=3)
-
-        # colonne droite
-        _grp("Sélection diaphragme", [
-            (("selection_diaphragme","seuil_re"),     "Seuil Re",    "—", "{:.0f}", _positif),
-            (("selection_diaphragme","hysteresis_re"),"Hystérésis",  "±", "{:.0f}", _positif_ou_nul),
-        ], col=1, row=0)
-
-        _grp("Actionneurs — temps de course", [
-            (("actionneurs","vanne_3voies_temps_s"),      "Vanne 3 voies",    "s",  "{:.1f}", _positif),
-            (("actionneurs","vanne_bypass_temps_s"),       "Vanne by-pass",    "s",  "{:.1f}", _positif),
-            (("actionneurs","vanne_perte_charge_course_s"),"Perte de charge",  "s",  "{:.1f}", _positif),
-            (("actionneurs","facteur_chien_garde"),        "Chien de garde",   "×",  "{:.1f}", _positif),
-        ], col=1, row=1)
+        ], col=0, row=6)
 
         _grp("Surveillance et replis", [
             (("regulation","fenetre_convergence_s"),   "Fenêtre convergence", "s",
@@ -2733,7 +3065,20 @@ class Application(QMainWindow):
              "{:.2f}", _positif),
             (("regulation","recul_saturation_v_par_s"),"Recul si saturé", "V/s",
              "{:.2f}", _positif),
-        ], col=1, row=2)
+        ], col=0, row=7)
+
+        # colonne droite - section B
+        _grp("Sélection diaphragme", [
+            (("selection_diaphragme","seuil_re"),     "Seuil Re",    "—", "{:.0f}", _positif),
+            (("selection_diaphragme","hysteresis_re"),"Hystérésis",  "±", "{:.0f}", _positif_ou_nul),
+        ], col=1, row=6)
+
+        _grp("Actionneurs — temps de course", [
+            (("actionneurs","vanne_3voies_temps_s"),      "Vanne 3 voies",    "s",  "{:.1f}", _positif),
+            (("actionneurs","vanne_bypass_temps_s"),       "Vanne by-pass",    "s",  "{:.1f}", _positif),
+            (("actionneurs","vanne_perte_charge_course_s"),"Perte de charge",  "s",  "{:.1f}", _positif),
+            (("actionneurs","facteur_chien_garde"),        "Chien de garde",   "×",  "{:.1f}", _positif),
+        ], col=1, row=7)
 
         _grp("Communication Modbus", [
             (("modbus","ip"),         "Adresse IP",  "",    "{}",     None),
@@ -2741,7 +3086,7 @@ class Application(QMainWindow):
             (("modbus","timeout_s"),  "Timeout",     "s",   "{:.1f}", None),
             (("variateur","frequence_max_hz"), "Variateur n011", "Hz",
              "{:.1f}", _positif),
-        ], col=1, row=3)
+        ], col=1, row=8)
 
         scroll.setWidget(corps)
         vl.addWidget(scroll, 1)
@@ -2778,16 +3123,28 @@ class Application(QMainWindow):
     def _update_controls_enabled(self) -> None:
         """Active ou inhibe les contrôles manuels selon le mode courant :
         en asservi et en séquence, les actionneurs sont pilotés par la
-        régulation — commandes manuelles inhibées."""
-        en = (self._mode == "manuel")
-        self._slider_u.setEnabled(en)
-        self._inp_vman.setEnabled(en)
-        self._slider_pdc.setEnabled(en)
-        self._inp_pdc.setEnabled(en)
+        régulation — commandes manuelles inhibées.
+
+        En mode manuel, la consigne Reynolds est désactivée (seuls les
+        actionneurs sont pilotables manuellement)."""
+        en_manuel = (self._mode == "manuel")
+        en_asservi = (self._mode == "asservi")
+
+        # Contrôles actionneurs : actifs uniquement en mode manuel
+        self._slider_u.setEnabled(en_manuel)
+        self._inp_vman.setEnabled(en_manuel)
+        self._slider_pdc.setEnabled(en_manuel)
+        self._inp_pdc.setEnabled(en_manuel)
         for btn in self._diaph_btns:
-            btn.setEnabled(en)
+            btn.setEnabled(en_manuel)
         for btn in self._bypass_btns:
-            btn.setEnabled(en)
+            btn.setEnabled(en_manuel)
+
+        # Consigne Reynolds : active uniquement en mode asservi
+        self._slider_re.setEnabled(en_asservi)
+        self.inp_re.setEnabled(en_asservi)
+        for btn in self._ref_btns:
+            btn.setEnabled(en_asservi)
 
     def _update_mode_seg(self) -> None:
         idx = {"manuel": 0, "asservi": 1, "sequence": 2}.get(self._mode, 1)
@@ -2851,22 +3208,66 @@ class Application(QMainWindow):
         self.pilote.commander_bypass(ouvert)
         self._log(f"Bypass → {'Ouvert' if ouvert else 'Fermé'}", COLORS["ok"])
 
+    def _calculer_k(self) -> float:
+        """Calcule le facteur de conversion Re_conduite / Re_veine à partir
+        des dimensions actuelles de la veine (veine interchangeable)."""
+        # Débit massique de référence pour le calcul de k
+        qm_ref = 0.028402  # kg/s
+        T = 20.0
+        P1_abs = self.pilote.banc.patm_pa
+        res = self.pilote.banc.qm_vers_re(qm_ref, T, P1_abs)
+        return res["re_conduite"] / res["re_veine"] if res["re_veine"] > 0 else 1.0
+
+    def _re_max_pour_reference(self, ref: str) -> int:
+        """Calcule le Re maximum pour la référence donnée (conduite ou veine).
+
+        - Mode CONDUITE : max fixe à 25000 Re
+        - Mode VEINE : calculé dynamiquement depuis re_max_iso et dimensions veine
+        """
+        if ref == "conduite":
+            return 25000  # Maximum fixe en mode conduite
+        else:  # veine
+            re_max_iso = self.pilote.re_max_iso or 24500
+            k = self._calculer_k()
+            return int(re_max_iso / k)
+
     def _set_ref_re(self, ref: str) -> None:
+        """Change la référence Re (conduite/veine) et adapte les limites du slider."""
         self._ref_re = ref
         self._seg_set(self._ref_btns, 0 if ref == "conduite" else 1)
+
+        # Calculer le Re max et l'échelle pour cette référence
+        re_max = self._re_max_pour_reference(ref)
+        slider_max = 100
+        self._echelle_re = re_max / slider_max
+
+        # Adapter la consigne actuelle si elle dépasse le nouveau maximum
+        try:
+            consigne_actuelle = int(self.inp_re.text().replace(",", ".").replace(" ", ""))
+            if consigne_actuelle > re_max:
+                self.inp_re.setText(str(re_max))
+                self._slider_re.blockSignals(True)
+                self._slider_re.setValue(slider_max)
+                self._slider_re.blockSignals(False)
+        except (ValueError, AttributeError):
+            pass
+
         self._mark_dirty("re")
 
     # ── slider/input sync ──────────────────────────────────────────────────
 
     def _on_re_slider(self, v: int) -> None:
-        self.inp_re.setText(str(v * 250))
+        """Slider Re déplacé : mettre à jour l'input avec l'échelle dynamique."""
+        re_val = int(v * self._echelle_re)
+        self.inp_re.setText(str(re_val))
         self._mark_dirty("re")
 
     def _on_re_input(self, text: str) -> None:
+        """Input Re modifié : synchroniser le slider avec l'échelle dynamique."""
         try:
             re_val = int(text.replace(",", ".").replace(" ", ""))
-            # Synchroniser le slider avec la valeur saisie (Re / 250)
-            slider_val = int(re_val / 250)
+            # Synchroniser le slider avec la valeur saisie
+            slider_val = int(re_val / self._echelle_re)
             self._slider_re.blockSignals(True)
             self._slider_re.setValue(slider_val)
             self._slider_re.blockSignals(False)
@@ -2967,6 +3368,15 @@ class Application(QMainWindow):
 
     # ══════════════════════════════════════════════════════════ CONFIGURATION
 
+    def _basculer_air_details(self) -> None:
+        """Affiche/masque les détails des propriétés de l'air humide."""
+        self._air_details_visible = not self._air_details_visible
+        self._air_details_container.setVisible(self._air_details_visible)
+        if self._air_details_visible:
+            self._btn_air_details.setText("▾ Masquer les détails")
+        else:
+            self._btn_air_details.setText("▸ Afficher les détails")
+
     def _basculer_verrouillage(self) -> None:
         unlock = self.chk_unlock.isChecked()
         if unlock and self.pilote.etat.get("regulation"):
@@ -3005,6 +3415,19 @@ class Application(QMainWindow):
         if erreurs:
             QMessageBox.critical(self, "Saisie invalide", "\n".join(erreurs))
             return
+
+        # Recalculer S et Dh à partir de H et W si modifiés
+        h_key = ("veine", "hauteur_m")
+        w_key = ("veine", "largeur_m")
+        if h_key in valeurs and w_key in valeurs:
+            H = valeurs[h_key]
+            W = valeurs[w_key]
+            S = H * W
+            P = 2 * (H + W)
+            Dh = 4 * S / P
+            valeurs[("veine", "section_m2")] = S
+            valeurs[("veine", "longueur_caracteristique_m")] = Dh
+
         # Le deverrouillage verifie l'arret de la regulation, mais rien
         # n'empechait de demarrer ENTRE le deverrouillage et la sauvegarde.
         # appliquer_config relit des parametres utilises par la boucle temps
@@ -3072,6 +3495,7 @@ class Application(QMainWindow):
         self._section("voies", self._tick_entrees, e)
         self._section("apprentissage", self._tick_apprentissage)
         self._section("séquence", self._tick_sequence, e)
+        self._section("configuration", self._tick_config, e)
         self._section("maintenance", self._tick_mise_en_service, e)
         self._section("courbe", self._historiser, e)
 
@@ -3093,9 +3517,12 @@ class Application(QMainWindow):
 
     def _tick_left(self, e: dict) -> None:
         brutes = e.get("mesures_brutes") or {}
-        # Résolution des 6 canaux depuis mesures_brutes ou etat
+        # Résolution des canaux depuis mesures_brutes ou etat
         vals = {
-            "re_mesure":   e.get("re_mesure"),
+            "qv":          e.get("qv"),
+            "rho":         e.get("rho"),
+            "mu":          e.get("mu"),
+            "nu":          e.get("nu"),
             "p_amont":     brutes.get("p_amont_500",    e.get("p_amont")),
             "dp_iso":      brutes.get("dp_iso_500"),
             "dp_miller":   brutes.get("dp_diaph_500"),  # addr 0 = Miller
@@ -3104,11 +3531,16 @@ class Application(QMainWindow):
         }
         for key, lv, bar, fmt, max_val in self._ch_rows:
             val = vals.get(key)
+            # Afficher "—" seulement si vraiment None (pas si 0)
+            # Pour rho, mu, nu: 0 est une valeur invalide, mais ils ne devraient jamais être 0
             if val is None:
                 lv.setText("—")
                 bar.setValue(0)
             else:
-                lv.setText(fmt.format(val).replace(".", ","))
+                # Formatage avec remplacement e → E pour notation scientifique
+                txt = fmt.format(val).replace(".", ",").replace("e", "E")
+                lv.setText(txt)
+                # Pour la barre: si val très petit (mu, nu), normaliser quand même
                 bar.setValue(int(min(max(val / max_val, 0.0), 1.0) * 1000))
 
         # ── Actionneurs ─────────────────────────────────────────────────────
@@ -3457,6 +3889,78 @@ class Application(QMainWindow):
         if paliers_iso:
             self._curve_iso_stable.setData(
                 [p[0] for p in paliers_iso], [p[1] for p in paliers_iso])
+
+    def _tick_config(self, e: dict) -> None:
+        """Mise à jour temps réel de l'encart Caractéristiques de l'air (onglet Configuration)."""
+        # Uniquement si l'onglet Configuration est visible (page 4)
+        if self._stack.currentIndex() != 4:
+            return
+
+        # Température du capteur
+        T = e.get("temperature")
+        P_abs = self.pilote.banc.patm_pa + (e.get("p_amont") or 0.0)
+
+        if T is not None:
+            # Affichage température
+            self._lbl_air_temp.setText(f"{T:.1f}".replace(".", ","))
+
+            # Récupérer l'humidité relative depuis la config
+            HR_pct = self.cfg.get("fluide", {}).get("humidite_relative", 0.0)
+
+            # Calcul propriétés de l'air
+            if HR_pct > 0:
+                # Utiliser les formules air humide
+                from core.air_humide import calculer_proprietes_air_humide
+                try:
+                    props = calculer_proprietes_air_humide(P_abs, T, HR_pct / 100.0)
+                    rho = props["rho"]
+                    mu = props["mu"]
+                    nu = props["nu"]
+                    # Remplir les détails
+                    self._lbl_air_Pvs.setText(f"{props['Pvs']:.2f}".replace(".", ","))
+                    self._lbl_air_Pv.setText(f"{props['Pv']:.2f}".replace(".", ","))
+                    self._lbl_air_x.setText(f"{props['x']:.6f}".replace(".", ","))
+                    self._lbl_air_v.setText(f"{props['v']:.4f}".replace(".", ","))
+                    self._lbl_air_h.setText(f"{props['h']:.2f}".replace(".", ","))
+                except ValueError:
+                    # Si erreur (HR invalide), retomber sur air sec
+                    from core.fluide import rho_air, mu_air
+                    rho = rho_air(P_abs, T)
+                    mu = mu_air(T)
+                    nu = mu / rho
+                    # Détails non applicables pour air sec
+                    self._lbl_air_Pvs.setText("—")
+                    self._lbl_air_Pv.setText("—")
+                    self._lbl_air_x.setText("—")
+                    self._lbl_air_v.setText("—")
+                    self._lbl_air_h.setText("—")
+            else:
+                # Air sec (HR = 0)
+                from core.fluide import rho_air, mu_air
+                rho = rho_air(P_abs, T)
+                mu = mu_air(T)
+                nu = mu / rho
+                # Détails non applicables pour air sec
+                self._lbl_air_Pvs.setText("—")
+                self._lbl_air_Pv.setText("—")
+                self._lbl_air_x.setText("—")
+                self._lbl_air_v.setText("—")
+                self._lbl_air_h.setText("—")
+
+            # Affichage propriétés calculées
+            self._lbl_air_rho.setText(f"{rho:.4f}".replace(".", ","))
+
+            # Format μ et ν : x.xxxxE-05 (5 décimales + exposant)
+            mu_str = f"{mu:.5e}".replace(".", ",").replace("e", "E")
+            nu_str = f"{nu:.5e}".replace(".", ",").replace("e", "E")
+            self._lbl_air_mu.setText(mu_str)
+            self._lbl_air_nu.setText(nu_str)
+        else:
+            # Si pas de température, tout en "—"
+            self._lbl_air_temp.setText("—")
+            self._lbl_air_rho.setText("—")
+            self._lbl_air_mu.setText("—")
+            self._lbl_air_nu.setText("—")
 
     def _tracer(self) -> None:
         donnees = list(self._hist_re)

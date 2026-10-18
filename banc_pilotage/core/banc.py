@@ -2,7 +2,7 @@
 """Logique métier du banc :
   - conversion consigne Re (veine ou conduite) -> débit massique visé
   - sélection automatique du diaphragme (Miller si Re_diaphragme < seuil, sinon ISO)
-  - calcul du Re mesuré à partir des capteurs (ΔP, P_amont, PT100 ;
+  - calcul du Re calculé à partir des capteurs (ΔP, P_amont, PT100 ;
     voies ΔP Miller et P_amont en maître/esclave 50/500 Pa côté matériel,
     sortie unique 0-10 V = 0-500 Pa)
 """
@@ -19,9 +19,31 @@ from .diaphragmes import (GeometrieDiaphragme,
 
 @dataclass
 class GeometrieVeine:
-    """Géométrie de la veine d'essai pour le calcul du Reynolds veine."""
-    section_m2: float                    # section de passage [m2]
-    longueur_caracteristique_m: float    # Lc pour Re (hauteur veine, Dh, corde…)
+    """Géométrie de la veine d'essai pour le calcul du Reynolds veine.
+
+    Pour une veine rectangulaire, les dimensions fondamentales sont hauteur_m
+    et largeur_m, dont on déduit :
+      - section_m2 = hauteur_m × largeur_m
+      - périmètre = 2 × (hauteur_m + largeur_m)
+      - longueur_caracteristique_m = diamètre hydraulique = 4 × section / périmètre
+    """
+    hauteur_m: float                     # hauteur de la veine (H) [m]
+    largeur_m: float                     # largeur de la veine (W) [m]
+    section_m2: float | None = None      # calculé si None
+    longueur_caracteristique_m: float | None = None  # Dh, calculé si None
+
+    def __post_init__(self):
+        """Calcule section et Dh à partir de H et W si non fournis.
+
+        Si section_m2 et longueur_caracteristique_m sont fournis explicitement
+        dans la config, ils sont utilisés tels quels (pour préserver la
+        compatibilité binaire exacte avec les tests existants).
+        """
+        if self.section_m2 is None:
+            self.section_m2 = self.hauteur_m * self.largeur_m
+        if self.longueur_caracteristique_m is None:
+            perimetre = 2 * (self.hauteur_m + self.largeur_m)
+            self.longueur_caracteristique_m = 4 * self.section_m2 / perimetre
 
 
 class Banc:
@@ -41,13 +63,20 @@ class Banc:
 
         v = cfg["veine"]
         self.veine = GeometrieVeine(
-            section_m2=v["section_m2"],
-            longueur_caracteristique_m=v["longueur_caracteristique_m"])
+            hauteur_m=v["hauteur_m"],
+            largeur_m=v["largeur_m"],
+            section_m2=v.get("section_m2"),  # optionnel, calculé si absent
+            longueur_caracteristique_m=v.get("longueur_caracteristique_m"))
 
         f = cfg.get("fluide", {})
         self.fluide = ProprietesFluide(
-            rho_force=f.get("rho_force"), mu_force=f.get("mu_force"),
-            gamma=f.get("gamma", 1.40273))
+            rho_force=f.get("rho_force"),
+            mu_force=f.get("mu_force"),
+            gamma=f.get("gamma", 1.40273),
+            sutherland_mu_ref=f.get("sutherland_mu_ref", 1.716e-5),
+            sutherland_t_ref=f.get("sutherland_t_ref", 273.15),
+            sutherland_s=f.get("sutherland_s", 110.4),
+            humidite_relative=f.get("humidite_relative", 0.0))
 
         s = cfg["selection_diaphragme"]
         self.seuil_re = s["seuil_re"]                  # 5000
@@ -92,7 +121,7 @@ class Banc:
         """Sélection du diaphragme d'après le Re conduite ATTENDU (consigne),
         avec hystérésis pour éviter les commutations répétées près du seuil.
 
-        Retourne "miller" (Re < seuil) ou "iso" (Re > seuil).
+        Retourne "miller" (Re < seuil, bas Re) ou "iso" (Re > seuil, haut Re).
         """
         if diaphragme_actuel == "miller":
             return "iso" if re_conduite_attendu > self.seuil_re + self.hysteresis_re \
@@ -108,17 +137,28 @@ class Banc:
                           P1_eff: float) -> dict:
         """Calcul du débit massique à partir des capteurs (sens direct)."""
         P1_abs = self.patm_pa + P1_eff
+
+        # Validation pression absolue (critique pour calculs air_humide et diaphragmes)
+        if not (80000 < P1_abs < 120000):
+            raise ValueError(
+                f"Pression absolue hors plage physique : {P1_abs:.0f} Pa "
+                f"(attendu 800-1200 mbar). Vérifier P_atm={self.patm_pa:.0f} Pa "
+                f"et P1_eff={P1_eff:.1f} Pa."
+            )
+
         rho = self.fluide.rho(P1_abs, T)
+        mu = self.fluide.mu(T)
+        nu = self.fluide.nu(P1_abs, T)
         if diaphragme == "iso":
-            nu = self.fluide.nu(P1_abs, T)
             r = iso_qm_depuis_dP(self.geo_iso, dP, T, P1_abs, rho, nu,
                                  self.fluide.gamma, self.formule_C_iso)
         else:
-            mu = self.fluide.mu(T)
             r = miller_qm_depuis_dP(self.geo_miller, dP, T, P1_abs, rho, mu,
                                     self.fluide.gamma)
         r.update(self.qm_vers_re(r["qm"], T, P1_abs))
         r["rho"] = rho
+        r["mu"] = mu
+        r["nu"] = nu
         return r
 
     def dP_attendu(self, diaphragme: str, qm: float, T: float,

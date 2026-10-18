@@ -6,14 +6,16 @@ Séquence quand l'opérateur valide une consigne Re :
   2. choix du diaphragme (Miller / ISO) et commande de la vanne 3 voies
   3. calcul du ΔP attendu -> choix de la gamme capteur, pré-positionnement
      du variateur (feed-forward)
-  4. boucle PI : lecture capteurs -> qm réel (ISO 5167 ou Miller) ->
-     Re calculé -> correction tension variateur, jusqu'à convergence
+  4. boucle : lecture capteurs -> qm réel (ISO 5167 ou Miller) ->
+     Re calculé -> tension variateur = feed-forward (table apprise) +
+     correction PI en volts, jusqu'à convergence
   5. surveillance continue (la T° dérive -> rho, mu recalculés à chaque cycle)
 """
 
 from __future__ import annotations
 import json
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -22,6 +24,15 @@ from collections import deque
 from statistics import fmean, pstdev
 
 from core.journal import JournalEssai
+from core.etat_vannes import lire_etat_vannes, PositionDiaphragme, PositionBypass, PositionPDC
+from core.gestion_modes import (
+    determiner_mode_cible,
+    determiner_mode_effectif,
+    ConfigurationModes,
+    ModeRegulation
+)
+from core.commandes_vannes import calculer_commandes_vannes
+from core.table_gains_pdc import TableGainsPDC
 
 log = logging.getLogger(__name__)
 
@@ -33,6 +44,26 @@ MODE_PDC_CONTROL = "pdc_control"  # Re < freq_min : bypass ouvert, Miller, tensi
 # Constantes pour les fallbacks de régulation
 _U_MIN_VENTILATEUR_FALLBACK = 0.3  # V - Tension minimale par défaut si non configurée
 _RATIO_ANCRAGE_CONSIGNE_INTERNE = 0.2  # Ratio pour initialisation consigne filtrée (20% de la cible)
+
+# Mappings Enum → string pour publication état vannes vers IHM
+_MAP_DIAPHRAGME = {
+    PositionDiaphragme.ISO: "iso",
+    PositionDiaphragme.MILLER: "miller",
+    PositionDiaphragme.EN_TRANSIT: "en_transit",
+    PositionDiaphragme.INCONNU: "?"
+}
+_MAP_BYPASS = {
+    PositionBypass.OUVERT: "ouvert",
+    PositionBypass.FERME: "fermé",
+    PositionBypass.EN_TRANSIT: "en_transit",
+    PositionBypass.INCONNU: "?"
+}
+_MAP_PDC = {
+    PositionPDC.OUVERT: "ouvert",
+    PositionPDC.FERME: "fermé",
+    PositionPDC.EN_TRANSIT: "en_transit",
+    PositionPDC.INCONNU: "?"
+}
 
 
 class TableGains:
@@ -59,6 +90,10 @@ class TableGains:
                 and all(self.points[i][0] < self.points[i + 1][0]
                         and self.points[i][1] <= self.points[i + 1][1]
                         for i in range(len(self.points) - 1)))
+
+    def vide(self) -> bool:
+        """Retourne True si la table est vide (pas de feed-forward disponible)."""
+        return len(self.points) == 0
 
     def re_pour_tension(self, volts: float) -> float:
         pts = self.points
@@ -98,12 +133,15 @@ class TableGains:
 
         Retourne None si moins de 2 points.
         """
-        if len(self.points) < 2:
+        # paliers sous le décrochage (Re = 0) exclus : ils n'appartiennent
+        # pas à la droite et faussaient la pente en bas de table
+        pts = [p for p in self.points if p[1] > 0]
+        if len(pts) < 2:
             return None
 
-        n = len(self.points)
-        u_vals = [p[0] for p in self.points]  # Tensions (x)
-        re_vals = [p[1] for p in self.points]  # Re (y)
+        n = len(pts)
+        u_vals = [p[0] for p in pts]  # Tensions (x)
+        re_vals = [p[1] for p in pts]  # Re (y)
 
         # Moyennes
         u_moy = sum(u_vals) / n
@@ -155,6 +193,72 @@ class TableGains:
         u = (re - self._regression_b) / self._regression_a
         return min(max(u, 0.0), 10.0)
 
+    # ---- modèle de feed-forward ------------------------------------------
+    # L'interpolation entre paliers MESURÉS est exacte aux paliers ; la
+    # régression globale s'en écarte de 3 % (ISO) à 15 % (Miller) en bas de
+    # table. Le feed-forward passe donc par l'interpolation, sur les seuls
+    # paliers exploitables (Re > 0 et strictement croissant : les paliers
+    # sous le décrochage rendraient l'inversion ambiguë, voire une division
+    # par zéro).
+
+    def _points_ff(self) -> list:
+        pts = []
+        for u, re in self.points:
+            if re > 0 and (not pts or re > pts[-1][1]):
+                pts.append((u, re))
+        return pts
+
+    def valide_ff(self) -> bool:
+        return len(self._points_ff()) >= 2
+
+    def u_pour_re_ff(self, re: float) -> float:
+        """Tension d'équilibre pour un Re visé (interpolation inverse,
+        extrapolation sur le segment extrême), bornée à 0-10 V."""
+        pts = self._points_ff()
+        res = [p[1] for p in pts]
+        if re <= res[0]:
+            (x0, y0), (x1, y1) = pts[0], pts[1]
+        elif re >= res[-1]:
+            (x0, y0), (x1, y1) = pts[-2], pts[-1]
+        else:
+            i = bisect_left(res, re)
+            (x0, y0), (x1, y1) = pts[i - 1], pts[i]
+        v = x0 + (x1 - x0) * (re - y0) / (y1 - y0)
+        return min(max(v, 0.0), 10.0)
+
+    def re_pour_u_ff(self, volts: float) -> float:
+        """Re attendu pour une tension (sens direct du même modèle)."""
+        pts = self._points_ff()
+        if volts <= pts[0][0]:
+            (x0, y0), (x1, y1) = pts[0], pts[1]
+        elif volts >= pts[-1][0]:
+            (x0, y0), (x1, y1) = pts[-2], pts[-1]
+        else:
+            i = bisect_left([p[0] for p in pts], volts)
+            (x0, y0), (x1, y1) = pts[i - 1], pts[i]
+        return max(0.0, y0 + (y1 - y0) * (volts - x0) / (x1 - x0))
+
+    def pente_ff(self, volts: float) -> float:
+        """dRe/dU au point [Re/V], lissée sur ±0,5 V : les segments de 0,1 V
+        de la table sont bruités (±15 %), et cette pente fixe le gain de
+        boucle du PI de correction. Bornée à [0,5 ; 2] × la pente globale."""
+        pts = self._points_ff()
+
+        # Protection division par zéro : table plate (tous les U identiques)
+        denom_global = pts[-1][0] - pts[0][0]
+        if abs(denom_global) < 1e-6:
+            # Table invalide ou plate : retourner pente par défaut
+            return self._gain_re_par_volt if self._gain_re_par_volt else 1000.0
+
+        globale = (pts[-1][1] - pts[0][1]) / denom_global
+        u0 = max(volts - 0.5, pts[0][0])
+        u1 = min(volts + 0.5, pts[-1][0])
+        if u1 - u0 < 0.2:
+            locale = globale
+        else:
+            locale = (self.re_pour_u_ff(u1) - self.re_pour_u_ff(u0)) / (u1 - u0)
+        return min(max(locale, 0.5 * globale), 2.0 * globale)
+
     def obtenir_regression(self) -> dict:
         """Retourne les paramètres de régression pour affichage/diagnostic.
 
@@ -171,7 +275,7 @@ class TableGains:
         }
 
 from core.banc import Banc
-from core.regulation import RegulateurPI
+from core.regulation import RegulateurPI, RegulateurTrim
 from core.gestionnaire_apprentissages import GestionnaireApprentissages
 from core.logger_regulation import LoggerRegulation
 
@@ -194,27 +298,58 @@ class Pilote:
         self.banc = banc
         self.es = es                       # EntreesSorties (Wago ou simulateur)
         r = cfg["regulation"]
-        self.periode = r["periode_s"]
+
+        # CRITIQUE : Valider période > 0 pour éviter division par zéro
+        self.periode = r.get("periode_s", 0.1)
+        if self.periode <= 0:
+            raise ValueError(
+                f"Période invalide dans config.json : {self.periode}s "
+                f"(doit être > 0, typiquement 0.05-0.2s)"
+            )
+        if self.periode < 0.01:  # Warn si < 10ms (irréaliste)
+            log.warning(f"Période très faible : {self.periode}s (< 10ms), risque surcharge CPU")
+
         self.tolerance = r.get("tolerance_convergence_relative", 0.01)
         # Gains nominaux (mode normal)
         self.kp_nominal = r["kp"]
         self.ki_nominal = r["ki"]
-        # Facteur de réduction des gains en mode bas-Re (PDC plus sensible)
-        self.facteur_gains_bas_re = r.get("facteur_gains_bas_re", 0.2)
+        # PI à erreur relative : vanne PdC (très bas Re) et repli si le banc
+        # n'est pas caractérisé (ni table de gains ni gain appris)
         self.pi = RegulateurPI(
             kp=self.kp_nominal, ki=self.ki_nominal, periode_s=self.periode,
             rampe_v_par_s=r.get("rampe_v_par_s", 0.5),
             bande_morte_relative=r.get("bande_morte_relative", 0.0))
         self._rampe_nominale = self.pi.rampe
+        # régulateur des modes normaux : feed-forward (table apprise) + PI de
+        # correction en volts. Mêmes kp/ki : l'erreur étant ramenée en volts
+        # par la pente de la table, la plante vue par le PI a un gain ~1 et
+        # les kp/ki IMC de l'essai indiciel s'appliquent tels quels.
+        self.trim = RegulateurTrim(
+            kp=self.kp_nominal, ki=self.ki_nominal, periode_s=self.periode,
+            rampe_v_par_s=self._rampe_nominale,
+            bande_morte_relative=r.get("bande_morte_relative", 0.0),
+            trim_max_v=r.get("trim_max_v", 1.5))
+        # suivi du variateur par sa recopie AM : tant que la fréquence n'a
+        # pas rejoint la commande, l'erreur ne dit rien du réglage (le
+        # ventilateur accélère sur la rampe interne du 3G3MV) -> correction
+        # gelée. Durée bornée : une recopie absente ou fausse ne doit pas
+        # geler la boucle indéfiniment.
+        self.suivi_variateur_max_s = r.get("suivi_variateur_max_s", 15.0)
+        self.tol_suivi_variateur = cfg.get("variateur", {}).get(
+            "tolerance_consigne_v", 0.15)
+        # marge sous le seuil de saturation ΔP pour la consigne maximale
+        # acceptée (Re ~ racine(ΔP) : 0,95 en ΔP = 2,5 % en Re)
+        self.marge_consigne_dp = r.get("marge_consigne_dp_relative", 0.95)
+        # séparation d'intégrale (voir _commande_variateur) : au-delà de cet
+        # écart relatif, on n'intègre que si la mesure est stable, c'est-à-dire
+        # si sa moyenne a varié de moins de seuil_stabilite en 1 s
+        self.bande_integration = r.get("bande_integration_relative", 0.03)
+        self.seuil_stabilite = r.get("seuil_stabilite_relatif", 0.005)
+        self._hist_re_court = deque(maxlen=max(4, int(1.0 / self.periode)))
         # échelon relatif au-delà duquel un échelon de séquence réinitialise
         # le PI sur le feed-forward ; en deçà, l'état PI est conservé
         # (l'intégrale compense déjà l'erreur de la table de gains)
         self.echelon_reinit_ff = r.get("echelon_reinit_ff_relatif", 0.2)
-        # gain scheduling : l'erreur du PI étant normalisée par la consigne,
-        # le gain de boucle vaut ~kp/u_equilibre et varie avec le point de
-        # fonctionnement ; quand le banc est caractérisé, on compense
-        # (voir _echelle_gains). Désactivable au banc.
-        self.gain_scheduling = r.get("gain_scheduling_actif", True)
         # fraction de la pleine échelle du capteur ΔP au-delà de laquelle
         # la mesure est considérée saturée (drapeau dp_sature)
         self.saturation_dp = r.get("saturation_dp_relative", 0.9)
@@ -232,6 +367,9 @@ class Pilote:
         self.t_max_c = r.get("temperature_max_c", 80.0)
         # vitesse de repli de la commande quand le capteur ΔP sature
         self.recul_saturation = r.get("recul_saturation_v_par_s", 0.5)
+        # limite maximale de consigne Re pour le diaphragme ISO (évite
+        # saturation ΔP capteur). None = pas de limite.
+        self.re_max_iso = r.get("re_max_iso", None)
         # mise en forme de référence : le PI suit une consigne interne
         # filtrée au 1er ordre (trajectoire réalisable par la plante) au
         # lieu de l'échelon brut -> supprime le coup de bélier du terme P
@@ -300,10 +438,8 @@ class Pilote:
                                       srcfg.get("seuil_re", 0))
         self.u_min_ventilateur = srcfg.get("u_min_ventilateur_v", 0.0)
         self.u_seuil_bas_re = srcfg.get("u_seuil_bas_re_v", 0.0)
-        # marge (×) appliquée à u_min pour dériver le seuil bas-Re auto,
-        # et point de bascule PdC->variateur du split-range (échelle 0..10)
+        # marge (×) appliquée à u_min pour dériver le seuil bas-Re auto
         self.marge_seuil_bas_re = srcfg.get("marge_seuil", 1.3)
-        self.split_point = min(max(srcfg.get("split_range_point", 5.0), 0.1), 9.9)
         # PDC minimale exploitable (%) mesurée par apprentissage, défaut 50%
         # (limite physique décrochage observée empiriquement)
         self.pdc_min_exploitable_pct = srcfg.get("pdc_min_exploitable_pct", 50.0)
@@ -314,6 +450,13 @@ class Pilote:
         self._mode_bas_re = False          # état courant de la stratégie
         sel = cfg.get("selection_diaphragme", {})
         self._hysteresis_bypass = sel.get("hysteresis_re", 500)
+
+        # CORRECTION-2 : Timeout FC + arrêt sécurisé
+        self._cycles_attente_vannes = 0
+        self._timeout_vannes_cycles = int(40.0 / self.periode)  # 40s timeout (bypass 11s + diaphragme 8s + marge 20s)
+
+        # CORRECTION-3 : Arrêt si FC incohérents
+        self._cycles_fc_incoherents = 0
 
         # zéros des capteurs ΔP (Pa), mesurés à débit nul par l'apprentissage
         # 'zero_capteurs' et soustraits des mesures (voir _dp_corrige)
@@ -338,7 +481,6 @@ class Pilote:
         self._cycles_t_invalide = 0        # cycles consécutifs de PT100 hors bornes
         self._derniere_T_valide = None     # tenue pendant un transitoire capteur
         self._plafond_u_sature = None      # tension gelée quand le ΔP sature
-        self._temps_debut_saturation = None  # timestamp début saturation ΔP (filtrage temporel 5s)
         # historique du Re pour la moyenne glissante (convergence + dispersion)
         self._historique_re = deque(
             maxlen=max(2, int(self.fenetre_convergence / self.periode)))
@@ -350,12 +492,27 @@ class Pilote:
         self._re_conduite_prec = None      # garde-fou anti-transitoire de l'apprentissage du gain
         self._echelon_depuis = None        # Re cible avant le dernier échelon de séquence
         self._re_cible_conduite = 0.0      # Re conduite équivalent de la consigne (calé à la préparation)
+        self._k_conversion = 1.0           # facteur veine→conduite (sauvegardé avant limitation)
         self._mode_regulation = None       # mode de régulation courant (MODE_NORMAL_HIGH, MODE_NORMAL_LOW, MODE_PDC_CONTROL)
-        self._consigne_interne = None      # consigne filtrée suivie par le PI (None = à ancrer)
+        self._consigne_interne = None      # référence suivie par le PI (None = à ancrer)
+        # feed-forward + modèle de référence (modes normaux)
+        self._u_ff_applique = 0.0          # feed-forward après rampe [V]
+        self._biais_ff: dict = {}          # mode -> (id table, biais relatif appris)
+        self._t_ecart_variateur = None     # début de l'écart commande / recopie AM
+        self._re_cible_max = None          # consigne max mesurable (None = pas de limite)
+        self._diag: dict = {}              # grandeurs internes publiées / journalisées
+        self._cycles_trim_sature = 0       # cycles consécutifs correction en butée
 
         # état courant (lu par l'IHM)
+        # Initialiser rho, mu, nu avec des valeurs par défaut (air à 20°C, 101325 Pa)
+        # pour affichage IHM même avant le premier cycle
+        rho_init = self.banc.fluide.rho(self.banc.patm_pa, 20.0)
+        mu_init = self.banc.fluide.mu(20.0)
+        nu_init = self.banc.fluide.nu(self.banc.patm_pa, 20.0)
+
         self.etat = {"diaphragme": "miller", "u_variateur": 0.0,
-                     "convergee": False, "erreur_com": None}
+                     "convergee": False, "erreur_com": None,
+                     "rho": rho_init, "mu": mu_init, "nu": nu_init}
         # gain statique estimé du banc [Re conduite / volt], appris en
         # fonctionnement -> pré-positionnement (feed-forward) des consignes.
         # Persisté sur disque pour que la première consigne d'une session
@@ -427,8 +584,23 @@ class Pilote:
         # TEMPORAIRE : Activer automatiquement au démarrage pour diagnostic
         self.logger_regulation.activer()
 
+        # ===== NOUVEAUX MODULES REFACTORÉS =====
+        # Modes précédents (pour hystérésis)
+        self._mode_cible_precedent: ModeRegulation | None = None
+        self._mode_effectif_precedent: ModeRegulation | None = None
+
+        # Configuration modes (construit à partir de config.json)
+        self._config_modes = ConfigurationModes(
+            seuil_diaphragme=cfg.get("selection_diaphragme", {}).get("seuil_re_conduite", 5000),
+            largeur_hysteresis_diaphragme=cfg.get("selection_diaphragme", {}).get("hysteresis_re", 500),
+            seuil_bas_re=self.seuil_bas_re or 2000,  # Sera mis à jour dynamiquement
+            largeur_hysteresis_bas_re=100,  # ±5% (hardcodé pour l'instant)
+            u_min=self.u_min_ventilateur or 1.2
+        )
+
         self._verrou = threading.Lock()
         self._stop = threading.Event()
+        self._ready = threading.Event()  # Signale que le thread est prêt
         self._thread: threading.Thread | None = None
 
     # -------------------------------------------------------------- commandes
@@ -446,11 +618,19 @@ class Pilote:
         # n'a plus lieu d'être (il était calé sur l'ancien point de marche)
         self._plafond_u_sature = None
         self.pi.u_max = 10.0
-        # Reset pour stratégie 2 temps : nouvelle consigne → appliquer u_ff seul au cycle 1
-        self._consigne_precedente = None
-        self._integrale_ff = 0.0
+
+        # Appliquer limite Re_max ISO si configurée (protection capteur ΔP)
+        # IMPORTANT : la limite s'applique au Re CONDUITE (celui du diaphragme ISO)
+        # Si référence = "veine", on ne limite pas ici car la conversion veine→conduite
+        # se fait plus tard dans la boucle (ligne ~1098).
+        re_limite = re_cible
+        if self.re_max_iso and reference == "conduite" and re_cible > self.re_max_iso:
+            re_limite = self.re_max_iso
+            log.warning(f"Consigne {re_cible:.0f} Re conduite limitée à {self.re_max_iso:.0f} Re "
+                       f"(re_max_iso configuré pour éviter saturation capteur ΔP ISO)")
+
         with self._verrou:
-            self.re_cible = re_cible
+            self.re_cible = re_limite
             self.reference = reference
             # nouvelle consigne = nouvelle préparation (choix diaphragme,
             # feed-forward, Re conduite équivalent), même si la régulation
@@ -481,9 +661,6 @@ class Pilote:
         self.etat["sequence"] = None
         self._historique_re.clear()
         self._convergee_depuis = None
-        # Reset intégrale feed-forward et consigne précédente
-        self._integrale_ff = 0.0
-        self._consigne_precedente = None
         if self.journal is not None:
             self.journal.ouvrir(time.monotonic())
 
@@ -533,7 +710,14 @@ class Pilote:
         self.es.ecrire_variateur_run(False)
         self._run_actif = False
         self.pi.reinitialiser(0.0)
-        self._integrale_ff = 0.0
+        # le biais de table appris (_biais_ff) est conservé : il traduit la
+        # dérive des conditions (T, rho, mu) et vaut encore au redémarrage
+        self.trim.reinitialiser(0.0, 0.0)
+        self._u_ff_applique = 0.0
+        self._consigne_interne = None
+        self._mode_regulation = None
+        self._re_cible_max = None
+        self.etat["consigne_limitee"] = None
 
     def mode_manuel_tension(self, volts: float) -> None:
         with self._verrou:
@@ -586,12 +770,29 @@ class Pilote:
             self._rampe_nominale = self.pi.rampe
             self.pi.bande_morte = r.get("bande_morte_relative",
                                         self.pi.bande_morte)
+            self.trim.kp = self.pi.kp
+            self.trim.ki = self.pi.ki
+            self.trim.dt = self.periode
+            self.trim.rampe = self._rampe_nominale
+            self.trim.bande_morte = self.pi.bande_morte
+            self.trim.trim_max = r.get("trim_max_v", self.trim.trim_max)
+            self.suivi_variateur_max_s = r.get("suivi_variateur_max_s",
+                                               self.suivi_variateur_max_s)
+            self.bande_integration = r.get("bande_integration_relative",
+                                           self.bande_integration)
+            self.seuil_stabilite = r.get("seuil_stabilite_relatif",
+                                         self.seuil_stabilite)
+            self._hist_re_court = deque(
+                maxlen=max(4, int(1.0 / self.periode)))
+            self.marge_consigne_dp = r.get("marge_consigne_dp_relative",
+                                           self.marge_consigne_dp)
+            self.tol_suivi_variateur = cfg.get("variateur", {}).get(
+                "tolerance_consigne_v", self.tol_suivi_variateur)
             self.echelon_reinit_ff = r.get("echelon_reinit_ff_relatif",
                                            self.echelon_reinit_ff)
-            self.gain_scheduling = r.get("gain_scheduling_actif",
-                                         self.gain_scheduling)
             self.saturation_dp = r.get("saturation_dp_relative",
                                        self.saturation_dp)
+            self.re_max_iso = r.get("re_max_iso", self.re_max_iso)
             self.tau_consigne = r.get("tau_consigne_s", self.tau_consigne)
             self.t_min_c = r.get("temperature_min_c", self.t_min_c)
             self.t_max_c = r.get("temperature_max_c", self.t_max_c)
@@ -631,8 +832,6 @@ class Pilote:
             self.u_seuil_bas_re = sr.get("u_seuil_bas_re_v", self.u_seuil_bas_re)
             self.marge_seuil_bas_re = sr.get("marge_seuil",
                                              self.marge_seuil_bas_re)
-            self.split_point = min(max(sr.get("split_range_point",
-                                              self.split_point), 0.1), 9.9)
             self.pdc_min_exploitable_pct = sr.get("pdc_min_exploitable_pct",
                                                    self.pdc_min_exploitable_pct)
             self.bas_re_scale = min(max(sr.get("gain_scale",
@@ -770,27 +969,68 @@ class Pilote:
             # Bypass ouvert (True)
             self.es.ecrire_vanne_bypass(True)
             self._bypass_commande = True
-        except Exception:
+        except (IOError, RuntimeError, OSError) as exc:
             # Échec silencieux si le matériel n'est pas disponible (simulation, etc.)
+            log.debug(f"Position repos non appliquée: {exc}")
             pass
 
     def demarrer(self) -> None:
+        """Démarre le thread de régulation et attend qu'il soit prêt."""
+        self._ready.clear()  # Réinitialiser l'event
         self._thread = threading.Thread(target=self._boucle, daemon=True)
         self._thread.start()
-        # Attendre que la boucle démarre et que les E/S soient disponibles
-        import time
-        time.sleep(0.3)
+        # Attendre que le thread signale qu'il est prêt (max 2s)
+        if not self._ready.wait(timeout=2.0):
+            raise RuntimeError(
+                "Thread de régulation non démarré en 2s. "
+                "Vérifier connexion Wago ou erreur d'initialisation."
+            )
         self._position_repos()
 
     def arreter(self) -> None:
-        # Remettre les vannes en position de repos AVANT d'arrêter la boucle
-        self._position_repos()
+        """Arrêt complet : régulation + remise en position sûre.
+
+        Log les erreurs critiques mais ne bloque pas l'arrêt complet.
+        """
+        erreurs_arret = []
+
+        # 1. Remettre vannes en position de repos (PRIORITÉ 1, sécurité matérielle)
+        try:
+            self._position_repos()
+        except Exception as e:
+            msg = f"Position repos non atteinte : {e}"
+            erreurs_arret.append(msg)
+            log.error(msg)
+
+        # 2. Arrêter la boucle de régulation
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=3.0)
+            if self._thread.is_alive():
+                msg = "Thread régulation non terminé après 3s (timeout)"
+                erreurs_arret.append(msg)
+                log.warning(msg)
+
+        # 3. Fermer journal (best-effort, erreur non critique)
         if self.journal is not None:
-            self.journal.fermer()
-        self.es.fermer()
+            try:
+                self.journal.fermer()
+            except Exception as e:
+                log.debug(f"Fermeture journal (erreur ignorée) : {e}")
+
+        # 4. Fermer E/S matérielles (PRIORITÉ 1, déjà géré par wago.py)
+        try:
+            self.es.fermer()
+        except Exception as e:
+            msg = f"Fermeture E/S échouée : {e}"
+            erreurs_arret.append(msg)
+            log.error(msg)
+
+        # Signaler les échecs critiques dans etat (visible IHM)
+        if erreurs_arret:
+            with self._verrou:
+                self.etat["erreurs_arret"] = erreurs_arret
+            log.critical(f"ARRÊT INCOMPLET : {len(erreurs_arret)} erreurs")
         # persistance des grandeurs apprises pour les sessions suivantes
         # (mêmes clés que la relecture du __init__ : gain, table, u_min)
         if self._gain_re_par_volt or self.table_gains.est_valide() \
@@ -803,19 +1043,43 @@ class Pilote:
                     donnees["table_gains"] = self.table_gains.to_list()
                 if self.u_min_ventilateur:
                     donnees["u_min_ventilateur_v"] = self.u_min_ventilateur
-                self._chemin_etat.write_text(
-                    json.dumps(donnees), encoding="utf-8")
+
+                # Écriture atomique via fichier temporaire pour éviter corruption
+                import tempfile
+                fd, tmp_path = tempfile.mkstemp(
+                    dir=self._chemin_etat.parent,
+                    prefix='.tmp_etat_',
+                    suffix='.json',
+                    text=True
+                )
+                try:
+                    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                        json.dump(donnees, f, indent=2)
+                    # Replace atomique (POSIX et Windows >= Vista)
+                    Path(tmp_path).replace(self._chemin_etat)
+                except (OSError, IOError, ValueError) as e:
+                    # Nettoyer le fichier temporaire en cas d'erreur
+                    log.error(f"Erreur sauvegarde état : {e}")
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:  # Spécifier exception système
+                        pass  # Best-effort cleanup
+                    raise
             except OSError:
                 pass
 
     def _boucle(self) -> None:
+        """Boucle de régulation principale (thread dédié)."""
         self._preparation_faite = False
+        # Signaler que le thread est prêt et initialisé
+        self._ready.set()
         while not self._stop.is_set():
             debut = time.monotonic()
             try:
                 self._cycle()
                 self.etat["erreur_com"] = None
-            except Exception as exc:           # erreur Modbus : repli sûr
+            except (IOError, OSError, ConnectionError, TimeoutError, ValueError, KeyError, RuntimeError) as exc:
+                # Erreurs attendues : Modbus, capteurs, calculs → repli sûr
                 self.etat["erreur_com"] = str(exc)
                 # état sûr documenté : variateur 0 V ET ordre RUN retiré.
                 # On latche l'arrêt (regulation_active=False), comme les
@@ -831,12 +1095,14 @@ class Pilote:
                                   "u_variateur": 0.0, "manoeuvre": None})
                 try:
                     self.es.ecrire_variateur(0.0)
-                except Exception:
+                except (IOError, RuntimeError, OSError):
+                    # Si même écrire 0V échoue, on ne peut plus rien faire
                     pass
                 try:
                     self.es.ecrire_variateur_run(False)
                     self._run_actif = False
-                except Exception:
+                except (IOError, RuntimeError, OSError):
+                    # Tentative d'arrêt du RUN en repli, même si communication rompue
                     pass
             # ---- journal des conditions d'essai ------------------------
             # Écrit ICI et non en fin de _cycle : le cycle a cinq sorties
@@ -850,8 +1116,9 @@ class Pilote:
                 if self.journal.ouvert:
                     try:
                         self.journal.enregistrer(self.etat, time.monotonic())
-                    except Exception:          # noqa: BLE001
-                        pass                   # jamais au détriment de la boucle
+                    except (OSError, ValueError, KeyError):
+                        # Erreur d'écriture journal : jamais au détriment de la boucle
+                        pass
                 self.etat["journal"] = str(self.journal.chemin) \
                     if self.journal.chemin else None
                 self.etat["journal_lignes"] = self.journal.lignes
@@ -866,6 +1133,117 @@ class Pilote:
                 self._stop.wait(reste)
 
     def _cycle(self) -> None:
+        """Cycle principal de régulation (appelé toutes les 200 ms).
+
+        MACHINE À ÉTATS — Transitions automatiques des modes de régulation
+        ===================================================================
+
+        ┌─────────────────────────────────────────────────────────────────┐
+        │ MODE_NORMAL_HIGH (mode ISO, Re > seuil_re + hystérésis)        │
+        ├─────────────────────────────────────────────────────────────────┤
+        │ • Diaphragme      : ISO (vanne 3V à 0°)                        │
+        │ • Bypass          : FERMÉ (vanne bypass fermée)                │
+        │ • Vanne PdC       : 100% ouverte (10V)                         │
+        │ • Commande        : U_variateur = U_FF(Re) + Trim_PI           │
+        │ • Régulateur      : RegulateurTrim (feed-forward + correction) │
+        │                                                                 │
+        │ Transition ↓ : Re_mesure < seuil_re - hystérésis               │
+        └─────────────────────────────────────────────────────────────────┘
+                                   ↓
+        ┌─────────────────────────────────────────────────────────────────┐
+        │ MODE_NORMAL_LOW (mode Miller, seuil_bas_re < Re < seuil_re)    │
+        ├─────────────────────────────────────────────────────────────────┤
+        │ • Diaphragme      : MILLER (vanne 3V à 90°)                    │
+        │ • Bypass          : OUVERT (vanne bypass ouverte)              │
+        │ • Vanne PdC       : 100% ouverte (10V)                         │
+        │ • Commande        : U_variateur = U_FF(Re) + Trim_PI           │
+        │ • Régulateur      : RegulateurTrim (feed-forward + correction) │
+        │                                                                 │
+        │ Transition ↓ : Re_mesure < seuil_bas_re (u_min atteint)        │
+        │ Transition ↑ : Re_mesure > seuil_re + hystérésis               │
+        └─────────────────────────────────────────────────────────────────┘
+                                   ↓
+        ┌─────────────────────────────────────────────────────────────────┐
+        │ MODE_PDC_CONTROL (très bas Re, Re < seuil_bas_re)              │
+        ├─────────────────────────────────────────────────────────────────┤
+        │ • Diaphragme      : MILLER (vanne 3V à 90°)                    │
+        │ • Bypass          : OUVERT (vanne bypass ouverte)              │
+        │ • Variateur       : FIXE à u_min (fréquence minimale)          │
+        │ • Commande        : U_PdC = PI(Re_erreur) en % ouverture       │
+        │ • Régulateur      : RegulateurPI (relatif, sans feed-forward)  │
+        │                                                                 │
+        │ Transition ↑ : Re_mesure > seuil_bas_re * 1.05 (hystérésis 5%)│
+        └─────────────────────────────────────────────────────────────────┘
+
+        PHASES DU CYCLE (ordre d'exécution)
+        ====================================
+
+        1. ACQUISITION
+           - Lecture capteurs Modbus (température, ΔP, pressions, FC)
+           - Validation température (t_min_c < T < t_max_c)
+           - Calcul pression absolue P_abs = P_atm + P_amont_eff
+
+        2. SÉQUENCE TEMPORELLE (si mode séquence actif)
+           - Avancement du profil temps → Re_cible(t)
+           - Lecture fichier CSV (temps, Re_consigne)
+
+        3. MANŒUVRES VANNES (si changement diaphragme/bypass)
+           - Commande vanne 3 voies (ISO ↔ Miller)
+           - Commande bypass (ouvert/fermé)
+           - Attente fins de course avec timeout (chien de garde)
+           - Gel régulation pendant manœuvre
+
+        4. DÉTERMINATION MODE RÉGULATION
+           - Choix diaphragme selon Re_cible (ISO vs Miller)
+           - Calcul Re_mesure depuis ΔP et température
+           - Transitions automatiques entre modes (hystérésis)
+
+        5. CALCUL COMMANDE
+           - MODE_NORMAL : U_total = U_FF(Re) + Trim_PI
+             * U_FF : interpolation table_gains apprise
+             * Trim_PI : correction pour biais/drift (±trim_max)
+           - MODE_PDC : U_variateur fixe, PI → vanne PdC
+
+        6. SORTIES MATÉRIELLES
+           - Écriture U_variateur (0-10V → 0-50Hz)
+           - Écriture signal RUN variateur
+           - Écriture vanne PdC (0-10V → 0-100% ouverture)
+
+        7. PUBLICATION ÉTAT
+           - Mise à jour self.etat (dict public thread-safe)
+           - Convergence, phase, erreurs, diagnostics
+
+        GELS ET PROTECTIONS
+        ===================
+
+        • Gel correction PI (geler_p, geler_integrale) :
+          - Pendant rampe variateur (suivi recopie AM)
+          - Pendant filtrage consigne (tau_consigne_s)
+          - Évite overshoot et wind-up
+
+        • Saturation ΔP :
+          - Si ΔP > saturation_dp_relative × pleine_échelle
+          - Plafonnement U_variateur et recul progressif
+
+        • Défauts critiques → ARRÊT immédiat :
+          - Température hors plage (PT100 coupée ou saturée)
+          - Pression absolue invalide (capteur défaillant)
+          - Timeout manœuvre vanne (chien de garde)
+
+        VARIABLES CLÉS
+        ==============
+
+        - self._mode_regulation : "normal_high" | "normal_low" | "pdc_control"
+        - self._consigne_interne : Re_cible filtré (tau_consigne_s)
+        - self._u_ff_applique : Tension feed-forward appliquée [V]
+        - self.trim.integrale : Biais table appris (réutilisé entre consignes)
+        - self._manoeuvre : None | dict (pendant changement vanne)
+
+        Voir aussi :
+        - _commande_variateur() : logique feed-forward + trim
+        - _determiner_mode() : transitions entre modes
+        - README.md : description fonctionnelle
+        """
         mesures = self.es.lire_mesures()
         T = mesures["temperature"]
         # mesures brutes publiées telles quelles pour la supervision
@@ -933,6 +1311,26 @@ class Pilote:
                 self.es.ecrire_vanne_bypass(self._bypass_commande)
 
         p_amont = mesures.get("p_amont_500", 0.0)
+
+        # ---- vraisemblance de la pression amont -----------------------------
+        # Validation critique : pression amont utilisée pour calcul rho et Re.
+        # Plage physique réaliste : -2000 à +5000 Pa effectifs (≈ 800-1050 mbar abs).
+        # Hors bornes = capteur saturé, câblage, ou alimentation module défaillante.
+        if not (-2000 <= p_amont <= 5000):
+            self.es.ecrire_variateur(0.0)
+            self.es.ecrire_variateur_run(False)
+            self._run_actif = False
+            with self._verrou:
+                self.regulation_active = False
+            self.etat.update({
+                "defaut_capteur": f"pression amont invraisemblable ({p_amont:.0f} Pa effectifs, "
+                                  f"attendu -2000 à +5000 Pa) — capteur défaillant, "
+                                  "câblage ou alimentation module ; vérifier le capteur puis relancer",
+                "regulation": False, "u_variateur": 0.0,
+                "convergee": False,
+            })
+            return
+
         # Lecture préliminaire de ΔP pour usage pendant les manœuvres/défauts
         # (sera relu plus tard avec le diaphragme définitif pour le calcul du débit)
         dp = self._dp_corrige(mesures, self.etat["diaphragme"])
@@ -1010,26 +1408,42 @@ class Pilote:
                 # Protection supplémentaire : ne commander que si le diaphragme actuel n'est PAS déjà Miller
                 # (évite manœuvre inutile si état transitoire incohérent)
                 diaph_actuel_etat = self.etat.get("diaphragme")
-                if self._manoeuvre is None and diaph_actuel_etat != "miller":
+
+                # CORRECTION CRITIQUE : Si une manœuvre est déjà en cours, attendre sa fin
+                # avant de lancer la transition ISO→Miller. Sinon la nouvelle manœuvre
+                # est silencieusement ignorée et _preparation_faite est marqué True sans
+                # avoir effectué la transition.
+                if self._manoeuvre is not None:
+                    # Une manœuvre est déjà en cours (probablement la fin du positionnement
+                    # de la consigne précédente) → attendre le prochain cycle
+                    preparation_attente_transition = True
+                    log.debug("Transition ISO→Miller reportée : manœuvre en cours")
+                elif diaph_actuel_etat == "miller":
+                    # Diaphragme déjà en Miller : pas de transition nécessaire
+                    # Continuer la préparation normalement
+                    pass
+                else:
+                    # Aucune manœuvre en cours ET diaphragme pas encore Miller
+                    # → Lancer la transition ISO→Miller
                     # 1. Commander bypass ouvert (évacuation surpression)
                     self.commander_bypass(True)
                     # 2. Commander diaphragme Miller SIMULTANÉMENT (pas d'attente)
                     self.commander_diaphragme("miller")
                     log.info("Transition ISO→Miller: bypass ouvert + diaphragme miller commandés simultanément")
 
-                # 3. Forcer variateur à u_min pour limiter débit pendant transition
-                self.es.ecrire_variateur(self.u_min_ventilateur or 0.0)
+                    # 3. Forcer variateur à u_min pour limiter débit pendant transition
+                    self.es.ecrire_variateur(self.u_min_ventilateur or 0.0)
 
-                # 4. Attendre fin de manoeuvre diaphragme avant de réguler
-                # (vannes TOR prennent ~2s, on ne veut pas calculer u_ff avec mauvais diaphragme)
-                # SAUF si le diaphragme est déjà en position Miller (pas de manœuvre lancée)
-                if self._manoeuvre is not None:
-                    # Manoeuvre en cours : attendre
-                    preparation_attente_transition = True
-                elif diaph_actuel_etat != "miller":
-                    # Diaphragme pas encore Miller, mais pas de manœuvre : attendre prochain cycle
-                    preparation_attente_transition = True
-                # Sinon : diaphragme déjà Miller, continuer préparation normalement
+                    # 4. Attendre fin de manoeuvre diaphragme avant de réguler
+                    # (vannes TOR prennent ~2s, on ne veut pas calculer u_ff avec mauvais diaphragme)
+                    if self._manoeuvre is not None:
+                        # Manoeuvre lancée : attendre sa fin
+                        preparation_attente_transition = True
+                    else:
+                        # Cas normalement impossible (manœuvre devrait être en cours après commander_diaphragme)
+                        # mais par sécurité, attendre le prochain cycle pour vérifier l'état
+                        preparation_attente_transition = True
+                        log.warning("Transition ISO→Miller: manœuvre lancée mais _manoeuvre=None (état transitoire)")
 
             # Continuer la préparation seulement si pas en attente de transition
             if not preparation_attente_transition:
@@ -1048,8 +1462,40 @@ class Pilote:
 
                 self.etat["dp_attendu"] = self.banc.dP_attendu(
                     diaph, qm_vise, T, p_amont)
+                # _borner_consigne doit recevoir le Re CONDUITE pour calculer correctement
+                # la limite basée sur DP, quelle que soit la référence utilisateur
+                self._borner_consigne(diaph, qm_vise, re_cond_attendu, T, p_amont)
+
                 # Mémoriser l'équivalent conduite de la consigne
                 self._re_cible_conduite = re_cond_attendu
+
+                # Calculer et mémoriser le facteur de conversion k AVANT toute limitation
+                # k sera utilisé pour le feed-forward même si _re_cible_conduite est limité
+                # Cela garantit que le lookup de table utilise le bon facteur de conversion
+                self._k_conversion = (self._re_cible_conduite / re_cible) \
+                    if re_cible > 0 else 1.0
+
+                # Appliquer limite Re_max ISO si configurée (après conversion veine→conduite)
+                # Cette limite s'applique au Re CONDUITE pour protéger le capteur ΔP ISO
+                if self.re_max_iso and self._re_cible_conduite > self.re_max_iso:
+                    log.warning(f"Consigne {self._re_cible_conduite:.0f} Re conduite limitée à {self.re_max_iso:.0f} Re "
+                               f"(re_max_iso configuré, référence={reference})")
+                    self._re_cible_conduite = self.re_max_iso
+                    # Note: self._k_conversion reste inchangé (basé sur les valeurs avant limitation)
+
+                    # IMPORTANT: Mettre à jour _re_cible_max pour limiter re_vise dans le référentiel utilisateur
+                    # Sans cela, en mode veine, re_vise reste à 15000 alors que Re_conduite est limité à 24500
+                    # et le feed-forward essaie d'atteindre 15000*k = 46950 Re_conduite → 10V
+                    if reference == "veine":
+                        # Convertir la limite Re_conduite en Re_veine
+                        re_cible_max_veine = self.re_max_iso / self._k_conversion
+                        # Appliquer comme limite de consigne
+                        if self._re_cible_max is None or re_cible_max_veine < self._re_cible_max:
+                            self._re_cible_max = re_cible_max_veine
+                    else:
+                        # En mode conduite, appliquer directement la limite
+                        if self._re_cible_max is None or self.re_max_iso < self._re_cible_max:
+                            self._re_cible_max = self.re_max_iso
 
                 # Petit échelon de séquence, même diaphragme, même mode : on
                 # conserve l'état PI (l'intégrale compense déjà l'erreur du
@@ -1062,11 +1508,10 @@ class Pilote:
                                 < self.echelon_reinit_ff * self._echelon_depuis)
                 self._echelon_depuis = None
                 if conserver_pi:
-                    # Seule l'échelle des gains suit le nouveau point de
-                    # fonctionnement (uniquement pour modes normaux)
-                    if mode in (MODE_NORMAL_HIGH, MODE_NORMAL_LOW):
-                        gain_scale = self._echelle_gains(False, re_cond_attendu) if mode == MODE_NORMAL_HIGH else self.bas_re_scale
-                        self.pi.changer_gain_scale(gain_scale)
+                    # rien à recaler : l'intégrale (biais de table) est
+                    # gardée, le feed-forward rejoint la nouvelle consigne
+                    # sur sa rampe et la référence le suit
+                    pass
                 else:
                     self._preparer_pi(mode, re_cond_attendu)
                 self._preparation_faite = True
@@ -1167,34 +1612,41 @@ class Pilote:
 
         # ---- cohérence position vanne 3 voies / diaphragme attendu ---------
         # Hors manœuvre, la butée lue doit être celle du diaphragme actif.
+        # ANCIEN MÉCANISME DE VÉRIFICATION COHÉRENCE DIAPHRAGME
+        # Désactivé car remplacé par le nouveau module etat_vannes.py (CORRECTION-3 lignes 1833-1850)
+        # qui gère la cohérence des FC de manière plus robuste et complète.
+        #
         # Sinon : lecture invalide (rupture de fil, commun 24 V absent), vanne
         # restée à 180° après une manœuvre manuelle, ou plomberie croisée.
-        angle_lu = self._angle_vanne_3voies(mesures)
-        angle_attendu = self._angle_par_diaphragme.get(diaph)
-        if FC_3VOIES["0"] in mesures and angle_lu != angle_attendu:
-            self._cycles_incoherence += 1
-        else:
-            self._cycles_incoherence = 0
-        self.etat["incoherence_vanne"] = self._cycles_incoherence \
-            > max(3, int(3.0 / self.periode))
+        # angle_lu = self._angle_vanne_3voies(mesures)
+        # angle_attendu = self._angle_par_diaphragme.get(diaph)
+        # if FC_3VOIES["0"] in mesures and angle_lu != angle_attendu:
+        #     self._cycles_incoherence += 1
+        # else:
+        #     self._cycles_incoherence = 0
+        # self.etat["incoherence_vanne"] = self._cycles_incoherence \
+        #     > max(3, int(3.0 / self.periode))
+        #
+        # # incohérence persistante en régulation : on réguerait sur un capteur
+        # # ΔP qui ne correspond plus à la position réelle de la vanne -> repli
+        # # sûr + latch (l'opérateur vérifie la vanne puis relance).
+        # if self.etat["incoherence_vanne"] and regul:
+        #     self.es.ecrire_variateur(0.0)
+        #     self.es.ecrire_variateur_run(False)
+        #     self._run_actif = False
+        #     with self._verrou:
+        #         self.regulation_active = False
+        #     self.etat.update({
+        #         "defaut_vanne": "position vanne 3 voies inexploitable ou "
+        #                         "incohérente avec le diaphragme actif "
+        #                         f"(butée lue : {angle_lu or 'aucune'}) — "
+        #                         "vérifier la vanne et son câblage, puis relancer",
+        #         "regulation": False, "u_variateur": 0.0, "convergee": False,
+        #     })
+        #     return
 
-        # incohérence persistante en régulation : on réguerait sur un capteur
-        # ΔP qui ne correspond plus à la position réelle de la vanne -> repli
-        # sûr + latch (l'opérateur vérifie la vanne puis relance).
-        if self.etat["incoherence_vanne"] and regul:
-            self.es.ecrire_variateur(0.0)
-            self.es.ecrire_variateur_run(False)
-            self._run_actif = False
-            with self._verrou:
-                self.regulation_active = False
-            self.etat.update({
-                "defaut_vanne": "position vanne 3 voies inexploitable ou "
-                                "incohérente avec le diaphragme actif "
-                                f"(butée lue : {angle_lu or 'aucune'}) — "
-                                "vérifier la vanne et son câblage, puis relancer",
-                "regulation": False, "u_variateur": 0.0, "convergee": False,
-            })
-            return
+        # Réinitialiser le flag (pour compatibilité avec IHM)
+        self.etat["incoherence_vanne"] = False
 
         # ---- mesure du débit et des Reynolds -------------------------------
         # le diaphragme a pu changer pendant la préparation (vanne déjà en
@@ -1255,6 +1707,26 @@ class Pilote:
             # Fenêtre pas encore pleine : attendre
             self._cycles_signal_fige = 0
 
+        # ---- vraisemblance de ΔP --------------------------------------------
+        # Validation critique avant calcul Re : ΔP doit être physiquement plausible.
+        # Plage réaliste : -50 à 550 Pa (PE capteur = 500 Pa, tolérance +10%).
+        # Valeurs négatives acceptées (bruit, offset capteur) mais limitées à -50 Pa.
+        # Hors bornes = capteur saturé, câblage, ou signal aberrant.
+        if not (-50 <= dp_final <= 550):
+            self.es.ecrire_variateur(0.0)
+            self.es.ecrire_variateur_run(False)
+            self._run_actif = False
+            with self._verrou:
+                self.regulation_active = False
+            self.etat.update({
+                "defaut_capteur": f"ΔP invraisemblable ({dp_final:.1f} Pa, attendu -50 à +550 Pa) — "
+                                  f"capteur saturé, câblage ou signal aberrant ; "
+                                  "vérifier le capteur puis relancer",
+                "regulation": False, "u_variateur": 0.0,
+                "convergee": False,
+            })
+            return
+
         resultat = self.banc.qm_depuis_mesures(diaph, dp_final, T, p_amont)
         re_mesure = resultat["re_veine"] if reference == "veine" \
             else resultat["re_conduite"]
@@ -1293,6 +1765,12 @@ class Pilote:
             re_cible = self.re_cible
             u_manu = self.tension_manuelle
 
+        # DEBUG : Vérifier pourquoi le code n'entre pas dans la branche régulation
+        if regul and re_cible <= 0:
+            log.warning(f"CYCLE: regulation_active=True MAIS re_cible={re_cible} !")
+        if not regul and re_cible > 0:
+            log.warning(f"CYCLE: regulation_active=False alors que re_cible={re_cible}")
+
         # ---- ordre RUN du variateur (3G3MV : S1, n003=1) --------------------
         # RUN dès qu'une tension > 0 doit être appliquée ; arrêt sinon.
         run_voulu = (manuel and u_manu > 0.05) or (regul and re_cible > 0)
@@ -1317,55 +1795,37 @@ class Pilote:
             return
         self.etat["defaut_variateur"] = None
 
-        # ---- capteur ΔP saturé : PROTECTION DÉSACTIVÉE -------
-        # DÉSACTIVÉ TEMPORAIREMENT : Utilisation régression linéaire directe (R²=99.99%)
-        # La tension est calculée exactement par U = (Re - b) / a, pas d'overshoot
-        # attendu donc pas besoin de protection plafond qui complique la régulation.
-        #
-        # HISTORIQUE : Protection plafond causait bug Re=23000→21000 (latché trop bas)
-        # Correction tentée (relâchement progressif) mais toujours problématique.
-        # SOLUTION : Confiance dans régression linéaire + gains PI réduits.
-
-        # Calculer dp_sature pour publication état (mais ne pas agir dessus)
+        # ---- capteur ΔP saturé : plafond de commande ----------------------
+        # Au-delà de saturation_dp × pleine échelle, le Re calculé plafonne au
+        # capteur, pas au banc : poursuivre la consigne enverrait le
+        # ventilateur en butée sans jamais converger. La consigne est déjà
+        # bornée au maximum mesurable (_borner_consigne) ; ce plafond ne
+        # traite que les dépassements transitoires et les dérives (T, P) :
+        #   - saturation confirmée : plafond = commande du moment, qui recule
+        #     à recul_saturation tant que la saturation dure ;
+        #   - bande d'hystérésis (5 % de pleine échelle sous le seuil) : tenu ;
+        #   - en dessous : relevé à recul/5 jusqu'à disparaître (10 V).
+        # Le régulateur voit ce plafond dans son anti-windup.
+        # Version antérieure : plafond latché jusqu'à la consigne suivante ->
+        # Re 23000 tenu à 21000 après un dépassement. Le relâchement corrige ce
+        # défaut ; la borne de consigne empêche le cycle limite qu'il causerait
+        # sur une consigne hors plage.
         dp_sature = self._cycles_dp_sature >= max(3, int(1.0 / self.periode))
-
-        # PROTECTION DÉSACTIVÉE : Pas de plafond appliqué
-        self._plafond_u_sature = None
-        self.pi.u_max = 10.0
-
-        # ---- action d'urgence à 490 Pa : PROTECTION DÉSACTIVÉE --
-        # DÉSACTIVÉ TEMPORAIREMENT : Protection trop agressive, ouvre bypass sur overshoot
-        # transitoire à Re=23000. Avec régression linéaire précise (R²=99.99%), overshoot
-        # devrait être minimal. Si DP sature vraiment, c'est que la consigne est hors plage
-        # capteur (>35000 Re estimé), l'opérateur doit le gérer manuellement.
-        #
-        # HISTORIQUE : Seuil 490 Pa (98% pleine échelle) + filtrage 5s
-        # Ouvrait bypass à Re=23000 (DP~450-480 Pa) → régulation perturbée
-        # SOLUTION : Confiance régression + opérateur responsable des consignes
-
-        # DÉSACTIVÉ : Seuil impossible à atteindre
-        seuil_urgence = 9999  # Désactivé (était 490 Pa)
-        duree_filtrage = 5.0
-
-        # Protection désactivée (seuil impossible)
-        if dp_final > seuil_urgence and not self._maintien_tor_suspendu:
-            if self._temps_debut_saturation is None:
-                self._temps_debut_saturation = time.monotonic()
-            elif not self.etat.get("urgence_saturation"):
-                duree_saturation = time.monotonic() - self._temps_debut_saturation
-                if duree_saturation >= duree_filtrage:
-                    self.etat["urgence_saturation"] = True
-                    self.etat["alarme_saturation"] = (
-                        f"URGENCE : ΔP = {dp_final:.0f} Pa ≥ {seuil_urgence:.0f} Pa "
-                        f"pendant {duree_saturation:.1f}s → saturation confirmée. "
-                        "Bypass ouvert + variateur minimum.")
-                    self.commander_bypass(True)
-        else:
-            if dp_final < 0.9 * 500:
-                self._temps_debut_saturation = None
-                if self.etat.get("urgence_saturation"):
-                    self.etat["urgence_saturation"] = False
-                    self.etat["alarme_saturation"] = None
+        pleine_echelle = self._dp_pleine_echelle[cle_dp]
+        if regul and not manuel and dp_sature:
+            u_prec = self.etat.get("u_variateur", 0.0) or 0.0
+            base = u_prec if self._plafond_u_sature is None \
+                else min(self._plafond_u_sature, u_prec)
+            self._plafond_u_sature = max(
+                0.0, base - self.recul_saturation * self.periode)
+        elif self._plafond_u_sature is not None:
+            if not regul or manuel:
+                self._plafond_u_sature = None
+            elif dp_final < (self.saturation_dp - 0.05) * pleine_echelle:
+                self._plafond_u_sature += \
+                    self.recul_saturation / 5.0 * self.periode
+                if self._plafond_u_sature >= 10.0:
+                    self._plafond_u_sature = None
 
         # ---- décision stratégie bas-Re (mode automatique) ------------------
         # Seuil effectif : valeur de config si fixée, sinon dérivé de la
@@ -1379,85 +1839,145 @@ class Pilote:
             u = u_manu
             self.es.ecrire_variateur(u)
             self._mode_bas_re = False
+            self._diag = {}
         elif regul and re_cible > 0:
-            # Déterminer le mode de régulation selon Re cible conduite
+            # ===== ARCHITECTURE REFACTORISÉE : NOUVEAUX MODULES =====
+            # Utilisation des modules refactorés pour :
+            # - Lecture état vannes (etat_vannes.py)
+            # - Détermination modes (gestion_modes.py)
+            # - Calcul commandes vannes (commandes_vannes.py)
+            # Cette architecture corrige définitivement CRITIQUE-1 et évite les cercles vicieux.
+
+            # 1. LECTURE ÉTAT VANNES (nouveau module)
+            etat_vannes = lire_etat_vannes(mesures)
+
+            # Publier positions vannes vers IHM (mapping Enum → string)
+            self.etat["diaphragme"] = _MAP_DIAPHRAGME.get(etat_vannes.diaphragme, "?")
+            self.etat["bypass"] = _MAP_BYPASS.get(etat_vannes.bypass, "?")
+            self.etat["vanne_pdc"] = _MAP_PDC.get(etat_vannes.pdc, "?")
+
+            # CORRECTION-3 : Arrêt si FC incohérents persistants
+            if not etat_vannes.coherent:
+                self._cycles_fc_incoherents += 1
+                # Persistance : 3 cycles consécutifs avant arrêt
+                if self._cycles_fc_incoherents >= 3:
+                    self.es.ecrire_variateur(0.0)
+                    self.es.ecrire_variateur_run(False)
+                    self._run_actif = False
+                    with self._verrou:
+                        self.regulation_active = False
+                    self.etat.update({
+                        "defaut_vanne": f"Fins de course incohérents : "
+                                       f"diaphragme={etat_vannes.diaphragme.value}, "
+                                       f"bypass={etat_vannes.bypass.value}, "
+                                       f"pdc={etat_vannes.pdc.value} — "
+                                       "Vérifier câblage FC et alimentations 24V, puis relancer",
+                        "regulation": False, "u_variateur": 0.0, "convergee": False,
+                    })
+                    return
+                else:
+                    log.warning(f"État vannes incohérent détecté ({self._cycles_fc_incoherents}/3)")
+            else:
+                self._cycles_fc_incoherents = 0
+
+            # 2. CONVERSION REYNOLDS (pour critères en conduite)
             re_cible_cond = self._re_cible_conduite or re_cible
-            mode = self._determiner_mode_regulation(re_cible_cond)
+
+            # Mettre à jour config modes avec seuil bas Re dynamique
+            self._config_modes = ConfigurationModes(
+                seuil_diaphragme=self._config_modes.seuil_diaphragme,
+                largeur_hysteresis_diaphragme=self._config_modes.largeur_hysteresis_diaphragme,
+                seuil_bas_re=self._seuil_bas_re(),  # Seuil dynamique
+                largeur_hysteresis_bas_re=self._config_modes.largeur_hysteresis_bas_re,
+                u_min=self.u_min_ventilateur or 1.2
+            )
+
+            # 3. DÉTERMINATION MODES (nouveaux modules)
+            mode_cible_enum = determiner_mode_cible(
+                re_cible_cond,
+                self._config_modes,
+                self._mode_cible_precedent
+            )
+
+            mode_effectif_enum = determiner_mode_effectif(
+                etat_vannes,
+                re_cond,
+                self._config_modes,
+                self._mode_effectif_precedent
+            )
+
+            # Sauvegarder pour hystérésis
+            self._mode_cible_precedent = mode_cible_enum
+            self._mode_effectif_precedent = mode_effectif_enum
+
+            # Conversion enum → str (compatibilité avec ancien code)
+            MODE_MAP = {
+                ModeRegulation.NORMAL_HIGH: MODE_NORMAL_HIGH,
+                ModeRegulation.NORMAL_LOW: MODE_NORMAL_LOW,
+                ModeRegulation.PDC_CONTROL: MODE_PDC_CONTROL
+            }
+            mode_cible = MODE_MAP[mode_cible_enum]
+            mode_effectif = MODE_MAP[mode_effectif_enum]
+
+            # Pour compatibilité avec le reste du code
+            mode = mode_cible  # Pour commandes vannes
+            mode_table = mode_effectif  # Pour table gains
 
             # Bascule de mode hors préparation : re-caler le PI
-            if mode != self._mode_regulation:
-                self._preparer_pi(mode, re_cible_cond)
+            # IMPORTANT : Re-caler sur mode_cible (où on VA), pas mode_effectif (où on EST)
+            if mode_cible != self._mode_regulation:
+                self._preparer_pi(mode_cible, re_cible_cond)
 
-            # ---- Commander les vannes selon le mode ----
-            # ÉTAPE 1 : Lire TOUTES les fins de course nécessaires
-            bypass_ouvert = bool(mesures.get("fc_bypass_ouvert"))
-            bypass_ferme = bool(mesures.get("fc_bypass_ferme"))
-            pdc_fc_ouvert = bool(mesures.get("fc_pdc_ouvert", False))
-            fc_iso = bool(mesures.get("fc_3voies_0"))
-            fc_miller = bool(mesures.get("fc_3voies_90"))
+            # 4. CALCUL COMMANDES VANNES (nouveau module)
+            commandes_vannes = calculer_commandes_vannes(
+                etat_actuel=etat_vannes,
+                mode_cible=mode_cible_enum,
+                manoeuvre_en_cours=(self._manoeuvre is not None)
+            )
 
-            # ÉTAPE 2 : Déterminer TOUTES les commandes nécessaires
-            commande_diaphragme = None
-            commande_bypass = None
-            commande_pdc = None
+            # 5. ENVOI COMMANDES TOR
+            # CORRECTION-1 : Ne commander QUE si position différente (règle #2)
+            if commandes_vannes.diaphragme is not None:
+                # Vérifier position actuelle
+                doit_commander_diaph = False
+                if commandes_vannes.diaphragme == "iso":
+                    doit_commander_diaph = (etat_vannes.diaphragme != PositionDiaphragme.ISO)
+                elif commandes_vannes.diaphragme == "miller":
+                    doit_commander_diaph = (etat_vannes.diaphragme != PositionDiaphragme.MILLER)
 
-            # Déterminer diaphragme cible selon mode
+                if doit_commander_diaph:
+                    log.info(f"Commande diaphragme: {commandes_vannes.diaphragme}")
+                    self.commander_diaphragme(commandes_vannes.diaphragme)
+                else:
+                    log.debug(f"Diaphragme déjà sur {commandes_vannes.diaphragme}, ordre non envoyé")
+
+            if commandes_vannes.bypass is not None:
+                # Vérifier position actuelle
+                doit_commander_bypass = False
+                if commandes_vannes.bypass is True:
+                    doit_commander_bypass = (etat_vannes.bypass != PositionBypass.OUVERT)
+                elif commandes_vannes.bypass is False:
+                    doit_commander_bypass = (etat_vannes.bypass != PositionBypass.FERME)
+
+                if doit_commander_bypass:
+                    log.info(f"Commande bypass: {'ouvert' if commandes_vannes.bypass else 'fermé'}")
+                    self.commander_bypass(commandes_vannes.bypass)
+                else:
+                    log.debug(f"Bypass déjà {'ouvert' if commandes_vannes.bypass else 'fermé'}, ordre non envoyé")
+
+            # PDC sera commandée par la régulation plus loin (sauf init à 10V)
+            # Ici on ne commande que les TOR (diaphragme, bypass)
+            # La tension PdC vient de calculer_consigne_variateur()
+
+            # 6. VÉRIFICATION : Toutes les vannes sont-elles en position ?
+            # Utiliser les positions depuis etat_vannes (nouveau module)
             if mode == MODE_NORMAL_HIGH:
-                diaph_cible = "iso"
-                fc_cible_diaphragme = fc_iso
-            else:  # MODE_NORMAL_LOW ou MODE_PDC_CONTROL
-                diaph_cible = "miller"
-                fc_cible_diaphragme = fc_miller
-
-            # Commander diaphragme SEULEMENT si changement nécessaire
-            # (ne pas commander si déjà en position selon etat, même si FC absent -
-            # sinon on démarre une manœuvre inutile qui masque l'incohérence)
-            diaph_actuel = self.etat.get("diaphragme")
-            if diaph_actuel != diaph_cible:
-                commande_diaphragme = diaph_cible
-
-            if mode == MODE_NORMAL_HIGH:
-                # SÉCURITÉ transition BAS→HAUT : si vient de Miller, fermer bypass APRÈS ISO
-                # Sinon (démarrage à froid ou déjà ISO), commander fermeture directement
-                transition_miller_vers_iso = (self._mode_regulation in (MODE_NORMAL_LOW, MODE_PDC_CONTROL))
-                if not bypass_ferme:
-                    if not transition_miller_vers_iso or fc_iso:
-                        commande_bypass = False
-                # PDC doit être grande ouverte
-                if not pdc_fc_ouvert:
-                    commande_pdc = 10.0
-            else:  # normal_low ou pdc_control
-                # Bypass doit être ouvert
-                # Commander ouverture si PAS au FC ouvert (gère aussi vannes bloquées)
-                if not bypass_ouvert:
-                    commande_bypass = True
-                # PDC selon mode
-                if mode == MODE_NORMAL_LOW and not pdc_fc_ouvert:
-                    commande_pdc = 10.0
-                elif mode == MODE_PDC_CONTROL:
-                    # Entrée en mode pdc_control : ouvrir PDC à 100% d'abord
-                    # (PI la fermera progressivement ensuite)
-                    if self._mode_regulation != MODE_PDC_CONTROL and not pdc_fc_ouvert:
-                        commande_pdc = 10.0
-
-            # ÉTAPE 3 : Envoyer TOUTES les commandes SIMULTANÉMENT (optimisation vitesse)
-            if commande_diaphragme is not None or commande_bypass is not None or commande_pdc is not None:
-                log.info(f"COMMANDES SIMULTANÉES: diaph={commande_diaphragme}, bypass={commande_bypass}, pdc={commande_pdc is not None}")
-            if commande_diaphragme is not None:
-                self.commander_diaphragme(commande_diaphragme)
-            if commande_bypass is not None:
-                self.commander_bypass(commande_bypass)
-            if commande_pdc is not None:
-                self.commander_vanne_perte_charge(commande_pdc)
-
-            # ---- VÉRIFICATION : Toutes les vannes sont-elles en position ? ----
-            if mode == MODE_NORMAL_HIGH:
-                diaphragme_ok = fc_iso
-                bypass_ok = bypass_ferme
-                pdc_ok = pdc_fc_ouvert
+                diaphragme_ok = (etat_vannes.diaphragme == PositionDiaphragme.ISO)
+                bypass_ok = (etat_vannes.bypass == PositionBypass.FERME)
+                pdc_ok = (etat_vannes.pdc == PositionPDC.OUVERT)
             elif mode in (MODE_NORMAL_LOW, MODE_PDC_CONTROL):
-                diaphragme_ok = fc_miller
-                bypass_ok = bypass_ouvert
+                diaphragme_ok = (etat_vannes.diaphragme == PositionDiaphragme.MILLER)
+                bypass_ok = (etat_vannes.bypass == PositionBypass.OUVERT)
                 # PDC selon mode et transition :
                 # - normal_low : PDC doit être à 100% (FC ouvert)
                 # - pdc_control, ENTRÉE : PDC doit être à 100% d'abord (FC ouvert)
@@ -1466,158 +1986,122 @@ class Pilote:
                 if deja_en_mode_pdc:
                     pdc_ok = True  # Déjà en mode, PDC contrôlée par PI
                 else:
-                    pdc_ok = pdc_fc_ouvert  # Attendre FC ouvert
+                    pdc_ok = (etat_vannes.pdc == PositionPDC.OUVERT)  # Attendre FC ouvert
             else:
                 log.error(f"Mode de régulation invalide: {mode}")
                 raise ValueError(f"Mode de régulation invalide: {mode}")
 
             vannes_pretes = diaphragme_ok and bypass_ok and pdc_ok
 
-            # ---- Calcul de la commande PI selon le mode ----
+            # DEBUG : Logguer état vannes_pretes
+            log.info(f"VANNES: diaph_ok={diaphragme_ok} (attendu={PositionDiaphragme.ISO}, lu={etat_vannes.diaphragme}), "
+                     f"bypass_ok={bypass_ok} (attendu={PositionBypass.FERME}, lu={etat_vannes.bypass}), "
+                     f"pdc_ok={pdc_ok} (attendu={PositionPDC.OUVERT}, lu={etat_vannes.pdc}) → pretes={vannes_pretes}")
+
+            # ---- Calcul de la commande selon le mode ----
+            # consigne effective : bornée au maximum mesurable par le capteur
+            re_vise = re_cible if self._re_cible_max is None \
+                else min(re_cible, self._re_cible_max)
             if not vannes_pretes:
-                # ATTENTE : Vannes pas encore en position → variateur à 0V
+                # CORRECTION-2 : Timeout si vannes bloquées
+                self._cycles_attente_vannes += 1
+                if self._cycles_attente_vannes > self._timeout_vannes_cycles:
+                    # Timeout dépassé : arrêt sécurisé
+                    self.es.ecrire_variateur(0.0)
+                    self.es.ecrire_variateur_run(False)
+                    self._run_actif = False
+                    with self._verrou:
+                        self.regulation_active = False
+
+                    # Diagnostic détaillé
+                    msg_timeout = []
+                    if not diaphragme_ok:
+                        msg_timeout.append(f"diaphragme (attendu {mode}, lu {etat_vannes.diaphragme.value})")
+                    if not bypass_ok:
+                        attendu_bypass = "ouvert" if mode in (MODE_NORMAL_LOW, MODE_PDC_CONTROL) else "fermé"
+                        msg_timeout.append(f"bypass (attendu {attendu_bypass}, lu {etat_vannes.bypass.value})")
+                    if not pdc_ok:
+                        msg_timeout.append(f"PDC (attendu FC ouvert, lu {etat_vannes.pdc.value})")
+
+                    self.etat.update({
+                        "defaut_vanne": f"Timeout vannes ({self._cycles_attente_vannes * self.periode:.1f}s) : "
+                                       f"{', '.join(msg_timeout)} — vérifier actionneurs et câblage, puis relancer",
+                        "regulation": False, "u_variateur": 0.0, "convergee": False,
+                    })
+                    return
+
+                # ATTENTE : vannes pas encore en position -> variateur à 0 V.
+                # Le feed-forward repartira de 0 sur sa rampe ; le biais de
+                # table appris (intégrale) est conservé.
                 u = 0.0
-                pdc_v = self._pdc_consigne if self._pdc_consigne is not None else 0.0  # Garder la consigne PDC en cours (0 par défaut)
+                pdc_v = self._pdc_consigne if self._pdc_consigne is not None else 0.0
+                self._u_ff_applique = 0.0
+                self.trim.reinitialiser(0.0, self.trim.integrale)
+                self._consigne_interne = None
+                self._diag = {"phase": "attente vannes"}
             else:
-                # VANNES PRÊTES : Lancer le feed-forward + PI
-                # Mise en forme de référence : consigne interne filtrée
-                if self.tau_consigne > 0:
-                    if self._consigne_interne is None:
-                        self._consigne_interne = max(re_mesure, _RATIO_ANCRAGE_CONSIGNE_INTERNE * re_cible)
-                    a = self.periode / (self.tau_consigne + self.periode)
-                    self._consigne_interne += a * (re_cible - self._consigne_interne)
-                    consigne_pi = self._consigne_interne
+                # Vannes OK : réinitialiser compteur
+                self._cycles_attente_vannes = 0
+
+            if vannes_pretes and mode_table == MODE_PDC_CONTROL:
+                # très bas Re : tension fixe au minimum, le PI règle la PdC
+                # CORRECTION CRITIQUE-1 : Utiliser mode_table (mode EFFECTIF basé sur diaphragme physique)
+                # pour choisir la stratégie de régulation (variateur fixe vs PdC variable)
+
+                # CORRECTION-4 : Réinitialiser PI lors du basculement variateur → PDC
+                if self._mode_regulation != MODE_PDC_CONTROL:
+                    log.info("Basculement variateur → PDC : réinitialisation PI")
+                    self.pi.reinitialiser(0.0, 0.0)  # Intégrale = 0
+
+                if self.u_min_ventilateur:
+                    u = self.u_min_ventilateur
                 else:
-                    consigne_pi = re_cible
+                    log.warning(
+                        f"u_min_ventilateur non configuré, utilisation de "
+                        f"{_U_MIN_VENTILATEUR_FALLBACK}V par défaut")
+                    u = _U_MIN_VENTILATEUR_FALLBACK
 
-                if mode == MODE_PDC_CONTROL:
-                    # Mode très bas Re : PI contrôle la PDC, tension fixe au minimum
-                    if self.u_min_ventilateur:
-                        u = self.u_min_ventilateur
-                    else:
-                        log.warning(
-                            f"u_min_ventilateur non configuré, utilisation de {_U_MIN_VENTILATEUR_FALLBACK}V par défaut"
-                        )
-                        u = _U_MIN_VENTILATEUR_FALLBACK
-                    # Sortie PI = position PDC (0-10V)
-                    pdc_v = self.pi.calculer(consigne_pi, re_mesure)
-                    pdc_v = min(max(pdc_v, 0.0), 10.0)
+                # CORRECTION-5 : Feed-forward PDC depuis table gains (si disponible)
+                consigne_pi = self._reference_filtree(re_vise, re_mesure)
+                self.pi.u_max = 10.0          # sortie = vanne, pas variateur
+
+                # Feed-forward : tension PDC depuis table
+                if not self.table_gains_pdc.vide():
+                    v_ff_pdc = self.table_gains_pdc.v_pour_re(re_vise)
+                    # PI calcule la correction à partir du feed-forward
+                    erreur = consigne_pi - re_mesure
+                    correction_pi = self.pi.calculer(consigne_pi, re_mesure) - v_ff_pdc
+                    pdc_v = min(max(v_ff_pdc + correction_pi, 0.0), 10.0)
+                    self._diag = {
+                        "phase": "FF+PI vanne PdC",
+                        "pdc_v": round(pdc_v, 3),
+                        "v_ff_pdc": round(v_ff_pdc, 3),
+                        "correction_pi": round(correction_pi, 3)
+                    }
                 else:
-                    # Modes normal_high et normal_low : FEED-FORWARD DIRECT + CORRECTION P
-                    # PDC reste à 100% (commandée ci-dessus)
-                    pdc_v = 10.0
-
-                    # NOUVELLE APPROCHE SIMPLIFIÉE :
-                    # 1. Calculer tension DIRECTE par régression linéaire : U = (Re - b) / a
-                    # IMPORTANT : Utiliser consigne_pi (filtrée) pour cohérence avec erreur
-                    u_ff = self._u_equilibre(consigne_pi)
-                    if u_ff is None:
-                        # Fallback si pas de régression : utiliser PI classique
-                        u = self.pi.calculer(consigne_pi, re_mesure)
-                        u = min(max(u, 0.0), 10.0)
-                    else:
-                        # Régression disponible : STRATÉGIE 2 TEMPS
-                        # 1. Premier cycle après changement consigne : appliquer JUSTE u_ff
-                        # 2. Cycles suivants : u_ff + corrections PI
-
-                        # Détecter changement de consigne significatif (>1% ou 100 Re)
-                        if not hasattr(self, '_consigne_precedente'):
-                            self._consigne_precedente = None
-                        if not hasattr(self, '_cycles_depuis_changement'):
-                            self._cycles_depuis_changement = 999
-
-                        changement_consigne = False
-                        if self._consigne_precedente is None or abs(consigne_pi - self._consigne_precedente) > max(100, 0.01 * consigne_pi):
-                            changement_consigne = True
-                            self._consigne_precedente = consigne_pi
-                            self._cycles_depuis_changement = 0
-                            # Reset intégrale sur changement de consigne
-                            self._integrale_ff = 0.0
-
-                        # Calculer erreur pour décider d'activer corrections
-                        erreur_re = consigne_pi - re_mesure
-                        erreur_relative_pct = abs(erreur_re / consigne_pi * 100) if consigne_pi > 0 else 0
-
-                        # STRATÉGIE ADAPTATIVE :
-                        # - Cycles 1-5 : TOUJOURS u_ff seul (laisser système réagir)
-                        # - Cycles 5+ : Activer corrections si erreur < 5% OU après 20 cycles
-                        if self._cycles_depuis_changement < 5:
-                            # Phase initiale : juste u_ff
-                            u = u_ff
-                            self._cycles_depuis_changement += 1
-                        elif erreur_relative_pct > 5.0 and self._cycles_depuis_changement < 20:
-                            # Erreur encore grande ET pas encore 25 cycles : continuer avec u_ff seul
-                            u = u_ff
-                            self._cycles_depuis_changement += 1
-                        else:
-                            # Erreur petite (<3%) OU 25 cycles atteints : activer corrections PI
-
-                            # 3. Convertir erreur Re en erreur tension via pente régression
-                            # Sélection table selon Re (seuil Miller/ISO = 5000)
-                            if consigne_pi >= 5000:
-                                table = self.table_gains  # ISO
-                            else:
-                                table = self.table_gains_bas_re  # Miller
-
-                            reg = table.obtenir_regression()
-                            if reg['valide'] and reg['a'] is not None and abs(reg['a']) > 1e-10:
-                                erreur_v = erreur_re / reg['a']
-                            else:
-                                # Fallback : utiliser gain global si disponible
-                                if self._gain_re_par_volt and self._gain_re_par_volt > 0:
-                                    erreur_v = erreur_re / self._gain_re_par_volt
-                                else:
-                                    erreur_v = 0.0
-
-                            # 4. Gain scheduling adaptatif selon zone de Re
-                            if consigne_pi < 22000:
-                                # Bas/Moyen Re : gains plus forts pour convergence rapide
-                                kp_effectif = 1.2
-                                ki_effectif = 0.12
-                                limite_correction = 1.2
-                            else:
-                                # Haut Re (≥22000) : gains très doux pour stabilité (proche saturation DP)
-                                kp_effectif = 0.5
-                                ki_effectif = 0.06
-                                limite_correction = 0.8
-
-                            # 5. Correction PROPORTIONNELLE (limitée pour éviter saturation/oscillations)
-                            correction_p = kp_effectif * erreur_v
-                            correction_p = min(max(correction_p, -limite_correction), limite_correction)
-
-                            # 6. Correction INTÉGRALE (pour éliminer erreur statique)
-                            if not hasattr(self, '_integrale_ff'):
-                                self._integrale_ff = 0.0
-
-                            # Accumuler intégrale si erreur > 0.01V (~34 Re)
-                            if abs(erreur_v) > 0.01:
-                                self._integrale_ff += ki_effectif * erreur_v * self.periode
-                                # Anti-windup : limiter l'intégrale à ±2V
-                                self._integrale_ff = min(max(self._integrale_ff, -2.0), 2.0)
-
-                            # 7. Tension finale = Régression + corrections
-                            u = u_ff + correction_p + self._integrale_ff
-
-                        u = min(max(u, 0.0), 10.0)
-
-            # Sécurité : plafond de saturation
-            if self._plafond_u_sature is not None:
-                u = min(u, self._plafond_u_sature)
-
-            # Mode urgence saturation : variateur au minimum absolu
-            if self.etat.get("urgence_saturation"):
-                u = self.u_min_ventilateur or 0.0
+                    # Pas de table : PI pur (ancien comportement)
+                    pdc_v = min(max(self.pi.calculer(consigne_pi, re_mesure), 0.0), 10.0)
+                    self._diag = {"phase": "PI vanne PdC", "pdc_v": round(pdc_v, 3)}
+            elif vannes_pretes:
+                # modes normaux : PdC grande ouverte, variateur =
+                # feed-forward + correction PI en volts
+                # CORRECTION CRITIQUE-1 : Utiliser mode_table pour choisir table gains
+                pdc_v = 10.0
+                u = self._commande_variateur(mode_table, re_cible, re_vise,
+                                             re_mesure, mesures, maintenant)
 
             # Appliquer les commandes
             self.es.ecrire_variateur(u)
             self.commander_vanne_perte_charge(pdc_v)
 
             # Garder trace pour compatibilité (TODO: supprimer à terme)
-            self._mode_bas_re = (mode != MODE_NORMAL_HIGH)
+            # Utiliser mode_table (effectif) pour _mode_bas_re
+            self._mode_bas_re = (mode_table != MODE_NORMAL_HIGH)
         else:
             u = 0.0
             self.es.ecrire_variateur(u)
             self._mode_bas_re = False
+            self._diag = {}
 
         # ---- convergence jugée sur la MOYENNE, pas sur l'échantillon ----
         # Le bruit des capteurs ΔP est du même ordre que la tolérance : exiger
@@ -1658,6 +2142,13 @@ class Pilote:
             bas_re_motif = ("seuil bas-Re inconnu : lancer l'apprentissage "
                             "« Re mapping » (ou fixer strategie_bas_re.seuil_re)")
 
+        # Calculer systématiquement rho, mu, nu (même si dP=0)
+        # pour affichage dans l'IHM, en utilisant T et P_amont actuels
+        P1_abs = self.banc.patm_pa + p_amont
+        rho_actuel = self.banc.fluide.rho(P1_abs, T)
+        mu_actuel = self.banc.fluide.mu(T)
+        nu_actuel = self.banc.fluide.nu(P1_abs, T)
+
         self.etat.update({
             "re_moyen": re_moyen,
             "re_ecart_type": re_sigma,
@@ -1672,7 +2163,9 @@ class Pilote:
             "qm": resultat["qm"], "qv": resultat.get("qv", 0.0),
             "re_conduite": resultat["re_conduite"],
             "re_veine": resultat["re_veine"],
-            "rho": resultat.get("rho", 0.0),
+            "rho": rho_actuel,
+            "mu": mu_actuel,
+            "nu": nu_actuel,
             "C": resultat.get("C"), "u_variateur": u,
             "re_cible": re_cible, "reference": reference,
             "re_mesure": re_mesure, "convergee": convergee,
@@ -1681,105 +2174,146 @@ class Pilote:
             "mode_bas_re": self._mode_bas_re,
             "seuil_bas_re_effectif": round(seuil) if seuil else None,
             "dp_sature": dp_sature,
+            "u_ff": self._diag.get("u_ff"),
+            "trim_v": self._diag.get("trim"),
+            "integrale_v": self._diag.get("integrale"),
+            "re_reference": self._diag.get("reference"),
+            "phase_regulation": self._diag.get("phase"),
+            "alerte_table_ff": self._diag.get("alerte_table_ff"),
         })
 
         # ===== LOGGER DIAGNOSTIC RÉGULATION =====
-        # Enregistrer cycle de régulation pour diagnostic (si activé)
+        # Grandeurs internes du cycle (feed-forward, correction, phase), telles
+        # que calculées par la commande — pas recalculées ici.
         if self.logger_regulation.actif and regul and re_cible > 0:
-            # Déterminer mode régulation
-            mode_reg = self._determiner_mode_regulation(resultat["re_conduite"])
-
-            # Calculer feed-forward (régression vs interpolation) pour comparaison
-            u_ff_reg = None
-            u_ff_interp = None
-            methode_ff = "aucune"
-
-            if mode_reg == MODE_NORMAL_HIGH and self.table_gains.est_valide():
-                # Mode ISO : comparer régression vs interpolation
-                u_ff_reg = self.table_gains.tension_pour_re_regression(resultat["re_conduite"])
-                u_ff_interp = self.table_gains.tension_pour_re(resultat["re_conduite"])
-
-                # Quelle méthode a été utilisée ?
-                reg = self.table_gains.obtenir_regression()
-                if reg['valide'] and reg['r2'] is not None and reg['r2'] > 0.90:
-                    methode_ff = "regression"
-                else:
-                    methode_ff = "interpolation"
-
-            elif mode_reg == MODE_NORMAL_LOW and self.table_gains_bas_re.est_valide():
-                # Mode Miller
-                u_ff_reg = self.table_gains_bas_re.tension_pour_re_regression(resultat["re_conduite"])
-                u_ff_interp = self.table_gains_bas_re.tension_pour_re(resultat["re_conduite"])
-
-                reg = self.table_gains_bas_re.obtenir_regression()
-                if reg['valide'] and reg['r2'] is not None and reg['r2'] > 0.90:
-                    methode_ff = "regression"
-                else:
-                    methode_ff = "interpolation"
-
-            # Déterminer quelle valeur FF a été utilisée
-            u_ff_utilise = u_ff_reg if methode_ff == "regression" else u_ff_interp
-
-            # Alarme si présente
-            alarme = self.etat.get("alarme_saturation") or self.etat.get("alarme")
-
-            # Logger les données
+            d = self._diag
             self.logger_regulation.log_cycle({
                 'consigne_re': re_cible,
-                'mode_regulation': mode_reg,
-                'diaphragme': self.etat.get("diaphragme_actuel"),
-                'bypass_ferme': not bypass_ouvert if 'bypass_ouvert' in locals() else None,
-                'pdc_position_v': self._pdc_position_estimee,
-                'u_ff_regression': round(u_ff_reg, 3) if u_ff_reg is not None else None,
-                'u_ff_interpolation': round(u_ff_interp, 3) if u_ff_interp is not None else None,
-                'u_ff_utilise': round(u_ff_utilise, 3) if u_ff_utilise is not None else None,
-                'methode_ff': methode_ff,
-                'u_pi_sortie': round(u, 3),
+                'mode_regulation': self._mode_regulation,
+                'diaphragme': self.etat.get("diaphragme"),
+                'bypass_ferme': bool(mesures.get("fc_bypass_ferme")),
+                'pdc_position_v': round(self._pdc_position_estimee, 3),
+                'u_ff_regression': None,
+                'u_ff_interpolation': d.get("u_ff_cible"),
+                'u_ff_utilise': d.get("u_ff"),
+                'methode_ff': d.get("phase"),
+                'u_pi_sortie': d.get("trim"),
                 'u_variateur_final': round(u, 3),
                 're_mesure': round(re_mesure, 1),
                 'erreur_re': round(re_cible - re_mesure, 1),
-                'erreur_relative_pct': round((re_cible - re_mesure) / re_cible * 100, 2) if re_cible > 0 else None,
-                'alarme': alarme
+                'erreur_relative_pct': round((re_cible - re_mesure)
+                                             / re_cible * 100, 2),
+                'alarme': (self.etat.get("consigne_limitee")
+                           or d.get("alerte_table_ff")
+                           or ("dP saturé" if dp_sature else None)),
             })
 
+    def _determiner_mode_depuis_diaphragme(self, diaph_physique: str,
+                                            re_cond_mesure: float) -> str:
+        """Détermine le mode de régulation à partir du DIAPHRAGME PHYSIQUE
+        (lu sur fins de course) et du Re conduite MESURÉ.
+
+        CORRECTION CRITIQUE-1 : Le mode doit suivre le diaphragme réellement
+        en ligne, pas la consigne. Dans la bande d'hystérésis (4500-5500 Re),
+        utiliser le Re cible créerait une incohérence entre mode et diaphragme.
+
+        - MODE_NORMAL_HIGH : Diaphragme ISO (bypass fermé, PdC 100%, variateur réglé)
+        - MODE_NORMAL_LOW  : Diaphragme Miller (bypass ouvert, PdC 100%, variateur réglé)
+        - MODE_PDC_CONTROL : Diaphragme Miller + Re très bas (variateur u_min, PdC réglée)
+
+        Args:
+            diaph_physique: "iso" ou "miller" (lu sur fins de course FC)
+            re_cond_mesure: Re conduite mesuré (pour basculement NORMAL_LOW ↔ PDC_CONTROL)
+
+        Returns:
+            MODE_NORMAL_HIGH, MODE_NORMAL_LOW ou MODE_PDC_CONTROL
+        """
+        # Re minimal tenu par le variateur seul en Miller (bypass ouvert).
+        # Utilisé pour basculer entre NORMAL_LOW et PDC_CONTROL.
+        seuil = self.banc.seuil_re
+        if self.seuil_bas_re and self.seuil_bas_re < seuil:
+            freq_min_re = self.seuil_bas_re
+        elif self.table_gains_bas_re.valide_ff():
+            freq_min_re = self.table_gains_bas_re._points_ff()[0][1]
+        else:
+            freq_min_re = (self.u_min_ventilateur or 0.3) * \
+                (self._gain_re_par_volt or 1000)
+
+        # Cas 1 : Diaphragme ISO → toujours MODE_NORMAL_HIGH
+        if diaph_physique == "iso":
+            return MODE_NORMAL_HIGH
+
+        # Cas 2 : Diaphragme Miller → NORMAL_LOW ou PDC_CONTROL selon Re mesuré
+        # Hystérésis ±5% pour éviter oscillations au seuil
+        courant = self._mode_regulation
+        if courant == MODE_PDC_CONTROL:
+            # En mode PDC, rester en PDC tant que Re < 105% du seuil
+            bas = re_cond_mesure < 1.05 * freq_min_re
+        elif courant == MODE_NORMAL_LOW:
+            # En mode NORMAL_LOW, basculer vers PDC si Re < 95% du seuil
+            bas = re_cond_mesure < 0.95 * freq_min_re
+        else:
+            # Premier passage ou mode indéterminé : basculer à freq_min_re exact
+            bas = re_cond_mesure < freq_min_re
+
+        return MODE_PDC_CONTROL if bas else MODE_NORMAL_LOW
 
     def _determiner_mode_regulation(self, re_cond: float) -> str:
-        """Détermine le mode de régulation selon le Re conduite cible.
+        """Mode de régulation pour un Re conduite visé, AVEC hystérésis.
 
-        Retourne :
-        - MODE_NORMAL_HIGH : Re >= 5000 (bypass fermé, ISO, PDC 100%, PI → tension)
-        - MODE_NORMAL_LOW : freq_min <= Re < 5000 (bypass ouvert, Miller, PDC 100%, PI → tension)
-        - MODE_PDC_CONTROL : Re < freq_min (bypass ouvert, Miller, tension fixe, PI → PDC)
+        ⚠️ DEPRECATED : Cette méthode est conservée pour compatibilité avec
+        la phase de PRÉPARATION (ligne 1366), mais NE DOIT PLUS être utilisée
+        pour déterminer le mode pendant la régulation (ligne 1741).
+
+        Utiliser _determiner_mode_depuis_diaphragme() à la place pour éviter
+        incohérence mode/diaphragme dans la bande d'hystérésis.
+
+        - MODE_NORMAL_HIGH : ISO, bypass fermé, PdC 100 %, variateur réglé
+        - MODE_NORMAL_LOW  : Miller, bypass ouvert, PdC 100 %, variateur réglé
+        - MODE_PDC_CONTROL : Miller, bypass ouvert, variateur à u_min, PdC réglée
+
+        Seuil ISO/Miller et hystérésis : ceux du Banc (selection_diaphragme),
+        les mêmes que choisir_diaphragme. Sans hystérésis, une séquence
+        oscillant autour du seuil commutait diaphragme ET bypass à chaque
+        palier (vannes de plusieurs secondes, variateur à 0 V pendant ce
+        temps). Entre Miller et PdC : hystérésis de ±5 % sur Re min.
         """
-        seuil_diaphragme = 5000.0  # Seuil Miller/ISO
+        seuil = self.banc.seuil_re
+        hyst = self.banc.hysteresis_re
 
-        # Déterminer freq_min (Re minimal en mode Miller avec variateur seul)
-        # Priorité : seuil_bas_re manuel < 5000 > table_gains_bas_re > fallback
-        # ATTENTION : seuil_bas_re peut être soit seuil bypass (~5000-7500) soit seuil PDC (~500-3000)
-        # → Si < seuil_diaphragme, c'est probablement un seuil PDC (test ou config spécifique) → PRIORITAIRE
-        # → Si >= seuil_diaphragme, c'est un seuil bypass (ignorer pour déterminer mode PDC)
-        if self.seuil_bas_re and self.seuil_bas_re < seuil_diaphragme:
-            # Seuil manuel < 5000 : probablement un seuil PDC (utilisé par tests)
-            # PRIORITAIRE sur table pour permettre tests de forcer le seuil
+        # Re minimal tenu par le variateur seul en Miller (bypass ouvert).
+        # Un seuil manuel sous le seuil diaphragme est prioritaire (tests,
+        # forçage) ; sinon premier palier non nul de la table Miller.
+        if self.seuil_bas_re and self.seuil_bas_re < seuil:
             freq_min_re = self.seuil_bas_re
-        elif self.table_gains_bas_re.est_valide() and len(self.table_gains_bas_re.points) > 0:
-            # Premier point non-nul de la table Miller = freq_min
-            for u, re in self.table_gains_bas_re.points:
-                if re > 0:
-                    freq_min_re = re
-                    break
-            else:
-                freq_min_re = self.table_gains_bas_re.points[0][1]
+        elif self.table_gains_bas_re.valide_ff():
+            freq_min_re = self.table_gains_bas_re._points_ff()[0][1]
         else:
-            # Fallback : estimer depuis u_min et gain
-            freq_min_re = (self.u_min_ventilateur or 0.3) * (self._gain_re_par_volt or 1000)
+            freq_min_re = (self.u_min_ventilateur or 0.3) * \
+                (self._gain_re_par_volt or 1000)
 
-        if re_cond >= seuil_diaphragme:
-            return MODE_NORMAL_HIGH
-        elif re_cond >= freq_min_re:
-            return MODE_NORMAL_LOW
+        courant = self._mode_regulation
+        if courant is None:
+            # premier choix : partir de la position réelle du diaphragme,
+            # comme choisir_diaphragme (sinon les deux se contredisent dans
+            # la bande d'hystérésis)
+            courant = MODE_NORMAL_HIGH if self.etat.get("diaphragme") == "iso" \
+                else MODE_NORMAL_LOW
+
+        if courant == MODE_NORMAL_HIGH:
+            haut = re_cond >= seuil - hyst
         else:
-            return MODE_PDC_CONTROL
+            haut = re_cond > seuil + hyst
+        if haut:
+            return MODE_NORMAL_HIGH
+
+        if courant == MODE_PDC_CONTROL:
+            bas = re_cond < 1.05 * freq_min_re
+        elif courant == MODE_NORMAL_LOW:
+            bas = re_cond < 0.95 * freq_min_re
+        else:
+            bas = re_cond < freq_min_re
+        return MODE_PDC_CONTROL if bas else MODE_NORMAL_LOW
 
     def _seuil_bas_re(self) -> float:
         """Re en dessous duquel on bascule en stratégie bas-Re (bypass +
@@ -1802,70 +2336,210 @@ class Pilote:
         cle = CLE_DP.get(diaphragme, CLE_DP["miller"])
         return mesures.get(cle, 0.0) - self.zero_capteurs.get(cle, 0.0)
 
-    def _besoin_bas_re(self, re_cond_cible: float, seuil: float) -> bool:
-        """Critère UNIQUE d'engagement de la stratégie bas-Re (préparation et
-        boucle), avec hystérésis : entrée si le Re conduite cible < seuil,
-        sortie seulement s'il dépasse seuil + hystérésis."""
-        if not (self.bas_re_actif and seuil):
-            return False
-        if self._mode_bas_re:
-            return re_cond_cible < seuil + self._hysteresis_bypass
-        return re_cond_cible < seuil
+    def _table_ff(self, mode: str):
+        """Table de feed-forward du mode : ISO (bypass fermé) en normal_high,
+        Miller (bypass ouvert) sinon. None si la table n'est pas exploitable.
+        La table suit le MODE (donc la configuration des vannes), pas un
+        seuil de Re : dans la bande d'hystérésis, le Re visé peut être sous
+        5000 avec l'ISO en ligne."""
+        t = self.table_gains if mode == MODE_NORMAL_HIGH \
+            else self.table_gains_bas_re
+        return t if t.valide_ff() else None
 
-    def _echelle_gains(self, bas_re: bool, re_cond_attendu: float) -> float:
-        """Facteur d'échelle des gains PI au point de fonctionnement visé.
-
-        L'erreur du PI est normalisée par la consigne : le gain de boucle
-        vaut kp·G/Re_cible ≈ kp/u_équilibre et varie donc avec le point
-        (boucle vive aux faibles Re, molle aux forts Re). Quand le banc est
-        caractérisé (table ou gain appris), on compense en multipliant les
-        gains par la tension d'équilibre estimée -> gain de boucle ≈ kp
-        partout. Sans caractérisation ou si désactivé : échelle neutre.
-        En bas-Re, la PdC tient la boucle : facteur dédié bas_re_scale."""
-        if bas_re:
-            return self.bas_re_scale
-        if not self.gain_scheduling:
-            return 1.0
-        u_eq = self._u_equilibre(re_cond_attendu)
-        if u_eq is None:
-            return 1.0
-        return min(max(u_eq, 0.5), 10.0)
-
-    def _u_equilibre(self, re_cond_attendu: float) -> float | None:
-        """Tension variateur d'équilibre estimée pour un Re conduite visé.
-
-        STRATÉGIE (par priorité) :
-        1. Modèle linéaire (régression Re = a*U + b) si R² > 0.90
-        2. Sinon interpolation par morceaux (méthode originale)
-        3. Sinon gain appris global (Re/V)
-        4. Sinon None (banc non caractérisé)
-
-        Sélectionne automatiquement la bonne table (ISO ou Miller) selon Re.
-        """
-        # Sélection table selon Re (seuil Miller/ISO = 5000)
-        if re_cond_attendu >= 5000:
-            # Zone ISO
-            table = self.table_gains
-        else:
-            # Zone Miller
-            table = self.table_gains_bas_re
-
-        if table.est_valide():
-            # MÉTHODE 1 : Régression linéaire globale (si bon fit)
-            reg = table.obtenir_regression()
-            if reg['valide'] and reg['r2'] is not None and reg['r2'] > 0.90:
-                u_reg = table.tension_pour_re_regression(re_cond_attendu)
-                if u_reg is not None:
-                    return u_reg
-
-            # MÉTHODE 2 : Interpolation par morceaux (fallback)
-            return table.tension_pour_re(re_cond_attendu)
-
-        # MÉTHODE 3 : Gain global appris (si table pas disponible)
-        if self._gain_re_par_volt:
-            return re_cond_attendu / self._gain_re_par_volt
-
+    def _u_equilibre(self, re_cond_attendu: float,
+                     mode: str | None = None) -> float | None:
+        """Tension variateur d'équilibre estimée pour un Re conduite visé :
+        interpolation de la table apprise du mode, sinon gain global appris
+        (ISO seulement : il a été mesuré bypass fermé), sinon None."""
+        if mode is None:
+            mode = MODE_NORMAL_HIGH if re_cond_attendu >= self.banc.seuil_re \
+                else MODE_NORMAL_LOW
+        table = self._table_ff(mode)
+        if table is not None:
+            return table.u_pour_re_ff(re_cond_attendu)
+        if mode == MODE_NORMAL_HIGH and self._gain_re_par_volt:
+            return min(max(re_cond_attendu / self._gain_re_par_volt, 0.0), 10.0)
         return None
+
+    def _borner_consigne(self, diaph: str, qm_vise: float, re_cible: float,
+                         T: float, p_amont: float) -> None:
+        """Consigne au-delà de la plage mesurable du capteur ΔP du
+        diaphragme : la régulation vise le maximum mesurable (avec la marge
+        marge_consigne_dp) et l'opérateur est prévenu.
+
+        Sans cette borne, le Re calculé plafonne au capteur, l'erreur ne se
+        résorbe jamais, et la commande part en butée."""
+        self._re_cible_max = None
+        self.etat["consigne_limitee"] = None
+        cle = CLE_DP.get(diaph, CLE_DP["miller"])
+        dp_lim = self.marge_consigne_dp * self.saturation_dp \
+            * self._dp_pleine_echelle[cle]
+        dp_att = self.etat.get("dp_attendu") or 0.0
+        if qm_vise <= 0 or dp_lim <= 0 or dp_att <= dp_lim:
+            return
+        qm_max = qm_vise
+        for _ in range(5):            # ΔP ~ qm² : convergence en 2-3 pas
+            dp_q = self.banc.dP_attendu(diaph, qm_max, T, p_amont)
+            if dp_q <= 0:
+                return
+            qm_max *= (dp_lim / dp_q) ** 0.5
+        self._re_cible_max = re_cible * qm_max / qm_vise
+        msg = (f"consigne {re_cible:.0f} hors plage du capteur ΔP "
+               f"({dp_att:.0f} Pa attendus, {dp_lim:.0f} Pa max) : "
+               f"régulation limitée à {self._re_cible_max:.0f}")
+        self.etat["consigne_limitee"] = msg
+        log.warning(msg)
+
+    def _reference_filtree(self, re_vise: float, re_mesure: float) -> float:
+        """Consigne filtrée au 1er ordre (tau_consigne), ancrée sur la mesure
+        avec un plancher de 20 % de la cible. Sert aux PI à erreur relative
+        (vanne PdC, repli sans table). tau = 0 : échelon brut."""
+        if self.tau_consigne <= 0:
+            self._consigne_interne = None
+            return re_vise
+        if self._consigne_interne is None:
+            self._consigne_interne = max(
+                re_mesure, _RATIO_ANCRAGE_CONSIGNE_INTERNE * re_vise)
+        a = self.periode / (self.tau_consigne + self.periode)
+        self._consigne_interne += a * (re_vise - self._consigne_interne)
+        return self._consigne_interne
+
+    def _variateur_en_route(self, mesures: dict, maintenant: float) -> bool:
+        """Vrai tant que la recopie AM du 3G3MV n'a pas rejoint la dernière
+        commande (le ventilateur suit encore la rampe interne du variateur).
+        Faux si la recopie est absente, RUN coupé, ou si l'écart dure plus de
+        suivi_variateur_max_s (recopie fausse : ne pas geler pour toujours)."""
+        am = mesures.get("frequence_variateur")
+        if am is None or not self._run_actif or self.suivi_variateur_max_s <= 0:
+            self._t_ecart_variateur = None
+            return False
+        u_prec = self.etat.get("u_variateur", 0.0) or 0.0
+        if abs(am - u_prec) <= self.tol_suivi_variateur:
+            self._t_ecart_variateur = None
+            return False
+        if self._t_ecart_variateur is None:
+            self._t_ecart_variateur = maintenant
+        return maintenant - self._t_ecart_variateur < self.suivi_variateur_max_s
+
+    def _commande_variateur(self, mode: str, re_cible: float, re_vise: float,
+                            re_mesure: float, mesures: dict,
+                            maintenant: float) -> float:
+        """Tension variateur des modes normaux.
+
+        1. feed-forward : tension d'équilibre de la table apprise pour la
+           consigne, rejointe sur la rampe rampe_v_par_s ;
+        2. modèle de référence : Re que produirait ce feed-forward, filtré à
+           la constante de temps du procédé (tau_consigne_s). C'est CE Re que
+           la correction poursuit, pas l'échelon : en transitoire, l'écart
+           mesuré ne traduit que l'erreur du modèle -> pas de coup de bélier
+           du terme P, pas d'intégrale enroulée, pas de dépassement ;
+        3. correction PI en volts (RegulateurTrim), intégrale gelée pendant
+           la rampe du feed-forward, P et I gelés tant que le variateur n'a pas rejoint
+           la commande (recopie AM).
+
+        Re_cible / re_vise sont dans l'unité de la référence (conduite ou
+        veine) ; les tables sont en Re conduite : le rapport est constant
+        (même débit, géométrie fixe), on convertit par k.
+        """
+        table = self._table_ff(mode)
+        gain = self._gain_re_par_volt if mode == MODE_NORMAL_HIGH else None
+        if table is None and not gain:
+            # banc non caractérisé : PI à erreur relative (repli)
+            consigne_pi = self._reference_filtree(re_vise, re_mesure)
+            self.pi.u_max = 10.0 if self._plafond_u_sature is None \
+                else self._plafond_u_sature
+            u = min(max(self.pi.calculer(consigne_pi, re_mesure), 0.0), 10.0)
+            self._diag = {"phase": "PI seul (banc non caractérisé)",
+                          "reference": round(consigne_pi, 1)}
+            return u
+
+        # Utiliser le facteur de conversion k sauvegardé (calculé AVANT les limitations)
+        # Cela garantit que le lookup de table utilise le bon facteur même si
+        # _re_cible_conduite a été limité par re_max_iso ou _borner_consigne
+        k = self._k_conversion
+
+        def u_pour(re_ref):
+            if table is not None:
+                return table.u_pour_re_ff(re_ref * k)
+            return min(max(re_ref * k / gain, 0.0), 10.0)
+
+        def re_pour(v):
+            return (table.re_pour_u_ff(v) if table is not None else gain * v) / k
+
+        def pente(v):
+            return (table.pente_ff(v) if table is not None else gain) / k
+
+        # 1. feed-forward sur rampe
+        u_cible = u_pour(re_vise)
+        pas = self.trim.rampe * self.periode
+        self._u_ff_applique += max(-pas, min(pas, u_cible - self._u_ff_applique))
+        ff_rendu = abs(u_cible - self._u_ff_applique) < 1e-9
+        # 2. modèle de référence (à l'arrivée : la consigne elle-même, pour
+        #    que l'intégrale annule l'erreur statique même hors table)
+        re_modele = re_vise if ff_rendu else re_pour(self._u_ff_applique)
+        if self._consigne_interne is None:
+            self._consigne_interne = re_mesure
+        if self.tau_consigne > 0:
+            a = self.periode / (self.tau_consigne + self.periode)
+            self._consigne_interne += a * (re_modele - self._consigne_interne)
+        else:
+            self._consigne_interne = re_modele
+        reference = self._consigne_interne
+
+        # 3. correction
+        en_route = self._variateur_en_route(mesures, maintenant)
+        transitoire = not ff_rendu
+        # séparation d'intégrale : grand écart ET mesure encore en mouvement
+        # = le procédé n'a pas fini de répondre (tau_consigne sous-estimé,
+        # rampe du variateur…) ; intégrer ce retard enroulerait l'intégrale
+        # et produirait un dépassement. Le P agit seul. Dès que la mesure
+        # est stable, on intègre quel que soit l'écart (biais de table fort).
+        self._hist_re_court.append(re_mesure)
+        h = self._hist_re_court
+        stable = False
+        if len(h) == h.maxlen and re_vise > 0:
+            m = len(h) // 2
+            debut = fmean(list(h)[:m])
+            fin = fmean(list(h)[m:])
+            stable = abs(fin - debut) / re_vise < self.seuil_stabilite
+        ecart_rel = abs(reference - re_mesure) / reference if reference > 0 else 0.0
+        separation = ecart_rel > self.bande_integration and not stable
+        u = self.trim.calculer(reference, re_mesure, self._u_ff_applique,
+                               pente(self._u_ff_applique),
+                               u_max=self._plafond_u_sature,
+                               geler_integrale=transitoire or en_route
+                               or separation,
+                               geler_p=en_route)
+
+        # biais de table appris, rapporté au feed-forward : resservira à la
+        # prochaine consigne du même mode (intégrale pré-chargée)
+        sature = abs(self.trim.integrale) >= self.trim.trim_max - 1e-6
+        if not (transitoire or en_route or sature) \
+                and self._plafond_u_sature is None and self._u_ff_applique > 0.3:
+            self._biais_ff[mode] = (id(table),
+                                    self.trim.integrale / self._u_ff_applique)
+        # correction en butée durablement : la table ne décrit plus le banc
+        if sature and not transitoire:
+            self._cycles_trim_sature += 1
+        else:
+            self._cycles_trim_sature = 0
+        alerte = None
+        if self._cycles_trim_sature > int(5.0 / self.periode):
+            alerte = (f"correction en butée ({self.trim.integrale:+.2f} V) : "
+                      "la table de gains ne décrit plus le banc, relancer "
+                      "l'apprentissage « Re mapping »")
+
+        self._diag = {
+            "phase": ("suivi variateur" if en_route else
+                      "transitoire" if transitoire else "régulation"),
+            "u_ff_cible": round(u_cible, 3),
+            "u_ff": round(self._u_ff_applique, 3),
+            "trim": round(self.trim.trim, 3),
+            "integrale": round(self.trim.integrale, 3),
+            "reference": round(reference, 1),
+            "alerte_table_ff": alerte,
+        }
+        return u
 
     def _prepositionner_vanne_pdc_securitaire(self, mode: str) -> None:
         """Pré-positionne la vanne PDC selon la règle min(actuelle, cible)
@@ -1893,184 +2567,78 @@ class Pilote:
         self.commander_vanne_perte_charge(position_securitaire_v)
 
     def _preparer_pi(self, mode: str, re_cond_attendu: float) -> None:
-        """Cale le PI sur le régime visé selon le mode de régulation.
+        """Cale les régulateurs sur le régime visé.
 
-        mode : MODE_NORMAL_HIGH, MODE_NORMAL_LOW, ou MODE_PDC_CONTROL
-
-        - normal_high (Re >= 5000) : bypass fermé, ISO, PDC 100%, PI → tension
-        - normal_low (freq_min <= Re < 5000) : bypass ouvert, Miller, PDC 100%, PI → tension
-        - pdc_control (Re < freq_min) : bypass ouvert, Miller, tension fixe u_min, PI → PDC
+        - normal_high / normal_low : variateur = feed-forward + correction.
+          L'intégrale démarre sur le biais de table appris dans ce mode
+          (rapporté au nouveau feed-forward) ; la sortie reste continue
+          (le feed-forward appliqué repart de la commande courante).
+        - pdc_control : variateur à u_min, PI relatif sur la vanne PdC,
+          pré-positionné sur la table PdC si elle existe.
+        Le PI relatif est aussi recalé sur le feed-forward dans les modes
+        normaux : c'est le repli si la table devient inexploitable.
         """
         if mode == MODE_PDC_CONTROL:
-            # Mode très bas Re : tension fixe au minimum, PI contrôle PDC
             self.pi.gain_scale = self.bas_re_scale
             self.pi.rampe = self._rampe_bas_re()
-            # Feed-forward PDC depuis table d'apprentissage
             pdc_ff = None
-
-            # Méthode 1 (précise) : utiliser table PDC si disponible
             if self.table_gains_pdc.est_valide():
-                # Régression linéaire prioritaire (si R² > 0.90)
                 reg = self.table_gains_pdc.obtenir_regression()
                 if reg['valide'] and reg['r2'] is not None and reg['r2'] > 0.90:
                     pdc_pct = self.table_gains_pdc.tension_pour_re_regression(re_cond_attendu)
                 else:
-                    # Fallback interpolation
                     pdc_pct = self.table_gains_pdc.tension_pour_re(re_cond_attendu)
-
                 if pdc_pct is not None:
-                    # Convertir % en tension (0-100% → 0-10V)
-                    pdc_ff = pdc_pct * 0.1
-
-            # Méthode 2 (approximation) : fallback si table PDC pas disponible
-            elif self.table_gains_bas_re.est_valide():
-                # Ancienne méthode : lookup table Miller puis approximation linéaire
-                u_ff = self.table_gains_bas_re.tension_pour_re(re_cond_attendu)
-                if u_ff is not None:
-                    u_min = self.u_min_ventilateur or 0.3
-                    if u_ff <= u_min:
-                        # Re très bas : approximation linéaire
-                        pdc_min_v = self.pdc_min_exploitable_pct * 0.1
-                        ratio = max(0.0, min(1.0, u_ff / u_min))
-                        pdc_ff = pdc_min_v + (10.0 - pdc_min_v) * ratio
-                    else:
-                        # u_ff > u_min : PDC à 100%
-                        pdc_ff = 10.0
-
-            if pdc_ff is None:
-                pdc_ff = 10.0  # Fallback ultime : démarrer ouverte, PI fermera
-            self.pi.reinitialiser(pdc_ff)
-
-        elif mode == MODE_NORMAL_LOW:
-            # Mode bas Re normal : bypass ouvert, Miller, PDC 100%, PI contrôle tension
-            self.pi.gain_scale = self.bas_re_scale
-            self.pi.rampe = self._rampe_nominale
-            # Feed-forward depuis table Miller (régression prioritaire)
-            u_ff = None
-            if self.table_gains_bas_re.est_valide():
-                # Essayer régression linéaire d'abord (si R² > 0.90)
-                reg = self.table_gains_bas_re.obtenir_regression()
-                if reg['valide'] and reg['r2'] is not None and reg['r2'] > 0.90:
-                    u_ff = self.table_gains_bas_re.tension_pour_re_regression(re_cond_attendu)
-                # Sinon fallback sur interpolation
-                if u_ff is None:
-                    u_ff = self.table_gains_bas_re.tension_pour_re(re_cond_attendu)
-            if u_ff is None:
-                if self.u_min_ventilateur:
-                    u_ff = self.u_min_ventilateur
+                    pdc_ff = pdc_pct * 0.1          # % -> 0-10 V
+            elif self.table_gains_bas_re.valide_ff():
+                # approximation : fraction de u_min atteinte -> ouverture PdC
+                u_ff = self.table_gains_bas_re.u_pour_re_ff(re_cond_attendu)
+                u_min = self.u_min_ventilateur or 0.3
+                # CORRECTION MINEUR-4 : u_ff < u_min (pas <=) pour feed-forward PDC correct
+                # Si u_ff >= u_min, le variateur peut tenir le Re seul → PdC 100% ouverte (10V)
+                # Si u_ff < u_min, interpoler linéairement entre pdc_min et 10V
+                if u_ff < u_min:
+                    pdc_min_v = self.pdc_min_exploitable_pct * 0.1
+                    ratio = max(0.0, min(1.0, u_ff / u_min))
+                    pdc_ff = pdc_min_v + (10.0 - pdc_min_v) * ratio
                 else:
-                    log.warning(
-                        f"u_min_ventilateur non configuré et table bas Re invalide, "
-                        f"utilisation de {_U_MIN_VENTILATEUR_FALLBACK}V par défaut"
-                    )
-                    u_ff = _U_MIN_VENTILATEUR_FALLBACK
-            u_ff = min(max(u_ff, 0.0), 10.0)
-            self.pi.reinitialiser(u_ff)
+                    pdc_ff = 10.0
+            if pdc_ff is None:
+                pdc_ff = 10.0     # repli : partir ouverte, le PI fermera
+            self.pi.reinitialiser(pdc_ff)
+            self._consigne_interne = None
 
-        elif mode == MODE_NORMAL_HIGH:
-            # Mode normal haut Re : bypass fermé, ISO, PDC 100%, PI contrôle tension
-            self.pi.gain_scale = self._echelle_gains(False, re_cond_attendu)
+        elif mode in (MODE_NORMAL_HIGH, MODE_NORMAL_LOW):
+            self.pi.gain_scale = 1.0
             self.pi.rampe = self._rampe_nominale
-            # Feed-forward depuis table ISO
-            u_ff = self._u_equilibre(re_cond_attendu)
-            if u_ff is None:
-                u_ff = self.etat.get("u_variateur", 0.0)
-            else:
-                u_ff = min(max(u_ff, 0.0), 10.0)
-            self.pi.reinitialiser(u_ff)
+            u_actuel = self.etat.get("u_variateur", 0.0) or 0.0
+            u_ff = self._u_equilibre(re_cond_attendu, mode)
+
+            integ = 0.0
+            biais = self._biais_ff.get(mode)
+            if biais and u_ff is not None and biais[0] == id(self._table_ff(mode)):
+                integ = biais[1] * u_ff
+            self.trim.reinitialiser(u_actuel, integ)
+            # sortie continue : feed-forward appliqué = commande - correction
+            self._u_ff_applique = max(0.0, u_actuel - self.trim.integrale)
+            if mode != self._mode_regulation:
+                self._consigne_interne = None   # ré-ancrage sur la mesure
+            self._cycles_trim_sature = 0
+
+            self.pi.reinitialiser(u_ff if u_ff is not None else u_actuel)
 
         else:
             log.error(f"Mode de régulation invalide dans _preparer_pi: {mode}")
             raise ValueError(f"Mode de régulation invalide dans _preparer_pi: {mode}. "
-                           f"Valeurs attendues: 'normal_high', 'normal_low', 'pdc_control'")
+                             f"Valeurs attendues: 'normal_high', 'normal_low', 'pdc_control'")
 
-        self._mode_regulation = mode  # Sauvegarder mode courant
-        self._consigne_interne = None      # ré-ancrage sur la mesure courante
+        self._mode_regulation = mode
 
     def _rampe_bas_re(self) -> float:
-        """Rampe PI en bas-Re. Sur le segment PdC du split-range, 1 unité de
-        commande vaut 10/split_point V de vanne ; la vanne parcourt 10 V en
-        t_vanne_pdc_course s. Au-delà de split_point/t_course par seconde, la
-        commande devance l'actionneur et l'intégrale s'enroule contre lui
-        (l'anti-windup se recale sur la sortie commandée, pas sur la position
-        réelle) -> dépassement puis oscillation lente."""
-        return min(self._rampe_nominale,
-                   self.split_point / self.t_vanne_pdc_course)
+        """Rampe du PI en mode PdC : la sortie EST la consigne de vanne
+        (0-10 V), que l'actionneur parcourt en t_vanne_pdc_course s. Plus
+        vite, la commande devance la vanne et l'intégrale s'enroule contre
+        elle (l'anti-windup voit la commande, pas la position réelle) ->
+        dépassement puis oscillation lente."""
+        return min(self._rampe_nominale, 10.0 / self.t_vanne_pdc_course)
 
-    def _cmd_ff_bas_re(self, re_cible: float, seuil: float) -> float:
-        """Commande split-range estimée pour un Re cible en bas-Re — sert à
-        pré-positionner PdC + variateur à l'entrée du régime (évite le
-        transitoire de démarrage PdC grande ouverte).
-
-        Utilise table_gains_bas_re (paliers re_mapping) si disponible pour
-        feed-forward précis, sinon approximation linéaire."""
-
-        # Paramètres split-range (cohérence avec _split_range)
-        u_min = self.u_min_ventilateur or 1.0
-        u_seuil = self.u_seuil_bas_re or 10.0
-        sp = self.split_point  # Point de bascule PDC/variateur (config)
-
-        # Tentative feed-forward via table apprise (segment variateur)
-        if self.table_gains_bas_re.est_valide():
-            u_ff = self.table_gains_bas_re.tension_pour_re(re_cible)
-            if u_ff is not None:
-                # Inverser segment haut split-range : u → cmd
-                # u = u_min + (cmd - sp) / (10 - sp) * (u_seuil - u_min)
-                # => cmd = sp + (u - u_min) / (u_seuil - u_min) * (10 - sp)
-                if u_ff >= u_min:
-                    cmd = sp + (u_ff - u_min) / (u_seuil - u_min) * (10.0 - sp)
-                    return max(sp, min(10.0, cmd))
-                # Si u_ff < u_min, Re très bas (segment PDC), fallback approximation
-
-        # Fallback : approximation linéaire (ancienne méthode)
-        re_umin = seuil / self.marge_seuil_bas_re if self.marge_seuil_bas_re \
-            else seuil
-        if re_umin <= 0:
-            return sp
-        if re_cible <= re_umin:                    # segment PdC (variateur figé)
-            return max(0.0, min(sp, sp * re_cible / re_umin))
-        # segment variateur : reprise depuis u_min au-delà de Re_umin
-        return max(sp, min(10.0,
-                           sp + (10.0 - sp) * min((re_cible - re_umin) / re_umin,
-                                                  1.0)))
-
-    def _split_range(self, cmd: float, bas_re: bool) -> tuple[float, float]:
-        """Répartit la commande PI unique (0..10) sur variateur + vanne PdC.
-
-        Hors bas-Re : variateur seul sur toute la plage, vanne PdC ouverte
-        (résistance minimale).
-
-        En bas-Re : le variateur est maintenu à sa tension minimale
-        exploitable (zone stable). Le bypass est ouvert en parallèle sur le
-        ventilateur : une partie du refoulement court-circuite la boucle
-        principale. La PdC, en série sur le refoulement vers la chambre,
-        dose la fraction de débit qui atteint la veine :
-          cmd faible  -> PdC fermée  (résistance forte, débit dévié par bypass, Re bas)
-          cmd élevée  -> PdC ouverte (résistance faible, débit forcé vers la veine, Re haut)
-        Au-delà de la pleine ouverture de la PdC, le variateur reprend la
-        main depuis u_min pour continuer à monter (transition sans à-coup).
-        """
-        cmd = min(max(cmd, 0.0), 10.0)
-        if not bas_re:
-            return cmd, 10.0               # variateur seul, vanne grande ouverte (10 V)
-
-        u_min = self.u_min_ventilateur or 1.0
-        u_seuil = self.u_seuil_bas_re or 10.0  # Tension au seuil (5000 Re)
-        pdc_min_v = self.pdc_min_exploitable_pct * 0.1  # PDC min en tension (0-10V)
-
-        # Point de bascule PDC/variateur (config). Doit être cohérent avec
-        # _cmd_ff_bas_re pour que feed-forward et split_range soient inverses.
-        sp = self.split_point
-
-        # Rappel convention (carte P6, sens usine) : 0 V = fermé, 10 V = ouvert.
-        # segment bas (cmd ≤ sp) : variateur à u_min, PDC de PDC_min à 100%
-        # segment haut (cmd > sp) : PDC 100%, variateur monte de u_min à u_seuil
-        if cmd <= sp:
-            u = u_min
-            # cmd=0 → pdc_min_v (limite décrochage), cmd=sp → 10V (ouvert)
-            pdc_v = max(pdc_min_v, pdc_min_v + (10.0 - pdc_min_v) * cmd / sp)
-        else:
-            pdc_v = 10.0  # PDC fixe à 100% (ouverte)
-            # Variateur monte de u_min à u_seuil (précis, plage principale)
-            u = u_min + (cmd - sp) / (10.0 - sp) * (u_seuil - u_min)
-        return u, pdc_v

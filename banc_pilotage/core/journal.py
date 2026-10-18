@@ -24,7 +24,7 @@ COLONNES = [
     ("horodatage", "horodatage"),
     ("t_s", "t [s]"),
     ("re_cible", "Re consigne"),
-    ("re_mesure", "Re mesure"),
+    ("re_mesure", "Re calculé"),
     ("re_moyen", "Re moyen"),
     ("re_ecart_type", "Re ecart-type"),
     ("convergee", "convergee"),
@@ -101,14 +101,25 @@ class JournalEssai:
             while chemin.exists():
                 chemin = self.dossier / f"{base}_{n}.csv"
                 n += 1
-            f = chemin.open("w", encoding="utf-8-sig", newline="")
-            f.write(";".join(entete for _, entete in COLONNES) + "\n")
-            f.flush()
+
+            f = None
+            try:
+                f = chemin.open("w", encoding="utf-8-sig", newline="")
+                f.write(";".join(entete for _, entete in COLONNES) + "\n")
+                f.flush()
+                self._f = f
+                self.chemin = chemin
+            except OSError:
+                # Fermer le fichier en cas d'erreur après ouverture
+                if f is not None:
+                    try:
+                        f.close()
+                    except OSError:  # Spécifier exception système attendue
+                        pass  # Best-effort cleanup, acceptable
+                raise
         except OSError as exc:
             self.erreur = f"journal indisponible : {exc}"
             return
-        self._f = f
-        self.chemin = chemin
         self.erreur = None
         self.lignes = 0
         self._t0 = t_monotonic

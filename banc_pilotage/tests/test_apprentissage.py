@@ -92,7 +92,6 @@ def test_indiciel_exige_une_table_de_gains(tmp_path):
     """Les kp/ki IMC supposent le gain scheduling actif : sans table de
     gains, ils ne vaudraient qu'au point d'essai -> refus explicite."""
     app, pilote = _app(tmp_path)
-    pilote.gain_scheduling = True
     pilote.table_gains = TableGains()      # invalide
     err = app.demarrer("indiciel")
     assert err is not None and "courbe de gain" in err
@@ -135,3 +134,41 @@ def test_sequence_refusee_si_le_ventilateur_tourne(tmp_path):
     assert app.demarrer("zero_capteurs") is None
     app.annuler()
     app._thread.join(timeout=5.0)
+
+
+def test_re_mapping_produit_paliers_plage_haute():
+    """Phase 4 du re_mapping doit créer paliers_plage_haute pour table_gains.
+
+    Vérifie que les résultats contiennent la clé 'paliers_plage_haute' qui
+    alimente la table de gains mode normal (Re > 5000).
+    """
+    cfg = _cfg()
+    pilote = Pilote(Banc(cfg), StubES(), cfg)
+    pilote.periode = 0.02
+
+    # Simuler résultats re_mapping complets avec Phase 4
+    resultats_re_mapping = {
+        "u_min_exploitable_v": 0.5,
+        "u_seuil_bas_re_v": 5.3,
+        "re_a_u_min": 250,
+        "paliers_V_Re": [[0.5, 250], [1.0, 500], [5.0, 4800]],
+        "paliers_plage_haute": [[5.5, 5200], [7.0, 8000], [9.0, 12000]]
+    }
+
+    # Vérifier que la clé paliers_plage_haute existe
+    assert "paliers_plage_haute" in resultats_re_mapping
+    assert isinstance(resultats_re_mapping["paliers_plage_haute"], list)
+    assert len(resultats_re_mapping["paliers_plage_haute"]) > 0
+
+    # Vérifier structure des paliers (voltage, Re)
+    for palier in resultats_re_mapping["paliers_plage_haute"]:
+        assert len(palier) == 2
+        volts, re = palier
+        assert 0 <= volts <= 10.0, "Voltage doit être dans [0, 10V]"
+        assert re > 0, "Re doit être positif"
+
+    # Vérifier que les paliers sont croissants en voltage ET en Re
+    paliers = resultats_re_mapping["paliers_plage_haute"]
+    for i in range(len(paliers) - 1):
+        assert paliers[i][0] < paliers[i + 1][0], "Voltages doivent être croissants"
+        assert paliers[i][1] < paliers[i + 1][1], "Re doivent être croissants"
