@@ -217,18 +217,21 @@ class WagoModbus(EntreesSorties):
             # Mise à jour cache DANS le verrou pour éviter race condition
             self._ao_cache[adresse] = (brut, maintenant)
 
-    def _ecrire_coil(self, voie: dict, etat: bool) -> None:
+    def _ecrire_coil(self, voie: dict, etat: bool) -> bool:
         """Écriture d'une sortie TOR, même politique que les sorties
         analogiques : on n'émet que sur changement, mais on réaffirme
         périodiquement. Sans cette réaffirmation, un coupleur redémarré
         laisserait les relais retombés — donc, sur la vanne 3 voies dont la
         carte est alimentée par ses bornes de commande, un actionneur sans
-        tension et sans résistance anti-condensation."""
+        tension et sans résistance anti-condensation.
+
+        Retourne True si la sortie a effectivement été écrite."""
         adresse = voie["adresse"]
         precedent = self._coil_cache.get(adresse)
         maintenant = time.monotonic()
-        if precedent is not None and precedent[0] == etat                 and maintenant - precedent[1] < self._t_rafraichissement:
-            return
+        if precedent is not None and precedent[0] == etat \
+                and maintenant - precedent[1] < self._t_rafraichissement:
+            return False
         with self._verrou:
             rr = self.client.write_coil(address=adresse, value=etat)
             if rr.isError():
@@ -237,6 +240,7 @@ class WagoModbus(EntreesSorties):
                 raise IOError(f"Erreur Modbus écriture coil @{adresse}")
             # Mise à jour cache DANS le verrou pour éviter race condition
             self._coil_cache[adresse] = (etat, maintenant)
+        return True
 
     def ecrire_variateur(self, volts: float) -> None:
         self._ecrire_ao_volts(self.cfg["sorties"]["variateur"], volts)
@@ -255,10 +259,14 @@ class WagoModbus(EntreesSorties):
         cible = "vanne_diaphragme_0deg" if vers_0deg else "vanne_diaphragme_90deg"
         autre = "vanne_diaphragme_90deg" if vers_0deg else "vanne_diaphragme_0deg"
         # relâcher avant de coller : jamais les deux ordres ensemble
-        self._ecrire_coil(s[autre], False)
-        # Délai minimal pour que la carte GF3 reçoive le nouvel ordre avant
-        # de réagir au relâchement de l'ancien (évite demi-tour 0°→90°)
-        time.sleep(0.05)  # 50 ms
+        relache = self._ecrire_coil(s[autre], False)
+        # Délai minimal pour que la carte GF3 voie le relâchement de l'ancien
+        # ordre avant le nouveau (évite un demi-tour 0°→90°). Seulement si un
+        # relâchement a vraiment été émis : la boucle réaffirme l'ordre à
+        # chaque cycle, et 50 ms de pause systématique prenaient le quart de
+        # la période de 0,2 s.
+        if relache and self._coil_cache.get(s[cible]["adresse"], (False,))[0] is not True:
+            time.sleep(0.05)  # 50 ms
         self._ecrire_coil(s[cible], True)
 
     def ecrire_vanne_bypass(self, ouverte: bool) -> None:

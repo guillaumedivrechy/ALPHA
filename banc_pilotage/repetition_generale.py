@@ -5,15 +5,16 @@ Déroule la procédure complète du jour J dans l'ordre, avec « Appliquer »
 après chaque étape, puis une consigne de contrôle :
 
   zero_capteurs -> verif_cablage -> calibration_pdc -> vanne_3voies ->
-  vanne_bypass -> vanne_pdc -> freq_min -> courbe_gain -> indiciel ->
-  consigne Re 6000 (convergence attendue avec les réglages appris)
+  vanne_bypass -> vanne_pdc -> re_mapping_miller -> re_mapping_iso ->
+  indiciel -> consigne Re 6000 (convergence attendue avec les réglages appris)
 
 (le zéro des capteurs se mesure ventilateur arrêté, sans dépendre du
 câblage : le passer en premier corrige les offsets pour l'identification
 ISO/Miller du contrôle de câblage)
 
-Les fichiers écrits (config appliquée, état) vont dans un dossier
-temporaire : la configuration réelle n'est pas modifiée.
+Les fichiers écrits (config appliquée, état, apprentissages, journaux)
+vont dans un dossier temporaire : la configuration réelle n'est pas
+modifiée.
 Durée : ~10 minutes (courses de vannes et paliers en temps réel).
 
     python repetition_generale.py
@@ -32,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+import core.pilote
 from core.apprentissage import Apprentissage
 from core.banc import Banc
 from core.pilote import Pilote
@@ -48,6 +50,8 @@ def main() -> int:
     cfg = json.loads((Path(__file__).resolve().parent / "config.json")
                      .read_text(encoding="utf-8"))
     cfg["fichier_etat"] = str(dossier / "etat_banc.json")
+    # apprentissages/, journaux/ : sous le dossier temporaire, pas les sources
+    core.pilote.RACINE = dossier
 
     banc = Banc(cfg)
     es = SimulateurBanc(banc, cfg.get("simulation"), cfg.get("modbus"), cfg.get("actionneurs"))
@@ -90,16 +94,22 @@ def main() -> int:
           lambda r: _exiger(0.5 < r["max_s"] < 40.0, f"chronos bypass : {r}"))
     etape("vanne_pdc",
           lambda r: _exiger(5.0 < r["max_s"] < 60.0, f"chronos PdC : {r}"))
-    etape("freq_min",
-          lambda r: _exiger(0.5 <= r["u_min_exploitable_v"] <= 2.5,
-                            f"u_min hors plage : {r}"))
-    def _courbe_gain(r: dict) -> None:
-        _exiger(len(r["points_V_Re"]) >= 4, f"table incomplète : {r}")
-        # le simulateur est linéaire : une forte non-linéarité signale des
-        # points corrompus (ex. saturation du capteur ΔP non exclue)
-        _exiger(r["non_linearite_pct"] < 15.0, f"non-linéarité anormale : {r}")
+    def _miller(r: dict) -> None:
+        # le simulateur décroche sous u_decrochage_v (1,2 V par défaut)
+        _exiger(0.5 <= r["u_min_exploitable_v"] <= 2.5,
+                f"u_min hors plage : {r}")
+        _exiger(len(r["paliers_V_Re"]) >= 4, f"table Miller incomplète : {r}")
 
-    etape("courbe_gain", _courbe_gain, timeout=900.0)
+    def _iso(r: dict) -> None:
+        paliers = r["paliers_plage_haute"]
+        _exiger(len(paliers) >= 4, f"table ISO incomplète : {r}")
+        # le simulateur est linéaire et le palier saturé est exclu : la
+        # table doit être strictement croissante
+        _exiger(all(a[1] < b[1] for a, b in zip(paliers, paliers[1:])),
+                f"table ISO non monotone : {paliers}")
+
+    etape("re_mapping_miller", _miller, timeout=900.0)
+    etape("re_mapping_iso", _iso, timeout=900.0)
     etape("indiciel",
           lambda r: _exiger(0.3 < r["tau_s"] < 10.0,
                             f"dépouillement indiciel : {r}"))

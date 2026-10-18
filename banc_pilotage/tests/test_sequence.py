@@ -157,3 +157,20 @@ def test_consigne_fixe_annule_la_sequence(pilote):
 def test_sequence_utilise_la_reference(pilote):
     pilote.demarrer_sequence(PROFIL, "veine")
     assert pilote.reference == "veine"
+
+
+def test_virgule_separateur_et_decimale_refusee(tmp_path):
+    """« 10,5,3000 » était lu en silence t = 10 s, Re = 5."""
+    f = tmp_path / "s.csv"
+    f.write_text("0,5,3000\n10,5,4000\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="ambigu"):
+        charger_sequence_csv(f)
+
+
+def test_seule_la_premiere_ligne_peut_etre_un_en_tete(tmp_path):
+    """Une faute de frappe sur la première ligne de DONNÉES après l'en-tête
+    était ignorée comme un second en-tête, et le profil commençait plus tard."""
+    f = tmp_path / "s.csv"
+    f.write_text("temps;Re\n0;3O00\n10;4000\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="ligne 2"):
+        charger_sequence_csv(f)

@@ -1,7 +1,10 @@
+# Versions encadrées : l'API de pymodbus a changé plusieurs fois au fil des
+# 3.x (arguments nommés des lectures/écritures). Validé avec PySide6 6.12,
+# pyqtgraph 0.14, pymodbus 3.16, pytest 9.1.
 # IHM
-PySide6
-pyqtgraph
+PySide6>=6.5,<7
+pyqtgraph>=0.13,<0.15
 # Communication Modbus TCP (inutile en mode --simulation)
-pymodbus
+pymodbus>=3.6,<4
 # Développement / tests
-pytest
+pytest>=7

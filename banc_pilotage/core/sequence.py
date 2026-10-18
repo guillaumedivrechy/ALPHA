@@ -22,6 +22,7 @@ def charger_sequence_csv(chemin) -> list[tuple[float, float]]:
     Lève ValueError avec un message en clair si le fichier est invalide."""
     lignes = Path(chemin).read_text(encoding="utf-8-sig").splitlines()
     points: list[tuple[float, float]] = []
+    premiere = True                          # seule ligne pouvant être un en-tête
     for num, brut in enumerate(lignes, start=1):
         ligne = brut.strip()
         if not ligne or ligne.startswith("#"):
@@ -31,7 +32,15 @@ def charger_sequence_csv(chemin) -> list[tuple[float, float]]:
                 champs = [c.strip() for c in ligne.split(sep) if c.strip()]
                 break
         else:
+            sep = None
             champs = [ligne]
+        en_tete_possible, premiere = premiere, False
+        if sep == "," and len(champs) > 2:
+            # « 10,5,3000 » : 10,5 s puis 3000, ou 10 s puis 5 ? Ambigu avec
+            # la virgule décimale — lu auparavant, en silence, t=10 et Re=5
+            raise ValueError(
+                f"ligne {num} : séparateur « , » ambigu avec la virgule "
+                "décimale — séparer les colonnes par « ; » ou une tabulation")
         if len(champs) < 2:
             raise ValueError(
                 f"ligne {num} : 2 colonnes attendues (temps [s] ; Re cible)")
@@ -39,7 +48,7 @@ def charger_sequence_csv(chemin) -> list[tuple[float, float]]:
             t = float(champs[0].replace(",", "."))
             re = float(champs[1].replace(",", "."))
         except ValueError:
-            if not points:
+            if en_tete_possible:
                 continue                     # ligne d'en-tête
             raise ValueError(
                 f"ligne {num} : valeurs non numériques (« {ligne} »)") \

@@ -26,12 +26,23 @@ core/
                        reproduisent les classeurs Excel, NE PAS "corriger"
                        une formule sans re-valider contre le README
   fluide.py            rho, mu de l'air (gaz parfait, Sutherland)
+  air_humide.py        propriétés de l'air humide (si humidite_relative > 0)
   banc.py              consigne Re <-> qm, sélection diaphragme
   regulation.py        PI (anti-windup, rampe, bande morte)
+  etat_vannes.py       décodage des fins de course (butée -> diaphragme
+                       via modbus.positions_vanne_3voies)
+  gestion_modes.py     mode cible / effectif (normal_high, normal_low,
+                       pdc_control) — seuils fournis par le Banc
+  commandes_vannes.py  ordres TOR pour rejoindre un mode
+  table_gains_pdc.py   interpolation de la table PdC (% d'ouverture <-> Re)
   sequence.py          chargement/validation des profils CSV (mode séquence)
   pilote.py            boucle temps réel (thread), manœuvres de vannes,
-                       suivi de séquence, feed-forward appris (etat_banc.json)
+                       suivi de séquence, feed-forward appris
   apprentissage.py     séquences de caractérisation (thread dédié)
+  gestionnaire_apprentissages.py  apprentissages/*.json (+ etat_banc.json)
+  journal.py           journal CSV des essais
+  logger_regulation.py log de diagnostic (journal.diagnostic_regulation)
+  fichiers.py          écriture JSON atomique (config, état, apprentissages)
 io_banc/
   wago.py              EntreesSorties (interface) + WagoModbus
   simulateur.py        banc virtuel (mêmes équations)
@@ -48,17 +59,26 @@ tests/                 pytest — sans matériel ni Qt
    `Pilote`** (`commander_diaphragme`, `commander_bypass`,
    `commander_vanne_perte_charge`, `arreter_regulation`…) — jamais
    d'écriture directe `es.*` depuis l'IHM. Le client pymodbus est protégé
-   par un verrou interne à `WagoModbus`.
+   par un verrou interne à `WagoModbus`. Seule exception : les séquences
+   d'apprentissage manœuvrent les vannes en direct pour chronométrer leurs
+   courses (maintien TOR de la boucle suspendu) ; le ventilateur, lui, ne
+   passe que par `Apprentissage._variateur`, qui refuse toute relance après
+   un arrêt.
 3. **Sécurité** : toute nouvelle branche de la boucle doit préserver les
-   replis sûrs (variateur 0 V + RUN off sur défaut, chien de garde des
-   vannes). `arreter_regulation()` doit rester un arrêt TOTAL (régulation
-   ET manuel).
+   replis sûrs : tout défaut passe par `Pilote._repli_sur()` (variateur
+   0 V, RUN off, régulation ET manuel ET séquence coupés, latché), chien de
+   garde par vanne. `arreter_regulation()` doit rester un arrêt TOTAL
+   (régulation ET manuel ; il interrompt aussi les apprentissages).
 4. **Config, pas de constantes en dur** : adresses Modbus, géométries,
    gains, temps de course → `config.json`.
 5. **Moteur de calcul verrouillé par les tests** : `python -m pytest tests/`
    doit passer avant tout commit touchant `core/`.
 6. Clés commençant par `_` dans `config.json` = commentaires : toute
    itération générique sur la config doit les ignorer.
+7. **Fichiers** : toute écriture de config/état/apprentissage passe par
+   `core.fichiers.ecrire_json_atomique`. Les chemins de données sont sous
+   `core.pilote.RACINE`, que les tests redirigent vers un dossier temporaire
+   (`tests/conftest.py`) : un test n'écrit jamais dans les sources.
 
 ## Commandes
 

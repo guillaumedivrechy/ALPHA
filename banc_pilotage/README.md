@@ -15,7 +15,7 @@ deux fichiers** (qm, Re, C, ε, Y1).
 ## Principe de fonctionnement
 
 1. L'opérateur saisit le **Reynolds cible** (référence au choix : conduite
-   Ø81,4 mm ou veine d'essai) et démarre la régulation.
+   Ø76,6 mm ou veine d'essai) et démarre la régulation.
 2. Le logiciel convertit la consigne en débit massique visé, en déduit le
    **Re conduite attendu**, et commande la **vanne TOR 3 voies** vers le bon
    diaphragme : Miller si Re < 5000, ISO sinon (hystérésis ±500 contre les
@@ -43,8 +43,10 @@ deux fichiers** (qm, Re, C, ε, Y1).
    500 Pa. Cette bascule est **matérielle** et transparente pour le
    logiciel — la sortie reste 0-10 V = 0-500 Pa. La voie **ΔP ISO**
    (débits plus élevés, ΔP plus grands) n'a que le capteur 500 Pa.
-5. ρ et μ de l'air sont **recalculés en continu** (gaz parfait + Sutherland)
-   à partir de P_amont et de la PT100 — plus précis que les tables figées
+5. ρ et μ de l'air sont **recalculés en continu** à partir de P_amont et de
+   la PT100 : gaz parfait + Sutherland pour l'air sec, formules d'air humide
+   si `fluide.humidite_relative` > 0 (50 % par défaut, valeur fixe : le banc
+   n'a pas d'hygromètre) — plus précis que les tables figées
    des classeurs. Des valeurs forcées restent possibles (`config.json`).
 
 ## Installation
@@ -91,10 +93,16 @@ fixe interrompent la séquence.
 |---|---|
 | `diaphragme_iso` / `diaphragme_miller` | D, d à 20 °C, coefficients de dilatation, formule de C (RHG/Stolz) |
 | `veine` | **à renseigner** : section [m²] et longueur caractéristique [m] pour le Re veine |
-| `fluide` | γ, et valeurs forcées ρ/μ optionnelles |
-| `selection_diaphragme` | seuil Re = 5000 et hystérésis |
-| `regulation` | période, gains PI, rampe du variateur, tolérance de convergence |
-| `modbus` | IP du coupleur et **mapping des voies** |
+| `fluide` | γ, Sutherland, humidité relative, valeurs forcées ρ/μ optionnelles |
+| `zero_capteurs` | offsets de zéro des capteurs ΔP (apprentissage « zéro capteurs ») |
+| `selection_diaphragme` | seuil Re = 5000 et hystérésis (± hystérésis autour du seuil) |
+| `actionneurs` | temps de course des vannes (chiens de garde), butées de la recopie PdC |
+| `regulation` | période, gains, rampe, tolérance, saturation ΔP (< 1), bornes PT100 |
+| `modbus` | IP du coupleur, **mapping des voies**, diaphragme de chaque butée 3 voies |
+| `strategie_bas_re` | mode PdC (très bas Re) : activation, seuil, u_min, gains |
+| `variateur` | fréquence max (affichage), tolérance de suivi de la recopie AM |
+| `journal` | journal CSV des essais ; log de diagnostic de la boucle (désactivé) |
+| `apprentissage` | paramètres des séquences de caractérisation |
 | `simulation` | paramètres du banc simulé |
 
 ### Mapping Modbus Wago 750-362
@@ -102,14 +110,22 @@ fixe interrompent la séquence.
 L'image process du coupleur dépend de l'**ordre physique des modules** sur
 le nœud. Les adresses par défaut de `config.json` supposent :
 
-- entrées analogiques (FC4) : ΔP Miller (mot 0), P_amont (mot 2), ΔP ISO
-  (mot 4) — chacune une sortie unique 0-10 V = 0-500 Pa ; les voies ΔP
-  Miller et P_amont sont des capteurs maître/esclave 50+500 Pa (bascule
-  matérielle interne, cf. § Principe 4). Puis recopie vanne PdC et module
-  RTD PT100 (750-461, valeur en 0,1 °C) ;
-- sorties analogiques (FC6/16, mots 0…) : variateur, vanne perte de charge ;
-- sorties TOR (coils à partir de 512) : vanne 3 voies (ON = ISO),
-  vanne bypass.
+- entrées analogiques 750-497 (FC4, mots 0…) : recopie vanne PdC (0),
+  ΔP ISO (1), ΔP Miller (2), P_amont (3), recopie AM du variateur (4) — les
+  voies ΔP et P_amont en 0-10 V = 0-500 Pa ; ΔP Miller et P_amont sont des
+  capteurs maître/esclave 50+500 Pa (bascule matérielle, cf. § Principe 4) ;
+- PT100 sur module RTD 750-450 (mot 16, valeur en 0,1 °C) ;
+- entrées TOR 750-1405 (FC2) : fins de course bypass, PdC, vanne 3 voies
+  (0°/180°/90°), défaut variateur (contact NF, lecture inversée), défauts
+  actionneurs ;
+- sorties analogiques 750-597 (FC6/16) : vanne perte de charge (0),
+  variateur (1) ;
+- relais 750-515 (FC5, coils 0…3) : ordre 0° et ordre 90° de la vanne 3
+  voies, bypass, RUN du variateur.
+
+Le diaphragme alimenté à chaque butée de la vanne 3 voies est donné par
+`modbus.positions_vanne_3voies` (contrôle de câblage + « Appliquer » le
+corrigent si la plomberie est croisée).
 
 **Vérifiez avec WAGO I/O CHECK** et ajustez les adresses dans
 `config.json` — aucun code à modifier. Échelle analogique : 0-10 V ↔
@@ -117,12 +133,23 @@ le nœud. Les adresses par défaut de `config.json` supposent :
 
 ## Sécurités intégrées
 
-- Perte de communication Modbus → variateur forcé à 0 V, alerte à l'IHM.
-- Limitation de rampe du variateur (0,5 V/s par défaut).
-- Anti-windup du PI, bande morte paramétrable.
-- Fermeture de l'application → variateur remis à 0.
-- Bouton « ARRÊT VARIATEUR » → coupe régulation **et** mode manuel
-  (tension 0 V, ordre RUN retiré).
+- Tout défaut (communication Modbus, PT100, pression, ΔP, variateur,
+  vanne, erreur interne de la boucle) → repli sûr **latché** : variateur
+  0 V, ordre RUN retiré, régulation, séquence **et mode manuel** coupés.
+  Rien ne redémarre seul quand le défaut disparaît.
+- Chien de garde par vanne (1,5 × temps de course de `actionneurs`), et
+  délai global d'attente des vannes dérivé des mêmes temps de course.
+- Vanne 3 voies sans butée franche hors manœuvre (fil coupé, 180°) →
+  repli sûr.
+- Saturation du capteur ΔP (`saturation_dp_relative` × pleine échelle,
+  borné sous 1 car la lecture est écrêtée) → commande plafonnée ; consigne
+  hors plage bornée au maximum mesurable.
+- Limitation de rampe du variateur (`regulation.rampe_v_par_s`), anti-windup,
+  bande morte paramétrable.
+- Bouton « ARRÊT VARIATEUR » → coupe régulation, mode manuel **et** toute
+  séquence d'apprentissage (qui ne relance jamais le ventilateur).
+- Fermeture de l'application → variateur à 0 V, puis vannes en position de
+  repos (Miller, bypass et PdC ouverts).
 
 > ⚠️ Si le lien Modbus lui-même est rompu, le logiciel ne peut plus écrire
 > 0 V : la mise en sécurité repose alors sur le paramétrage du variateur
@@ -138,10 +165,20 @@ banc_pilotage/
 ├── core/
 │   ├── diaphragmes.py       équations ISO 5167 & Miller (direct + inverse)
 │   ├── fluide.py            ρ, μ de l'air (gaz parfait, Sutherland)
+│   ├── air_humide.py        propriétés de l'air humide
 │   ├── banc.py              consigne Re ↔ qm, sélection diaphragme, gammes
 │   ├── regulation.py        feed-forward + correction PI, PI vanne PdC
+│   ├── etat_vannes.py       décodage des fins de course des vannes
+│   ├── gestion_modes.py     modes normal_high / normal_low / pdc_control
+│   ├── commandes_vannes.py  ordres TOR pour rejoindre un mode
+│   ├── table_gains_pdc.py   interpolation de la table PdC (% ↔ Re)
 │   ├── sequence.py          chargement des profils CSV (mode séquence)
-│   └── pilote.py            boucle temps réel, feed-forward adaptatif
+│   ├── pilote.py            boucle temps réel, feed-forward adaptatif
+│   ├── apprentissage.py     séquences de caractérisation (thread dédié)
+│   ├── gestionnaire_apprentissages.py  apprentissages/*.json
+│   ├── journal.py           journal CSV des essais
+│   ├── logger_regulation.py log CSV de diagnostic de la boucle
+│   └── fichiers.py          écriture JSON atomique
 ├── io_banc/
 │   ├── wago.py              client Modbus TCP (mapping configurable)
 │   └── simulateur.py        banc virtuel pour tests
@@ -183,7 +220,7 @@ python -m pytest tests/ -q
 | **Re** | Nombre de Reynolds | - | Critère d'écoulement (Re = ρ·v·Lc/μ). Re > 5000 → diaphragme ISO ; Re < 5000 → Miller |
 | **ΔP** (dP) | Différence de pression | Pa | Pression différentielle au diaphragme, mesurée par capteurs FCO432 |
 | **P1_abs** | Pression absolue amont | Pa | P1_abs = P_atm + P_amont (gauge). Nécessaire pour calcul ρ (gaz parfait) |
-| **T** | Température | °C | Mesurée par PT100 (module 750-461), utilisée pour ρ et μ (Sutherland) |
+| **T** | Température | °C | Mesurée par PT100 (module 750-450), utilisée pour ρ et μ |
 | **ρ** (rho) | Masse volumique | kg/m³ | ρ = P/(R·T) pour l'air (gaz parfait), recalculé en continu |
 | **μ** (mu) | Viscosité dynamique | Pa·s | Loi de Sutherland (fonction de T), utilisée pour Re et calculs diaphragmes |
 | **ν** (nu) | Viscosité cinématique | m²/s | ν = μ / ρ |
@@ -196,11 +233,11 @@ python -m pytest tests/ -q
 
 | Terme | Description |
 |-------|-------------|
-| **Diaphragme ISO** | Diaphragme normalisé ISO 5167-1 (NFX 10-102), d=49,6 mm, pour Re > 5000 (vanne 3V à 0°) |
-| **Diaphragme Miller** | Diaphragme corrélation Miller, d=9,96 mm, pour Re < 5000 (vanne 3V à 90°) |
+| **Diaphragme ISO** | Diaphragme normalisé ISO 5167-1 (NFX 10-102), d=41,018 mm, pour Re > 5000 (vanne 3V à 0° par défaut) |
+| **Diaphragme Miller** | Diaphragme corrélation Miller, d=21,113 mm, pour Re < 5000 (vanne 3V à 90° par défaut) |
 | **Vanne 3 voies** | Vanne TOR (carte GF3) : 0° → diaphragme ISO ; 90° → diaphragme Miller |
 | **Vanne bypass** | Vanne TOR : ouverte pendant manœuvre 3 voies pour éviter surpression |
-| **Re conduite** | Reynolds calculé dans la conduite Ø81,4 mm (critère de sélection diaphragme) |
+| **Re conduite** | Reynolds calculé dans la conduite Ø76,6 mm (critère de sélection diaphragme) |
 | **Re veine** | Reynolds dans la veine d'essai rectangulaire (consigne utilisateur possible) |
 | **Maître/esclave** | Montage de 2 capteurs (50 Pa + 500 Pa) avec bascule automatique pour précision bas ΔP |
 | **Hystérésis** | Marge de ±500 Re autour du seuil 5000 pour éviter commutations répétées |
@@ -217,10 +254,11 @@ python -m pytest tests/ -q
 
 | Module | Fonction | Échelle |
 |--------|----------|---------|
-| **750-468** | 4 entrées analogiques 0-10 V | 0…32767 (0x7FFF) pour 10 V |
-| **750-461** | 2 RTD PT100 (3 fils) | Valeur signée en 0,1 °C (ex: 235 = 23,5 °C) |
-| **750-559** | 4 sorties analogiques 0-10 V | 0…32767 pour 10 V |
-| **750-530** | 8 sorties TOR relais (coils) | Adressage à partir de 512 (config dépend ordre modules) |
+| **750-497** | 8 entrées analogiques 0-10 V | 0…32767 (0x7FFF) pour 10 V |
+| **750-450** | 4 entrées RTD (PT100 3 fils) | Valeur signée en 0,1 °C (ex: 235 = 23,5 °C) |
+| **750-597** | 8 sorties analogiques 0-10 V | 0…32767 pour 10 V |
+| **750-515** | 4 relais NO libres de potentiel | coils 0…3 (vanne 3 voies 0°/90°, bypass, RUN) |
+| **750-1405** | 16 entrées TOR 24 V | fins de course, défauts variateur et actionneurs |
 | **FCO432** | Capteur différentiel ±500 Pa | Sortie 0-10 V = 0-500 Pa (ou ±250 Pa selon calibration) |
 | **GF3** | Carte motorisation 3 voies | 2 ordres TOR (F=0°, I=90°), contact NF fin de course FC3 |
 
@@ -241,7 +279,7 @@ python -m pytest tests/ -q
 | Terme | Signification |
 |-------|---------------|
 | **Repli sûr** | Variateur 0 V + RUN off sur toute erreur (Modbus, capteur, calcul) |
-| **Chien de garde vannes** | Timeout 45s sur manœuvre 3 voies, 15s sur bypass (alarme si FC non atteint) |
+| **Chien de garde vannes** | Par vanne : 1,5 × temps de course (`actionneurs`) ; défaut vanne + repli sûr si la fin de course n'arrive pas |
 | **Trim saturé** | Alarme si abs(intégrale) > trim_max-1e-6 pendant >5s → table de gains obsolète |
 | **Consigne limitée** | ΔP attendu > plage capteur → Re plafonné au maximum mesurable |
 | **Défaut capteur** | P_abs hors 800-1200 mbar → arrêt régulation avec message explicite |
@@ -249,8 +287,6 @@ python -m pytest tests/ -q
 
 ## Documentation complémentaire
 
-- **TUNING_GUIDE.md** : Réglage des gains PI (kp, ki), paramètres avancés, diagnostic
-- **RAPPORT_AUDIT_COMPLET.md** : Analyse architecture, problèmes identifiés, recommandations
-- **CORRECTIONS_APPLIQUEES.md** : Historique des correctifs (Phases 1 et 2)
 - **CLAUDE.md** : Contexte projet pour Claude Code (règles architecture, threading)
-- **etat_banc.json** : Tables de gains feed-forward apprises (RE mapping ISO/Miller, freq_min)
+- **apprentissages/*.json** : tables de gains apprises (Re mapping ISO/Miller, PdC), écrites par « Appliquer »
+- **etat_banc.json** : état de session (gain Re/V appris en fonctionnement), écrit à l'arrêt

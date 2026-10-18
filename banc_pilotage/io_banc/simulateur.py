@@ -123,7 +123,6 @@ class SimulateurBanc(EntreesSorties):
         self._qv = 0.0
 
         # vanne 3 voies : 3 positions (0°=ISO, 90°=Miller, 180°=fermeture)
-        # t_course_3voies_s = demi-course (0°→90° ou 90°→180°)
         # Position repos sécurité (cohérent avec pilote._position_repos) : Miller (90°)
         # IMPORTANT : Utiliser les temps de course de la config ACTIONNEURS (cohérent avec pilote)
         act_cfg = cfg_actionneurs or {}

@@ -2,23 +2,28 @@
 # -*- coding: utf-8 -*-
 """Test fonctionnel : Régulation Re=10000 en mode ISO."""
 
-import sys
 import json
+import sys
+import tempfile
 import time
 from pathlib import Path
-sys.path.insert(0, 'banc_pilotage')
+RACINE = Path(__file__).resolve().parent / "banc_pilotage"
+sys.path.insert(0, str(RACINE))
 
+import core.pilote
 from core.pilote import Pilote
 from core.banc import Banc
 from io_banc.simulateur import SimulateurBanc
 
-CFG = json.loads((Path("banc_pilotage") / "config.json").read_text(encoding="utf-8"))
+CFG = json.loads((RACINE / "config.json").read_text(encoding="utf-8"))
 
 def main():
     print("\n" + "="*80)
     print("TEST RÉGULATION Re=10000")
     print("="*80 + "\n")
 
+    # journaux et état de session hors des sources
+    core.pilote.RACINE = Path(tempfile.mkdtemp(prefix="banc_re10000_"))
     banc = Banc(CFG)
     sim = SimulateurBanc(banc, CFG.get("simulation"), CFG.get("modbus"), CFG.get("actionneurs"))
     pilote = Pilote(banc, sim, CFG)
@@ -36,14 +41,17 @@ def main():
     print("4. Attente 30s pour stabilisation...\n")
     time.sleep(30)
 
-    etat = pilote.etat
+    # instantané : pilote.arreter() remet les vannes en position de repos et
+    # modifie l'état publié (le dict vivant faisait lire « miller » ici)
+    etat = dict(pilote.etat)
+    run = pilote._run_actif
 
     print("RÉSULTATS :")
     print(f"  Régulation active    : {etat.get('regulation', False)}")
     print(f"  Re cible             : {etat.get('re_cible', 0):.0f}")
-    print(f"  Re mesuré            : {etat.get('re', 0):.0f}")
+    print(f"  Re mesuré            : {etat.get('re_mesure') or 0:.0f}")
     print(f"  Tension variateur    : {etat.get('u_variateur', 0):.3f} V")
-    print(f"  Variateur RUN        : {etat.get('variateur_run', False)}")
+    print(f"  Variateur RUN        : {run}")
     print(f"  Diaphragme           : {etat.get('diaphragme', '?')}")
     print(f"  Bypass               : {etat.get('bypass', '?')}")
     print(f"  Vanne PDC            : {etat.get('vanne_pdc', '?')}")

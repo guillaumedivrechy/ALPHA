@@ -192,3 +192,32 @@ def test_image_process_distingue_un_contact_inverse():
         adresse = CFG_MODBUS["entrees_tor"][nom]["adresse"]
         assert es.image_process["bits"][adresse] is True   # contact ferme
         assert mesures[nom] is False                       # donc pas actif
+
+
+def test_reaffirmation_de_l_ordre_3_voies_sans_pause(wago, monkeypatch):
+    """La boucle réaffirme l'ordre de la vanne 3 voies à chaque cycle : la
+    pause de 50 ms (relâcher puis coller) n'est due qu'à un changement
+    d'ordre. Systématique, elle prenait le quart de la période de 0,2 s."""
+    import io_banc.wago as module
+    ecrites = []
+
+    class Client(_FauxClient):
+        def write_coil(self, address, value):
+            ecrites.append((address, value))
+            return _FauxResultat()
+
+    wago.client = Client()
+    pauses = []
+    monkeypatch.setattr(module.time, "sleep", lambda s: pauses.append(s))
+    wago.ecrire_vanne_diaphragme(True)               # premier ordre : pause
+    assert pauses == [0.05]
+    for _ in range(5):                               # réaffirmations : aucune
+        wago.ecrire_vanne_diaphragme(True)
+    assert pauses == [0.05]
+    wago.ecrire_vanne_diaphragme(False)              # changement : pause
+    assert pauses == [0.05, 0.05]
+    s = CFG_MODBUS["sorties"]
+    a0 = s["vanne_diaphragme_0deg"]["adresse"]
+    a90 = s["vanne_diaphragme_90deg"]["adresse"]
+    # relâcher avant de coller, jamais les deux ordres ensemble
+    assert ecrites[-2:] == [(a0, False), (a90, True)]
