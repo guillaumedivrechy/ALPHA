@@ -1004,12 +1004,14 @@ def test_miller_ne_fige_pas_le_variateur_quand_le_re_mesure_est_bas():
     assert pilote.etat["u_variateur"] > pilote.u_min_ventilateur
 
 
-def test_feed_forward_pdc_depuis_la_table_apprise_en_pourcent():
+def test_feed_forward_pdc_depuis_la_table_apprise_en_pourcent(monkeypatch):
     """La table PdC est apprise en % d'ouverture (variateur à u_min). Le
     feed-forward doit la convertir en volts avec les butées calibrées.
     RÉGRESSION : AttributeError (v_pour_re absent de TableGains) qui tuait le
     thread, et pré-positionnement lu comme des volts bornés à 10, donc
     plafonné à 1 V (~10 % d'ouverture)."""
+    horloge = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: horloge[0])
     pilote, es = _pilote_en_position("fc_3voies_90")
     pilote.seuil_bas_re = 2000.0
     pilote.table_gains_bas_re = TABLE_MILLER        # Re mapping Miller fait
@@ -1028,11 +1030,16 @@ def test_feed_forward_pdc_depuis_la_table_apprise_en_pourcent():
     assert pilote.etat["phase_regulation"] == "positionnement PdC avant ventilateur"
     assert pilote._pdc_consigne == pytest.approx(v_attendu, abs=0.2)
     assert pilote.etat["u_variateur"] == 0.0
-    es.mesures.update(pdc_recopie=pilote._pdc_consigne, fc_pdc_ouvert=False)
-    pilote._cycle()                                  # vanne arrivée
+    es.mesures.update(fc_pdc_ouvert=False)           # la vanne quitte la butée
+    for _ in range(int(pilote.t_vanne_pdc_course / pilote.periode)):
+        horloge[0] += pilote.periode                 # course au temps nominal
+        pilote._cycle()
+        if pilote.etat["phase_regulation"] != "positionnement PdC avant ventilateur":
+            break
     assert pilote.etat["phase_regulation"] == "FF+PI vanne PdC"
     assert pilote._diag["v_ff_pdc"] == pytest.approx(v_attendu, abs=1e-3)
     for _ in range(5):                               # variateur sur sa rampe
+        horloge[0] += pilote.periode
         pilote._cycle()
     assert pilote.etat["u_variateur"] == pytest.approx(pilote._u_pdc())
 

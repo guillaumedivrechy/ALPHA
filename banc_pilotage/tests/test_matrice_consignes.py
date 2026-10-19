@@ -299,3 +299,26 @@ def test_attente_pdc_interrompue_ne_compte_pas(monkeypatch, tmp_path):
     b.consigne(300.0, "veine")
     assert b.jusqu_a_convergence(60) is not None
     assert not b.violations, b.violations[:3]
+
+
+@pytest.mark.parametrize("depart,re", [("repos", 300.0), ("Miller", 600.0)])
+def test_mode_pdc_avec_recopie_a_une_autre_echelle(monkeypatch, tmp_path, depart, re):
+    """Carte P6 dont la recopie ne vaut pas la commande (2,4-9,2 V pour
+    0-10 V commandés, valeurs de config.json) : l'arrivée de la vanne est
+    jugée sur le modèle de course et les fins de course, pas sur l'égalité
+    recopie = commande (avant : ventilateur jamais lancé, faux défaut vanne
+    PdC, ou PI figé sur la table sans converger)."""
+    vmin, vmax = 2.389, 9.153
+    b = _banc(monkeypatch, tmp_path, depart)
+    orig = b.sim.lire_mesures
+
+    def lire():
+        m = orig()
+        m["pdc_recopie"] = vmin + b.sim._pdc_position / 10.0 * (vmax - vmin)
+        return m
+    b.sim.lire_mesures = lire
+    b.p.pdc_recopie_min, b.p.pdc_recopie_max = vmin, vmax
+    b.consigne(re, "veine")
+    assert b.jusqu_a_convergence(80.0) is not None
+    assert not b.p.etat.get("arret_securite")
+    assert b.p.etat["re_moyen"] == pytest.approx(re, rel=0.01)

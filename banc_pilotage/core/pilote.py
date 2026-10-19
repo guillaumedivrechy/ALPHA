@@ -486,6 +486,12 @@ class Pilote:
         # sert de diagnostic : divergence avec la recopie = défaut actionneur.
         self._pdc_consigne = 0.0
         self._pdc_position_estimee = 0.0
+        # position de la PdC en échelle de COMMANDE (0-10 V), par modèle de
+        # course à la vitesse apprise, recalé sur ses seules fins de course.
+        # Indépendant de l'échelle de la recopie (2,4-9,2 V sur le banc si la
+        # carte P6 n'est pas réglée sur 0-10 V) : c'est lui qui dit si la
+        # vanne est arrivée (attente du ventilateur, tenue sur la table).
+        self._pdc_position_modele = 10.0
         self._pdc_cycles_divergents = 0
         self._pdc_recopie_vue = False      # estimée pas encore calée sur la recopie
         self._t_dernier_cycle = None
@@ -1736,6 +1742,15 @@ class Pilote:
             ecart_pdc = self._pdc_consigne - self._pdc_position_estimee
             pas = min(abs(ecart_pdc), vitesse * dt)
             self._pdc_position_estimee += pas if ecart_pdc > 0 else -pas
+            ecart_m = self._pdc_consigne - self._pdc_position_modele
+            pas_m = min(abs(ecart_m), vitesse * dt)
+            self._pdc_position_modele += pas_m if ecart_m > 0 else -pas_m
+        if mesures.get("fc_pdc_ouvert") and not mesures.get("fc_pdc_ferme"):
+            self._pdc_position_modele = max(self._pdc_position_modele,
+                                            10.0 - self.ecart_course_pdc_v / 2)
+        elif mesures.get("fc_pdc_ferme") and not mesures.get("fc_pdc_ouvert"):
+            self._pdc_position_modele = min(self._pdc_position_modele,
+                                            self.ecart_course_pdc_v / 2)
         self._t_dernier_cycle = maintenant
 
         pdc_recopie = mesures.get("pdc_recopie")
@@ -2285,7 +2300,7 @@ class Pilote:
                 # feed-forward de la table PdC (Re conduite) : la sortie du PI
                 # le contient (intégrale pré-chargée par _preparer_pi)
                 v_ff_pdc = self._pdc_ff_v(re_vise * self._k_conversion)
-                en_course = abs(self._pdc_consigne - self._pdc_position_estimee) \
+                en_course = abs(self._pdc_consigne - self._pdc_position_modele) \
                     > self.ecart_course_pdc_v
                 if v_ff_pdc is not None and en_course:
                     # vanne en course vers sa commande (≈ 16 s pleine course,
@@ -2306,7 +2321,7 @@ class Pilote:
                 # les vannes TOR sur leurs fins de course. Lancé vanne encore
                 # ouverte, il faisait dépasser la consigne de ~36 %. Ventilateur
                 # déjà en marche : tension tenue pendant la course (inchangé).
-                if u_prec <= 0.0 and abs(pdc_v - self._pdc_position_estimee) \
+                if u_prec <= 0.0 and abs(pdc_v - self._pdc_position_modele) \
                         > self.ecart_course_pdc_v:
                     self._pdc_attente_depuis = attente_pdc or maintenant
                     if maintenant - self._pdc_attente_depuis > \
@@ -2316,7 +2331,7 @@ class Pilote:
                         self.etat.update({
                             "defaut_vanne": (
                                 f"vanne PdC : position {pdc_v:.2f} V non atteinte "
-                                f"(lue {self._pdc_position_estimee:.2f} V) — "
+                                f"(modèle {self._pdc_position_modele:.2f} V) — "
                                 "vanne bloquée ou recopie, vérifier puis relancer"),
                             "regulation": False, "u_variateur": 0.0,
                             "convergee": False,
@@ -2344,11 +2359,16 @@ class Pilote:
                 # butée PHYSIQUE : commande en butée ET vanne arrivée (position
                 # estimée, recalée sur la recopie) ; la commande seule y est
                 # dès le début de la course, d'où une fausse alarme
-                pos = self._pdc_position_estimee
-                ouverte = pdc_v >= 10.0 - 1e-6 \
-                    and pos >= 10.0 - self.ecart_course_pdc_v \
+                # fins de course de la PdC (indépendantes de l'échelle de la
+                # recopie) ; à défaut, modèle de course
+                pos = self._pdc_position_modele
+                fc_o = mesures.get("fc_pdc_ouvert")
+                fc_f = mesures.get("fc_pdc_ferme")
+                en_butee_o = fc_o if fc_o is not None else pos >= 10.0 - self.ecart_course_pdc_v
+                en_butee_f = fc_f if fc_f is not None else pos <= self.ecart_course_pdc_v
+                ouverte = pdc_v >= 10.0 - 1e-6 and en_butee_o \
                     and re_mesure < re_vise * (1.0 - self.tolerance)
-                fermee = pdc_v <= 1e-6 and pos <= self.ecart_course_pdc_v \
+                fermee = pdc_v <= 1e-6 and en_butee_f \
                     and re_mesure > re_vise * (1.0 + self.tolerance)
                 self._cycles_pdc_butee = self._cycles_pdc_butee + 1 \
                     if (ouverte or fermee) and self._pdc_attente_depuis is None \
