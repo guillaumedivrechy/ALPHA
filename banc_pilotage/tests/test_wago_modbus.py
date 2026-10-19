@@ -204,3 +204,26 @@ def test_latence_publiee_dans_la_duree_de_cycle(coupleur, tmp_path, monkeypatch)
     finally:
         coupleur.latence_s = 0.0
         p.arreter()
+
+
+def test_coupleur_muet_cause_publiee_sans_attendre_le_repli(coupleur, tmp_path,
+                                                             monkeypatch):
+    """Câble coupé côté coupleur (connexion ouverte, plus aucune réponse) :
+    arrêt de sécurité après délai × tentatives, cause publiée tout de suite
+    — avant : affichée seulement après les deux écritures de repli, elles
+    aussi bloquées (≈ 8 s sans cause au bandeau)."""
+    p, _ = _pilote(coupleur, tmp_path, monkeypatch)
+    try:
+        time.sleep(0.8)
+        p.mode_manuel_tension(3.0)
+        time.sleep(0.8)
+        coupleur.latence_s = 120.0
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 20 and not p.etat.get("arret_securite"):
+            time.sleep(0.05)
+        assert p.etat.get("arret_securite")
+        time.sleep(0.3)
+        assert "liaison Modbus perdue" in (p.etat.get("arret_motif") or "")
+    finally:
+        coupleur.latence_s = 0.0
+        p.arreter()

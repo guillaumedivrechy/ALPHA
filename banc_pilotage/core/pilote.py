@@ -1154,9 +1154,12 @@ class Pilote:
     @property
     def _manoeuvre(self) -> dict | None:
         """Manœuvre en cours qui finit le plus tard (None si aucune)."""
-        if not self._manoeuvres:
+        # copie : un clic IHM (autre thread) peut ajouter ou retirer une
+        # manœuvre pendant le parcours -> RuntimeError, repli intempestif
+        manoeuvres = list(self._manoeuvres.values())
+        if not manoeuvres:
             return None
-        return max(self._manoeuvres.values(), key=lambda m: m["t_max"])
+        return max(manoeuvres, key=lambda m: m["t_max"])
 
     def _timeout_attente_vannes_s(self) -> float:
         """Délai maximal d'attente des vannes avant régulation : pire cas
@@ -1331,6 +1334,9 @@ class Pilote:
             self.etat.update({"regulation": False, "manuel": False,
                               "convergee": False, "u_variateur": 0.0,
                               "manoeuvre": None, "sequence": None})
+            # cause publiée tout de suite : sur coupleur muet, chaque
+            # écriture de repli ci-dessous bloque délai × tentatives
+            self._memoriser_motif_arret()
             # écritures de repli : AUCUNE exception ne doit sortir d'ici (le
             # thread de la boucle en mourrait, variateur à sa dernière
             # consigne) ; la liaison absente, on retente au cycle suivant
@@ -1795,7 +1801,7 @@ class Pilote:
                 if m["t_fin_gel"] is None:
                     m["t_fin_gel"] = maintenant + self.marge_manoeuvre
                 if maintenant >= m["t_fin_gel"]:
-                    del self._manoeuvres[vanne]
+                    self._manoeuvres.pop(vanne, None)
             elif maintenant > m["t_max"]:
                 # DÉFAUT VANNE : fin de course jamais atteinte -> repli sûr
                 # (variateur 0 V ET ordre RUN retiré, comme sur défaut variateur)
@@ -2681,7 +2687,7 @@ class Pilote:
             if m["angle_attendu"] != self._angle_par_diaphragme[vise_diaph]:
                 # sans entrée en cours, commander_diaphragme ne relance pas de
                 # manœuvre si la vanne n'a pas encore quitté sa butée cible
-                del self._manoeuvres["3voies"]
+                self._manoeuvres.pop("3voies", None)
                 self.commander_diaphragme(vise_diaph)
         elif etat_v.diaphragme in (PositionDiaphragme.ISO, PositionDiaphragme.MILLER) \
                 and etat_v.diaphragme.value != vise_diaph:
