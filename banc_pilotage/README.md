@@ -360,6 +360,10 @@ python -m pytest tests/ -q
 - **MISE_EN_SERVICE.md** : check-list du banc réel (sécurités matérielles,
   E/S, actionneurs, apprentissages, essais de défauts, régulation,
   métrologie) — ce que les tests automatiques ne peuvent pas vérifier
+- **schema.jpg** : schéma du banc (veine, diaphragmes ISO / Miller, vannes,
+  capteurs, ventilateur et variateur)
+- **Calcul_Re_banc.xlsx** : calcul du Re conduite / veine à partir des ΔP,
+  de la P amont et de la PT100, avec les formules du logiciel
 - **CLAUDE.md** : Contexte projet pour Claude Code (règles architecture, threading)
 - **apprentissages/*.json** : tables de gains apprises (Re mapping ISO/Miller, PdC), écrites par « Appliquer »
 - **etat_banc.json** : état de session (gain Re/V appris en fonctionnement), écrit à l'arrêt

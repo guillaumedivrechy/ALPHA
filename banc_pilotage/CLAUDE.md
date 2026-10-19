@@ -2,8 +2,6 @@
 
 > Contexte projet pour Claude Code. Voir `README.md` pour la description
 > fonctionnelle complète.
-> Voir `claude-code-2.1.172-fable-5.md`
-> Voir `code-review.md`
 
 ## Vue d'ensemble
 

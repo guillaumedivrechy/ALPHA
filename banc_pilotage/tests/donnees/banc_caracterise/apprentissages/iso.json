@@ -1,0 +1,40 @@
+{
+  "metadata": {
+    "date": "2026-10-18T17:29:03.768909",
+    "version_logiciel": "2.1.0",
+    "temperature_c": 20.0,
+    "commentaire": "Apprentissage via interface graphique"
+  },
+  "tables": {
+    "table_gains": [
+      [
+        1.5,
+        5718
+      ],
+      [
+        3.0,
+        11424
+      ],
+      [
+        4.5,
+        17239
+      ],
+      [
+        6.0,
+        22979
+      ],
+      [
+        6.5,
+        24966
+      ]
+    ],
+    "regression_iso": {
+      "a": 3848.306358381501,
+      "b": -82.51734104045318,
+      "r2": 0.999983321453971
+    }
+  },
+  "parametres": {
+    "gain_re_par_volt": 3827.57054124702
+  }
+}

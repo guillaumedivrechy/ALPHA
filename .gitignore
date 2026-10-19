@@ -13,5 +13,9 @@ journaux/
 apprentissages/
 regulation_debug.csv
 
+# exception : données du banc caractérisé utilisées par les tests
+!banc_pilotage/tests/donnees/banc_caracterise/etat_banc.json
+!banc_pilotage/tests/donnees/banc_caracterise/apprentissages/
+
 # réglages locaux Claude Code
 **/.claude/settings.local.json
