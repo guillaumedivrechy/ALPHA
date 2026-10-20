@@ -344,7 +344,9 @@ def test_3000_re_veine_depuis_l_iso_passe_en_miller(monkeypatch, tmp_path):
     assert not b.violations, b.violations[:3]
 
 
-@pytest.mark.parametrize("t_c", [20.0, 30.0])
+# capteur Miller borné à 490 Pa (0,99 × 0,99) : garde-fou actif au-dessus de
+# ~21 °C (à 20 °C le Miller mesure jusqu'à ~8 550, au-delà de la bande)
+@pytest.mark.parametrize("t_c", [25.0, 30.0])
 def test_miller_hors_capteur_bascule_en_iso(monkeypatch, tmp_path, t_c):
     """Depuis le Miller, consigne dans la bande d'hystérésis mais au-delà de
     ce que le capteur Miller mesure (ΔP croît avec μ, donc avec T) : ISO,
@@ -386,3 +388,18 @@ def test_changement_de_reference_sans_coup(monkeypatch, tmp_path, de, vers):
         vus.append(b.p.etat["re_conduite"])
     assert max(vus) < 1.05 * re_c and min(vus) > 0.95 * re_c, (min(vus), max(vus))
     assert not b.violations, b.violations[:3]
+
+
+def test_14000_re_veine_a_24_degres(monkeypatch, tmp_path):
+    """Constaté au banc (24 °C) : 14 000 Re veine bornés à ~13 450 alors que
+    le capteur ISO n'était pas saturé (consigne limitée à 0,95 × 0,95 ×
+    500 = 451 Pa). Il en faut ~488 : consigne bornée à 490 Pa (0,99 ×
+    0,99), atteinte sans « consigne limitée »."""
+    b = BancSimule(monkeypatch, tmp_path, cfg_sur={
+        "simulation": {"temperature_c": 24.0}})
+    b.consigne(14000.0, "veine")
+    assert b.jusqu_a_convergence(120) is not None
+    e = b.p.etat
+    assert not e.get("consigne_limitee") and not e.get("dp_sature")
+    assert e["re_moyen"] == pytest.approx(14000.0, rel=0.01)
+    assert 470.0 < e["dp"] < 495.0

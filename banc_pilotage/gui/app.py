@@ -3235,6 +3235,8 @@ class Application(QMainWindow):
              "{:.1f}", None),
             (("regulation","saturation_dp_relative"),  "Seuil ΔP saturé",  "×",
              "{:.2f}", _seuil_saturation),
+            (("regulation","marge_consigne_dp_relative"), "Consigne max (× seuil saturé)", "×",
+             "{:.2f}", _seuil_saturation),
             (("regulation","recul_saturation_v_par_s"),"Recul si saturé", "V/s",
              "{:.2f}", _positif),
         ], col=0, row=7)
