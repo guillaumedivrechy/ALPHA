@@ -250,6 +250,15 @@ class Apprentissage:
 
     # ------------------------------------------------- utilitaire recopie PdC
 
+    def _re_conduite(self) -> float:
+        """Re mesuré en CONDUITE, unité de toutes les tables apprises.
+        Jamais pilote.etat["re_mesure"] : hors régulation, il est publié
+        dans la référence choisie sur l'IHM (veine par défaut), et les
+        tables étaient alors enregistrées en Re veine — 1,87 fois trop bas
+        (constaté au banc : consigne 10 000 Re veine régulée à plus de
+        13 000, feed-forward extrapolé hors table)."""
+        return self.pilote.etat.get("re_conduite") or 0.0
+
     def _attendre_pdc_extreme(self, cible_v: float, timeout: float,
                                statut: str) -> float | None:
         """Attend que la recopie PdC reste dans la zone extrême pendant ~3 s.
@@ -777,7 +786,7 @@ class Apprentissage:
         self._variateur(u)
         série = []
         ok = self._attendre(
-            lambda: (série.append(self.pilote.etat.get("re_mesure") or 0.0)
+            lambda: (série.append(self._re_conduite())
                      or self._stable(série, fenetre, tol)),
             timeout, statut)
         if ok is None:
@@ -844,7 +853,7 @@ class Apprentissage:
                 if self._interrompu():
                     self._statut_annule()
                     return None
-                re_actuel = self.pilote.etat.get("re_mesure") or 0.0
+                re_actuel = self._re_conduite()
                 série.append(re_actuel)
                 # Publier re_mesure en temps réel pour l'IHM
                 self.etat["re_mesure"] = re_actuel
@@ -933,7 +942,7 @@ class Apprentissage:
                 if self._interrompu():
                     self._statut_annule()
                     break
-                re_actuel = self.pilote.etat.get("re_mesure", 0.0)
+                re_actuel = self._re_conduite()
                 re_mesures.append(re_actuel)
                 time.sleep(dt)
 
@@ -999,7 +1008,7 @@ class Apprentissage:
                         if self._interrompu():
                             self._statut_annule()
                             break
-                        re_actuel = self.pilote.etat.get("re_mesure", 0.0)
+                        re_actuel = self._re_conduite()
                         re_mesures.append(re_actuel)
                         time.sleep(dt)
 
@@ -1162,7 +1171,7 @@ class Apprentissage:
                 if self._interrompu():
                     self._statut_annule()
                     return None
-                re_actuel = self.pilote.etat.get("re_mesure") or 0.0
+                re_actuel = self._re_conduite()
                 série.append(re_actuel)
                 # Publier re_mesure en temps réel pour l'IHM
                 self.etat["re_mesure"] = re_actuel
@@ -1276,7 +1285,7 @@ class Apprentissage:
                 if self._interrompu():
                     self._statut_annule()
                     break
-                re_actuel = self.pilote.etat.get("re_mesure", 0.0)
+                re_actuel = self._re_conduite()
                 re_mesures.append(re_actuel)
                 time.sleep(dt)
 
@@ -1328,7 +1337,7 @@ class Apprentissage:
                         if self._interrompu():
                             self._statut_annule()
                             break
-                        re_actuel = self.pilote.etat.get("re_mesure", 0.0)
+                        re_actuel = self._re_conduite()
                         re_mesures.append(re_actuel)
                         time.sleep(dt)
 
@@ -1427,7 +1436,7 @@ class Apprentissage:
                 if self._interrompu():
                     self._statut_annule()
                     return None
-                re_actuel = self.pilote.etat.get("re_mesure") or 0.0
+                re_actuel = self._re_conduite()
                 série.append(re_actuel)
                 # Publier re_mesure en temps réel pour l'IHM
                 self.etat["re_mesure"] = re_actuel
@@ -1608,7 +1617,7 @@ class Apprentissage:
         self._variateur(u1)
         série = []
         ok = self._attendre(
-            lambda: (série.append(self.pilote.etat.get("re_mesure") or 0.0)
+            lambda: (série.append(self._re_conduite())
                      or self._stable(série, fenêtre, 0.02)),
             duree_max, f"stabilisation à U1 = {u1:.1f} V")
         if ok is None:
@@ -1625,7 +1634,7 @@ class Apprentissage:
                 return
             e = self.pilote.etat
             points.append((time.monotonic() - t0,
-                           e.get("re_mesure") or 0.0, e.get("dp") or 0.0))
+                           e.get("re_conduite") or 0.0, e.get("dp") or 0.0))
             res_série = [p[1] for p in points]
             if len(points) > 2 * fenêtre and \
                     self._stable(res_série, fenêtre, 0.02):

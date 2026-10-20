@@ -293,3 +293,31 @@ def test_table_iso_non_monotone_appliquee_sauvegardee_et_relue(tmp_path,
     relu = Pilote(Banc(cfg), StubES(), cfg)
     assert relu.table_gains.valide_ff()
     assert relu.table_gains.u_pour_re_ff(16800.0) == pytest.approx(5.25)
+
+
+@pytest.mark.parametrize("reference", ["veine", "conduite"])
+def test_tables_apprises_en_re_conduite_quelle_que_soit_la_reference(
+        monkeypatch, tmp_path, reference):
+    """Constaté au banc : IHM en référence veine (défaut), le Re mapping
+    lisait pilote.etat["re_mesure"], publié en Re veine hors régulation ->
+    tables 1,87 fois trop basses, et une consigne de 10 000 Re veine
+    régulée à plus de 13 000 (feed-forward extrapolé hors table). Les
+    tables doivent être en Re conduite."""
+    import time as _time
+    from banc_simule import BancSimule
+    b = BancSimule(monkeypatch, tmp_path, caracterise=False)
+    monkeypatch.setattr(_time, "sleep",
+                        lambda s: b.cycles(max(s, b.p.periode), verifier=False))
+    b.p.definir_reference_affichage(reference)
+    b.p.suspendre_maintien_tor()
+    app = Apprentissage(b.p, b.cfg, tmp_path / "config.json")
+    # pauses de la séquence (Event.wait) : horloge simulée elle aussi
+    monkeypatch.setattr(app._annule, "wait", lambda t=None: b.cycles(
+        max(t or 0.0, b.p.periode), verifier=False) or False)
+    app._test_re_mapping_iso()
+    paliers = app.resultats["re_mapping_iso"]["paliers_plage_haute"]
+    # simulateur : ~3 500 Re CONDUITE par volt (~1 900 en veine) ; dernier
+    # palier juste sous la saturation ISO (~26 000 Re conduite, ~14 000 veine)
+    assert len(paliers) >= 4
+    assert all(re / u > 2700.0 for u, re in paliers), paliers
+    assert max(re for _, re in paliers) > 20000.0, paliers
