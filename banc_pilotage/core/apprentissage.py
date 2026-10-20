@@ -259,6 +259,21 @@ class Apprentissage:
         13 000, feed-forward extrapolé hors table)."""
         return self.pilote.etat.get("re_conduite") or 0.0
 
+    def _re_min_mesurable(self, dp_min_pa: float = 1.0) -> float:
+        """Re conduite sous lequel le Miller ne mesure plus utilement : ΔP
+        Miller de dp_min_pa (le logiciel lit 0 sous 0,3 Pa). Remplace un
+        seuil fixe de 200 Re, pensé pour une unité et sans rapport avec le
+        capteur : la phase PdC enregistrait des paliers à ΔP < 1 Pa (bruit
+        du même ordre que la mesure), ou n'en enregistrait aucun en Re veine."""
+        e = self.pilote.etat
+        T = e.get("temperature") or 20.0
+        p_amont = e.get("p_amont") or 0.0
+        try:
+            return self.pilote.banc.qm_depuis_mesures(
+                "miller", dp_min_pa, T, p_amont)["re_conduite"]
+        except (ValueError, KeyError):
+            return 200.0
+
     def _attendre_pdc_extreme(self, cible_v: float, timeout: float,
                                statut: str) -> float | None:
         """Attend que la recopie PdC reste dans la zone extrême pendant ~3 s.
@@ -269,10 +284,13 @@ class Apprentissage:
         v_max = self.pilote.pdc_recopie_max
         marge = max(0.3, 0.05 * (v_max - v_min))
         serie: list[float] = []
-        if cible_v >= (v_min + v_max) / 2:
-            atteint = lambda v: v > v_max - marge
+        # fin de course lue = butée certaine ; la recopie sert à défaut
+        if cible_v >= 5.0:
+            atteint = lambda v: (bool(self._brutes().get("fc_pdc_ouvert"))
+                                 or v > v_max - marge)
         else:
-            atteint = lambda v: v < v_min + marge
+            atteint = lambda v: (bool(self._brutes().get("fc_pdc_ferme"))
+                                 or v < v_min + marge)
         return self._attendre(
             lambda: (serie.append(
                          self._brutes().get("pdc_recopie") or 0.0)
@@ -1019,10 +1037,10 @@ class Apprentissage:
                         re_moy = statistics.fmean(re_mesures)
                         bruit = (max(re_mesures) - min(re_mesures)) / max(re_moy, 1.0)
 
-                        # Critères de décrochage assouplis :
-                        # - Re < 200 (écoulement effondré)
+                        # Critères de décrochage :
+                        # - Re sous la plage mesurable du Miller (ΔP < 1 Pa)
                         # - Bruit > 20% (instabilité forte, tests empiriques : 50% OK)
-                        decrochage = (re_moy < 200.0 or bruit > 0.20)
+                        decrochage = (re_moy < self._re_min_mesurable() or bruit > 0.20)
 
                         if decrochage:
                             # Décrochage détecté : garder la position précédente
@@ -1040,8 +1058,11 @@ class Apprentissage:
                         break
 
                 # PDC min = dernière stable + marge (pas utilisé pour cette position)
-                pdc_min_exploitable = min(pdc_derniere_stable + pas_pdc_precedent, 100.0)
-                re_min_exploitable = re_derniere_stable
+                # aucun palier mesurable : pas de PdC min (et non 100 %, qui
+                # laissait croire à un mode PdC caractérisé)
+                if re_derniere_stable is not None:
+                    pdc_min_exploitable = min(pdc_derniere_stable + pas_pdc_precedent, 100.0)
+                    re_min_exploitable = re_derniere_stable
 
         # ---- Phase 4 : montée plage haute (Re > 5000, mode normal) ----
         # Couvrir la plage haute en mode normal : bypass fermé, PDC ouverte, ISO
@@ -1347,7 +1368,7 @@ class Apprentissage:
                     if len(re_mesures) >= 5:
                         re_moy = statistics.fmean(re_mesures)
                         bruit = (max(re_mesures) - min(re_mesures)) / max(re_moy, 1.0)
-                        decrochage = (re_moy < 200.0 or bruit > 0.20)
+                        decrochage = (re_moy < self._re_min_mesurable() or bruit > 0.20)
 
                         if not decrochage:
                             # Sauvegarder le point dans la table PDC
@@ -1364,8 +1385,11 @@ class Apprentissage:
                     if pdc_pct < 0:
                         break
 
-                pdc_min_exploitable = min(pdc_derniere_stable + pas_pdc_precedent, 100.0)
-                re_min_exploitable = re_derniere_stable
+                # aucun palier mesurable : pas de PdC min (et non 100 %, qui
+                # laissait croire à un mode PdC caractérisé)
+                if re_derniere_stable is not None:
+                    pdc_min_exploitable = min(pdc_derniere_stable + pas_pdc_precedent, 100.0)
+                    re_min_exploitable = re_derniere_stable
 
         self._variateur(0.0)
 
@@ -1389,6 +1413,9 @@ class Apprentissage:
         msg_u_seuil = f", u_seuil ≈ {u_seuil:.1f}V" if u_seuil else ""
         msg_pdc_min = f", PDC min ≈ {pdc_min_exploitable:.0f}%" if pdc_min_exploitable else ""
         msg_re_min = f" (Re min ≈ {re_min_exploitable:.0f})" if re_min_exploitable else ""
+        if not paliers_pdc:
+            msg_pdc_min = (", PdC : aucun palier mesurable (ΔP Miller < 1 Pa)"
+                           " — mode PdC inactif")
         self.etat["statut"] = (
             f"terminé Miller : u_min ≈ {u_min_reco}V{msg_u_seuil}{msg_pdc_min}{msg_re_min}")
 
@@ -1893,20 +1920,25 @@ class Apprentissage:
                 self.pilote.table_gains_bas_re = TableGains(r["paliers_V_Re"])
                 lignes.append(f"table gains bas-Re ({len(r['paliers_V_Re'])} points, bypass ouvert"
                               + _ecartes(self.pilote.table_gains_bas_re) + ")")
-            # Table de gains PDC (PDC variable, tension fixe u_min)
+            # Table de gains PDC (PDC variable, tension fixe u_min). Sans
+            # palier mesurable, les résultats PdC précédents sont EFFACÉS :
+            # gardés, une ancienne table (peut-être d'une autre unité) était
+            # réécrite dans miller.json à côté des nouvelles mesures.
+            from core.pilote import TableGains
             if r.get("paliers_PDC_Re"):
-                from core.pilote import TableGains
                 self.pilote.table_gains_pdc = TableGains(r["paliers_PDC_Re"])
                 lignes.append(f"table gains PDC ({len(r['paliers_PDC_Re'])} points, mode très bas Re)")
-            # PDC min et Re min
-            if r.get("pdc_min_exploitable_pct") is not None:
-                self.cfg["strategie_bas_re"]["pdc_min_exploitable_pct"] = r["pdc_min_exploitable_pct"]
-                self.pilote.pdc_min_exploitable_pct = r["pdc_min_exploitable_pct"]
-                lignes.append(f"PDC min exploitable = {r['pdc_min_exploitable_pct']:.1f}%")
-            if r.get("re_min_exploitable") is not None:
-                self.cfg["strategie_bas_re"]["re_min_exploitable"] = r["re_min_exploitable"]
-                self.pilote.re_min_exploitable = r["re_min_exploitable"]
-                lignes.append(f"Re min exploitable = {r['re_min_exploitable']}")
+            else:
+                self.pilote.table_gains_pdc = TableGains()
+                lignes.append("phase PdC : aucun palier mesurable — mode PdC "
+                              "(très bas Re) inactif")
+            for cle, fmt in (("pdc_min_exploitable_pct", "PDC min exploitable = {:.1f}%"),
+                             ("re_min_exploitable", "Re min exploitable = {}")):
+                v = r.get(cle) if r.get("paliers_PDC_Re") else None
+                self.cfg["strategie_bas_re"][cle] = v
+                setattr(self.pilote, cle, v)
+                if v is not None:
+                    lignes.append(fmt.format(v))
         # Gestion séparée des résultats re_mapping_iso
         if "re_mapping_iso" in self.resultats:
             r = self.resultats["re_mapping_iso"]

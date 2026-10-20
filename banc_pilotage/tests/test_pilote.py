@@ -233,6 +233,8 @@ def test_cycles_simulation_sans_erreur():
 
 # table Miller (bypass ouvert) d'un banc caractérisé : prérequis du mode PdC
 TABLE_MILLER = TableGains([(0.5, 700.0), (2.0, 2800.0), (5.0, 7000.0)])
+# phase PdC du même Re mapping Miller (% d'ouverture, ventilateur à u_pdc)
+TABLE_PDC = TableGains([(10.0, 300.0), (100.0, 1500.0)])
 
 
 def _pilote_en_position(fc: str) -> tuple:
@@ -283,6 +285,7 @@ def test_rampe_pi_bornee_en_bas_re():
     pilote, es = _pilote_en_position("fc_3voies_90")   # déjà sur Miller
     pilote.seuil_bas_re = 3000.0
     pilote.table_gains_bas_re = TABLE_MILLER        # Re mapping Miller fait
+    pilote.table_gains_pdc = TABLE_PDC
     pilote.definir_consigne(1000.0, "conduite")
     pilote.demarrer_regulation()
     pilote._cycle()
@@ -560,7 +563,8 @@ def test_correction_gelee_tant_que_le_variateur_suit_sa_rampe():
     assert pilote.etat["phase_regulation"] == "suivi variateur"
     assert len(trims) > 20
     assert max(trims) - min(trims) < 1e-9          # correction tenue
-    assert abs(trims[-1]) < 0.2                    # pas poussée par l'erreur
+    # poussée par l'erreur (Re 2 836 pour 8 000), elle vaudrait ~0,8 V
+    assert abs(trims[-1]) < 0.5
     assert pilote.etat["u_variateur"] == pytest.approx(
         pilote.etat["u_ff"] + trims[-1], abs=2e-3)
 
@@ -646,6 +650,7 @@ def test_bascule_bas_re_en_cours_recale_le_pi():
     pilote, es = _pilote_en_position("fc_3voies_90")
     pilote.seuil_bas_re = 2000.0
     pilote.table_gains_bas_re = TABLE_MILLER        # Re mapping Miller fait
+    pilote.table_gains_pdc = TABLE_PDC
     pilote.u_min_ventilateur = 0.5
     pilote.table_gains_pdc = TableGains([(30.0, 300.0), (100.0, 1500.0)])
     es.mesures["dp_diaph_500"] = 0.5
@@ -1079,6 +1084,7 @@ def test_feed_forward_pdc_depuis_la_table_apprise_en_pourcent(monkeypatch):
     pilote, es = _pilote_en_position("fc_3voies_90")
     pilote.seuil_bas_re = 2000.0
     pilote.table_gains_bas_re = TABLE_MILLER        # Re mapping Miller fait
+    pilote.table_gains_pdc = TABLE_PDC
     pilote.u_min_ventilateur = 0.5
     pilote.table_gains_pdc = TableGains([(30.0, 300.0), (100.0, 1500.0)])
     es.mesures["dp_diaph_500"] = 0.5
@@ -1086,8 +1092,7 @@ def test_feed_forward_pdc_depuis_la_table_apprise_en_pourcent(monkeypatch):
     pilote.demarrer_regulation()
     pilote._cycle()
     pct = 30.0 + (1000.0 - 300.0) / (1500.0 - 300.0) * 70.0
-    v_attendu = pilote.pdc_recopie_min + pct / 100.0 * (
-        pilote.pdc_recopie_max - pilote.pdc_recopie_min)
+    v_attendu = pct / 100.0 * 10.0      # % d'ouverture -> volts de COMMANDE
     assert pilote._mode_regulation == "pdc_control"
     # la vanne part de grande ouverte : ventilateur à l'arrêt tant qu'elle
     # n'a pas rejoint sa position
@@ -1181,6 +1186,7 @@ def test_seuil_bas_re_derive_de_la_table_miller():
     pilote.u_min_ventilateur = 1.5
     pilote.table_gains = TableGains([(1.0, 3500.0), (9.0, 31500.0)])
     pilote.table_gains_bas_re = TableGains([(1.5, 2000.0), (5.0, 7000.0)])
+    pilote.table_gains_pdc = TABLE_PDC
     t = pilote.table_gains_bas_re
     assert pilote._seuil_bas_re() == pytest.approx(
         0.5 * (t.re_pour_u_ff(1.5) + t.re_pour_u_ff(pilote._u_pdc())))
@@ -1196,6 +1202,7 @@ def test_seuil_derive_couvre_la_bande_d_hysteresis_des_deux_modes():
     pilote.seuil_bas_re = 0.0
     pilote.u_min_ventilateur = 1.5
     pilote.table_gains_bas_re = TableGains([(1.5, 2000.0), (5.0, 7000.0)])
+    pilote.table_gains_pdc = TABLE_PDC
     t = pilote.table_gains_bas_re
     seuil = pilote._seuil_bas_re()
     assert t.re_pour_u_ff(pilote._u_pdc()) >= 1.05 * seuil     # haut de bande en PdC
@@ -1407,6 +1414,8 @@ def test_consigne_hors_de_portee_du_mode_pdc_signalee():
     pilote, es = _pilote_en_position("fc_3voies_90")
     pilote.seuil_bas_re = 2000.0
     pilote.table_gains_bas_re = TABLE_MILLER        # Re mapping Miller fait
+    # table PdC dont le haut (PdC ouverte) reste sous la consigne
+    pilote.table_gains_pdc = TableGains([(10.0, 100.0), (100.0, 400.0)])
     pilote.u_min_ventilateur = 0.5
     es.mesures["dp_diaph_500"] = 0.5                 # Re ~ 0
     pilote.definir_consigne(1000.0, "conduite")
@@ -1427,6 +1436,7 @@ def test_alarme_pdc_seulement_en_butee_physique(monkeypatch):
     pilote, es = _pilote_en_position("fc_3voies_90")
     pilote.seuil_bas_re = 2000.0
     pilote.table_gains_bas_re = TABLE_MILLER        # Re mapping Miller fait
+    pilote.table_gains_pdc = TABLE_PDC
     pilote.u_min_ventilateur = 0.5
     es.mesures["dp_diaph_500"] = 200.0               # Re bien au-dessus
     es.mesures["pdc_recopie"] = 10.0
@@ -1491,3 +1501,39 @@ def test_bypass_sans_fin_de_course_hors_manoeuvre_en_defaut():
     assert "bypass sans fin de course" in (pilote.etat.get("defaut_vanne") or "")
     assert pilote.regulation_active is False
     assert es.variateur[-1] == 0.0
+
+
+def test_sans_table_pdc_mode_pdc_inactif_et_consigne_bornee():
+    """Cas réel : Re mapping Miller fait, phase PdC sans palier mesurable
+    (pas de table PdC, PdC min à 100 %). Le mode PdC s'engageait quand
+    même : PI fermant la vanne sous le plancher de mesure, Re lu à 0,
+    oscillation sans alarme. Désormais : mode PdC inactif, consigne bornée
+    au Re tenu par le variateur à u_min, motif publié."""
+    pilote, es = _pilote_en_position("fc_3voies_90")
+    pilote.table_gains_bas_re = TABLE_MILLER
+    pilote.table_gains_pdc = TableGains()
+    pilote.pdc_min_exploitable_pct = 100.0
+    pilote.u_min_ventilateur = 0.5
+    pilote.seuil_bas_re = 0.0
+    es.mesures["dp_diaph_500"] = 2.0
+    pilote.definir_consigne(150.0, "conduite")
+    pilote.demarrer_regulation()
+    for _ in range(10):
+        pilote._cycle()
+    assert pilote._mode_regulation == "normal_low"
+    assert pilote.etat["re_vise"] == pytest.approx(
+        TABLE_MILLER.re_pour_u_ff(0.5), rel=1e-6)            # 700 Re
+    assert "u_min" in (pilote.etat["consigne_limitee"] or "")
+    assert "mode PdC (très bas Re) inactif" in (pilote.etat["bas_re_motif"] or "")
+    assert pilote.trim.u_min == 0.5
+
+
+def test_pdc_pourcent_en_volts_de_commande():
+    """% d'ouverture -> volts de COMMANDE (0-10 V), quelles que soient les
+    bornes de la recopie : avec une recopie 2,4-9,2 V, « 100 % » commandait
+    9,15 V (vanne à 91 %) et le positionnement PdC attendait sans fin."""
+    pilote, _ = _pilote_en_position("fc_3voies_90")
+    pilote.pdc_recopie_min, pilote.pdc_recopie_max = 2.389, 9.153
+    assert pilote._pdc_pct_vers_v(100.0) == 10.0
+    assert pilote._pdc_pct_vers_v(0.0) == 0.0
+    assert pilote._pdc_pct_vers_v(30.0) == pytest.approx(3.0)

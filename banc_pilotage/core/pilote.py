@@ -734,6 +734,13 @@ class Pilote:
 
         with self._verrou:
             nouvelle = (re_limite, reference) != (self.re_cible, self.reference)
+            if reference != self.reference:
+                # modèle de référence et mémoire de stabilité sont dans
+                # l'unité de l'ancienne référence : comparés au Re mesuré
+                # dans la nouvelle (×/÷ 1,87), ils provoquaient un coup de
+                # commande (+20 % de Re constaté en simulation)
+                self._consigne_interne = None
+                self._hist_re_court.clear()
             self.re_cible = re_limite
             self.reference = reference
             # nouvelle consigne = nouvelle préparation (choix diaphragme,
@@ -1050,16 +1057,19 @@ class Pilote:
         self.es.ecrire_vanne_perte_charge(self._pdc_consigne)
 
     def commander_vanne_perte_charge_pct(self, pct: float) -> None:
-        """Consigne en % d'ouverture : 0 % = fermée, 100 % = ouverte.
-        Utilise les butées calibrées pdc_recopie_min/max pour la conversion."""
+        """Consigne en % d'ouverture : 0 % = fermée (0 V), 100 % = ouverte
+        (10 V)."""
         self.commander_vanne_perte_charge(self._pdc_pct_vers_v(pct))
 
     def _pdc_pct_vers_v(self, pct: float) -> float:
-        """Ouverture PdC en % -> consigne en volts, avec les butées calibrées
-        (même conversion que celle des paliers appris en %)."""
+        """Ouverture PdC en % -> consigne en volts de COMMANDE (0 V = fermée,
+        10 V = ouverte : ce sont les commandes que la calibration envoie pour
+        atteindre les fins de course). Les bornes pdc_recopie_min/max sont
+        des tensions de RECOPIE : s'en servir comme commande laissait la
+        vanne à 91 % à « 100 % » avec une recopie 2,4-9,2 V, et le
+        positionnement PdC attendait sans fin une position jamais commandée."""
         pct_borne = min(max(pct, 0.0), 100.0)
-        return self.pdc_recopie_min + (pct_borne / 100.0) \
-            * (self.pdc_recopie_max - self.pdc_recopie_min)
+        return pct_borne / 100.0 * 10.0
 
     def _pdc_ff_v(self, re_cond: float) -> float | None:
         """Consigne PdC [V] d'équilibre pour un Re conduite, d'après la table
@@ -1710,12 +1720,21 @@ class Pilote:
             # borne basse : sous le Re minimal tenu en mode PdC (vanne PdC
             # au minimum exploitable, ventilateur à u_pdc), la consigne était
             # attendue ~30 s puis déclarée « hors de portée »
-            re_min = self.re_min_exploitable
-            if mode == MODE_PDC_CONTROL and _nombre(re_min) and re_min > 0 \
+            re_min, quoi = self.re_min_exploitable, "en mode PdC"
+            if mode == MODE_PDC_CONTROL and not (_nombre(re_min) and re_min > 0):
+                # Re min non mesuré : le plus bas palier de la table PdC
+                pts = self.table_gains_pdc._points_ff()
+                re_min = min(p[1] for p in pts) if pts else None
+            if mode == MODE_NORMAL_LOW and not self._mode_pdc_caracterise():
+                # pas de mode PdC : le variateur ne descend pas sous u_min
+                # (décrochage) -> plancher = Re(u_min) en Miller
+                re_min, quoi = self._re_plancher_miller(), "par le variateur à u_min"
+            if mode in (MODE_PDC_CONTROL, MODE_NORMAL_LOW) \
+                    and _nombre(re_min) and re_min > 0 \
                     and 0 < re_cond_attendu < re_min:
                 self._re_cible_min = re_cible * re_min / re_cond_attendu
                 msg = (f"consigne {re_cible:.0f} Re {reference} sous le minimum "
-                       f"tenu en mode PdC ({re_min:.0f} Re conduite) : "
+                       f"tenu {quoi} ({re_min:.0f} Re conduite) : "
                        f"régulation limitée à {self._re_cible_min:.0f} Re {reference}")
                 self.etat["consigne_limitee"] = msg
                 log.warning(msg)
@@ -2514,10 +2533,16 @@ class Pilote:
                               f"au-delà du seuil Miller/ISO "
                               f"({self.banc.seuil_re:.0f}) : ignoré — corriger "
                               "strategie_bas_re")
-            if not self._mode_pdc_caracterise():
+            if not self.table_gains_bas_re.valide_ff():
                 motifs.append("Re mapping Miller non fait : le mode PdC (très "
                               "bas Re) reste inactif — lancer l'apprentissage "
                               "« Re mapping Miller »")
+            elif not self._mode_pdc_caracterise():
+                plancher = self._re_plancher_miller()
+                motifs.append("phase PdC du Re mapping Miller sans palier "
+                              "exploitable : mode PdC (très bas Re) inactif"
+                              + (f", consignes bornées à {plancher:.0f} Re "
+                                 "conduite (variateur à u_min)" if plancher else ""))
             elif not seuil or self.u_min_ventilateur is None:
                 motifs.append("seuil bas-Re inconnu : lancer l'apprentissage "
                               "« Re mapping » (ou fixer strategie_bas_re.seuil_re)")
@@ -2673,8 +2698,25 @@ class Pilote:
         Miller (qui produit aussi la table Miller). Sans lui, le seuil
         retombait sur la table ISO ou le gain appris en marche, avec le
         u_min de la config : sur un banc non caractérisé, ventilateur à
-        0,35 V, Re nul et alarme « hors de portée »."""
-        return self.table_gains_bas_re.valide_ff()
+        0,35 V, Re nul et alarme « hors de portée ».
+
+        Il faut aussi la table PdC (phase PdC du Re mapping Miller) et une
+        PdC minimale exploitable sous 100 % : sans elles (constaté au banc,
+        aucun palier PdC mesurable), le PI fermait la vanne sans borne sous
+        le plancher de mesure du Miller -> Re lu à 0, oscillation sans fin,
+        sans alarme. Le mode PdC est alors inactif et les consignes sont
+        bornées au Re tenu par le variateur à u_min (_re_plancher_miller)."""
+        pdc_min = self.pdc_min_exploitable_pct
+        return (self.table_gains_bas_re.valide_ff()
+                and self.table_gains_pdc.valide_ff()
+                and not (_nombre(pdc_min) and pdc_min >= 100.0))
+
+    def _re_plancher_miller(self) -> float | None:
+        """Re conduite minimal tenu en Miller par le variateur seul (à
+        u_min, PdC ouverte), d'après la table Miller. None si inconnu."""
+        if not self.u_min_ventilateur or not self.table_gains_bas_re.valide_ff():
+            return None
+        return self.table_gains_bas_re.re_pour_u_ff(self.u_min_ventilateur)
 
     def _u_pdc(self) -> float:
         """Tension du ventilateur en mode PdC : u_min × marge_ventilateur_pdc."""
@@ -3078,12 +3120,20 @@ class Pilote:
                     pdc_ff = 10.0
             if pdc_ff is None:
                 pdc_ff = 10.0     # repli : partir ouverte, le PI fermera
+            # pas de borne basse sur le PI : la consigne est bornée au Re min
+            # mesuré (préparation), atteint à la PdC du dernier palier stable,
+            # un pas SOUS pdc_min_exploitable_pct
+            self.pi.u_min = 0.0
             self.pi.reinitialiser(pdc_ff)
             self._consigne_interne = None
 
         elif mode in (MODE_NORMAL_HIGH, MODE_NORMAL_LOW):
             self.pi.gain_scale = 1.0
             self.pi.rampe = self._rampe_nominale
+            self.pi.u_min = 0.0
+            # ventilateur jamais commandé sous u_min (décrochage) en régime
+            # réglé ; 0 V reste possible à l'arrêt (hors régulateur)
+            self.trim.u_min = self.u_min_ventilateur or 0.0
             u_actuel = self.etat.get("u_variateur", 0.0) or 0.0
             u_ff = self._u_equilibre(re_cond_attendu, mode)
 

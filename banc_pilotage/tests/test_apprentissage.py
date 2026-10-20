@@ -321,3 +321,26 @@ def test_tables_apprises_en_re_conduite_quelle_que_soit_la_reference(
     assert len(paliers) >= 4
     assert all(re / u > 2700.0 for u, re in paliers), paliers
     assert max(re for _, re in paliers) > 20000.0, paliers
+
+
+def test_miller_sans_palier_pdc_efface_les_resultats_pdc_precedents(tmp_path):
+    """« Appliquer » d'un Re mapping Miller sans palier PdC mesurable : la
+    table PdC et le Re min précédents étaient conservés (et réécrits dans
+    miller.json) à côté d'une PdC min à 100 %. Ils sont effacés et le mode
+    PdC est inactif."""
+    app, pilote = _app_cfg(tmp_path)
+    pilote.table_gains_pdc = TableGains([(20.0, 600.0), (100.0, 2300.0)])
+    pilote.re_min_exploitable = 214
+    app.resultats["re_mapping_miller"] = {
+        "u_min_exploitable_v": 0.3, "u_seuil_bas_re_v": 8.4,
+        "pdc_min_exploitable_pct": None, "re_min_exploitable": None,
+        "paliers_V_Re": [[0.3, 266.0], [2.0, 2008.0], [8.0, 7682.0]],
+        "paliers_PDC_Re": []}
+    message = app.appliquer()
+    assert "aucun palier mesurable" in message
+    assert not pilote.table_gains_pdc.valide_ff()
+    assert pilote.re_min_exploitable is None
+    assert not pilote._mode_pdc_caracterise()
+    miller = json.loads((tmp_path / "apprentissages" / "miller.json")
+                        .read_text("utf-8"))
+    assert "table_gains_pdc" not in miller["tables"]

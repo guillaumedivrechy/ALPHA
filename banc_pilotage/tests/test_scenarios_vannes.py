@@ -155,7 +155,7 @@ def test_scenario3_iso_vers_pdc(banc):
     b.consigne(10000.0)
     b.cycles(40.0)
     t0 = b.consigne(300.0)
-    b.cycles(30.0)
+    b.cycles(45.0)                # vannes TOR (~12 s) + course PdC 10 -> 2 V
     (t_3v, a), = b.ecritures("3voies")
     (t_bp, o), = b.ecritures("bypass")
     assert (a, o) == ("90", True) and t_3v == t_bp

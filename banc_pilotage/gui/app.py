@@ -510,17 +510,13 @@ class Application(QMainWindow):
             "re": False, "vman": False, "pdc": False,
         }
 
-        # Limites physiques de la vanne PDC pour affichage
-        act = cfg.get("actionneurs", {})
-        self._pdc_umin = act.get("pdc_recopie_min_v", 0.0)
-        self._pdc_umax = act.get("pdc_recopie_max_v", 10.0)
+        # Échelle de COMMANDE de la vanne PdC (0 V = fermée, 10 V = ouverte),
+        # celle du curseur manuel. La recopie (position lue) a ses propres
+        # bornes, calibrées : lues sur le pilote à chaque affichage
+        # (_pdc_v_vers_pct), pour suivre un « Appliquer » de calibration.
+        self._pdc_umin = 0.0
+        self._pdc_umax = 10.0
 
-        # Validation des limites PDC
-        if self._pdc_umax <= self._pdc_umin:
-            log.warning(
-                f"Configuration PDC invalide: Umax ({self._pdc_umax}V) <= Umin ({self._pdc_umin}V). "
-                "L'affichage du pourcentage sera désactivé (toujours 0%)."
-            )
 
         pg.setConfigOption("background", "#FFFFFF")
         pg.setConfigOption("foreground", COLORS["text"])
@@ -657,7 +653,8 @@ class Application(QMainWindow):
         return True
 
     def _pdc_v_vers_pct(self, volts: float | None) -> int:
-        """Convertit tension PDC [Umin, Umax] en pourcentage de FERMETURE [0%, 100%].
+        """Convertit la position PdC LUE (recopie, bornes calibrées du pilote)
+        en pourcentage de FERMETURE [0%, 100%].
 
         Convention vanne perte de charge:
         - 0% = vanne ouverte (Umax = débit max)
@@ -665,14 +662,12 @@ class Application(QMainWindow):
         """
         if volts is None:
             return 0
-        if self._pdc_umax <= self._pdc_umin:
-            log.warning(
-                f"Conversion PDC impossible: Umax ({self._pdc_umax}V) <= Umin ({self._pdc_umin}V). "
-                "Retour 0% par défaut."
-            )
+        umin = self.pilote.pdc_recopie_min
+        umax = self.pilote.pdc_recopie_max
+        if umax <= umin:
             return 0
-        # Inverser: 100% = fermée (Umin), 0% = ouverte (Umax)
-        pct = (self._pdc_umax - volts) / (self._pdc_umax - self._pdc_umin) * 100
+        # Inverser: 100% = fermée (umin), 0% = ouverte (umax)
+        pct = (umax - volts) / (umax - umin) * 100
         return int(max(0, min(100, pct)))
 
     def closeEvent(self, event):

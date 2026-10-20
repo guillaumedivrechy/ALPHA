@@ -366,3 +366,23 @@ def test_miller_hors_capteur_bascule_en_iso(monkeypatch, tmp_path, t_c):
     assert e["diaphragme_lu"] == "iso"
     assert not e.get("consigne_limitee") and not e.get("dp_sature")
     assert e["re_moyen"] == pytest.approx(consigne, rel=0.01)
+
+
+@pytest.mark.parametrize("de,vers", [("conduite", "veine"), ("veine", "conduite")])
+def test_changement_de_reference_sans_coup(monkeypatch, tmp_path, de, vers):
+    """Même débit, référence changée en régulation (15 000 Re conduite ->
+    8 021 Re veine) : le modèle de référence restait dans l'ancienne
+    unité -> correction en butée, +20 % de Re (ou un creux en sens
+    inverse). Le débit doit rester tenu."""
+    b = BancSimule(monkeypatch, tmp_path)
+    re_c = 15000.0
+    b.consigne(re_c if de == "conduite" else re_c / K_VEINE, de)
+    assert b.jusqu_a_convergence(150) is not None
+    b.cycles(10)
+    b.consigne(re_c if vers == "conduite" else re_c / K_VEINE, vers)
+    vus = []
+    for _ in range(int(15.0 / b.p.periode)):
+        b.cycles(b.p.periode)
+        vus.append(b.p.etat["re_conduite"])
+    assert max(vus) < 1.05 * re_c and min(vus) > 0.95 * re_c, (min(vus), max(vus))
+    assert not b.violations, b.violations[:3]
