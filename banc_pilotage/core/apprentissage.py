@@ -2053,8 +2053,8 @@ class Apprentissage:
                                  or "re_mapping" in self.resultats)
 
             # Récupérer les mesures de conditions ambiantes
-            mesures = self.pilote.etat.get("mesures_brutes", {})
-            temperature_c = mesures.get("temperature")
+            # température UTILISÉE par les calculs (PT100 ou saisie)
+            temperature_c = self.pilote.etat.get("temperature")
             # Pression atmosphérique (TODO: ajouter capteur si disponible)
             pression_pa = None
 

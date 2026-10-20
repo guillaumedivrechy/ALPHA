@@ -75,6 +75,14 @@ def _seuil_bas_re_de_config(sr: dict, seuil_diaphragme: float,
     return manuel
 
 
+def _temperature_manuelle(source, valeur) -> float | None:
+    """Température de l'air saisie à la main (temperature.source =
+    "manuelle"), ou None : PT100 lue en temps réel."""
+    if source == "manuelle" and _nombre(valeur):
+        return float(valeur)
+    return None
+
+
 def _marge_pdc(valeur: float) -> float:
     """Facteur de tension du ventilateur en mode PdC. Sous ~1,11, le Re
     maximal du mode PdC ne couvre plus la bande d'hystérésis (±5 %) du seuil
@@ -453,6 +461,10 @@ class Pilote:
         # ventilateur à fond sans que rien ne le signale.
         self.t_min_c = r.get("temperature_min_c", -40.0)
         self.t_max_c = r.get("temperature_max_c", 80.0)
+        # température saisie à la main (None = PT100 en temps réel)
+        tcfg = cfg.get("temperature", {})
+        self.t_manuelle = _temperature_manuelle(tcfg.get("source"),
+                                                tcfg.get("valeur_manuelle_c"))
         # vitesse de repli de la commande quand le capteur ΔP sature
         self.recul_saturation = r.get("recul_saturation_v_par_s", 0.5)
         # limite maximale de consigne Re pour le diaphragme ISO (évite
@@ -1005,6 +1017,9 @@ class Pilote:
             self.tau_consigne = r.get("tau_consigne_s", self.tau_consigne)
             self.t_min_c = r.get("temperature_min_c", self.t_min_c)
             self.t_max_c = r.get("temperature_max_c", self.t_max_c)
+            tcfg = cfg.get("temperature", {})
+            self.t_manuelle = _temperature_manuelle(
+                tcfg.get("source"), tcfg.get("valeur_manuelle_c"))
             self.recul_saturation = r.get("recul_saturation_v_par_s",
                                           self.recul_saturation)
             # la fenêtre est un nombre d'échantillons : la reconstruire à
@@ -1574,11 +1589,21 @@ class Pilote:
         self.etat["diaphragme_commande"] = self._diaphragme_par_angle.get(
             self._diaphragme_commande)
 
+        # ---- température saisie à la main ----------------------------------
+        # choix de l'opérateur (onglet Configuration) : la PT100 est ignorée,
+        # y compris ses contrôles de vraisemblance (sonde absente ou
+        # douteuse) ; sa lecture reste visible dans les mesures brutes
+        self.etat["temperature_source"] = \
+            "manuelle" if self.t_manuelle is not None else "pt100"
+        if self.t_manuelle is not None:
+            T = self.t_manuelle
+            mesures["temperature"] = T
+            self._cycles_t_invalide = 0
         # ---- vraisemblance de la PT100 -------------------------------------
         # Hors bornes = sonde coupée ou module saturé. rho et mu en dépendent,
         # donc le Re : sans ce test le PI poursuit une mesure fantaisiste et
         # emmène le ventilateur en butée sans lever le moindre défaut.
-        if self.t_min_c <= T <= self.t_max_c:
+        elif self.t_min_c <= T <= self.t_max_c:
             self._cycles_t_invalide = 0
             self._derniere_T_valide = T
         else:

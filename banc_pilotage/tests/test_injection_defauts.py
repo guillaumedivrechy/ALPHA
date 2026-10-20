@@ -7,6 +7,8 @@ rien ne repart seul ; après acquittement, une consigne reconverge.
 Défaut signalé seulement (défaut actionneur, recopie PdC) : alerte, la
 régulation continue."""
 
+import json
+
 import pytest
 
 from banc_simule import BancSimule
@@ -226,3 +228,24 @@ def test_vanne_pdc_bloquee_signalee(monkeypatch, tmp_path):
         vu = vu or bool(b.p.etat["defaut_pdc"])
     assert b.p._mode_regulation == "pdc_control"
     assert vu
+
+
+def test_temperature_saisie_remplace_la_pt100(monkeypatch, tmp_path):
+    """Choix de l'opérateur : température saisie à la main. Les calculs
+    l'utilisent, la PT100 est ignorée (y compris une lecture aberrante, qui
+    sinon arrêterait le banc) ; repassée en PT100, la mesure revient."""
+    b = _banc(monkeypatch, tmp_path)
+    cfg = json.loads(json.dumps(b.cfg))
+    cfg["temperature"] = {"source": "manuelle", "valeur_manuelle_c": 30.0}
+    b.p.appliquer_config(cfg)
+    _alterer(b, lambda m: m.update(temperature=150.0))     # PT100 aberrante
+    b.cycles(10, verifier=False)
+    e = b.p.etat
+    assert e["temperature"] == 30.0 and e["temperature_source"] == "manuelle"
+    assert not e.get("arret_securite") and b.p.regulation_active
+    assert e["mesures_brutes"]["temperature"] == 150.0       # lecture visible
+    assert e["mu"] == pytest.approx(b.p.banc.fluide.mu(30.0))
+    cfg["temperature"]["source"] = "pt100"
+    b.p.appliquer_config(cfg)
+    b.cycles(10, verifier=False)
+    _assert_repli(b, "defaut_capteur", "température invraisemblable")

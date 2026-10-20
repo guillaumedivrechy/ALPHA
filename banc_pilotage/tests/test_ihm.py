@@ -7,6 +7,7 @@ le QTimer. Les boîtes de dialogue sont interceptées et enregistrées. Échoue
 sur : exception dans un gestionnaire de clic, section d'affichage en défaut
 (« Affichage … indisponible »), violation des invariants du banc simulé."""
 
+import json
 import os
 import random
 
@@ -273,3 +274,20 @@ def test_changement_de_reference_convertit_la_consigne_saisie(ihm):
     app._historiser({"re_mesure": 2700.0, "reference": "veine",
                      "regulation": False, "re_vise": 2700.0})
     assert list(app._hist_re) == [2700.0] and list(app._hist_cible) == [0.0]
+
+
+def test_temperature_saisie_choisie_dans_la_configuration(ihm):
+    """Onglet Configuration : case « température saisie » et valeur, écrites
+    dans config.json et appliquées au pilote à l'enregistrement."""
+    app = ihm.app
+    app.chk_unlock.setChecked(True)
+    assert app.chk_t_manuelle.isEnabled()
+    app.chk_t_manuelle.setChecked(True)
+    app.champs[("temperature", "valeur_manuelle_c")][0].setText("27,5")
+    app._enregistrer_configuration()
+    assert ihm.b.p.t_manuelle == 27.5
+    cfg = json.loads(app.chemin_cfg.read_text(encoding="utf-8"))
+    assert cfg["temperature"] == {**cfg["temperature"], "source": "manuelle",
+                                  "valeur_manuelle_c": 27.5}
+    ihm.avancer(1.0)
+    assert ihm.b.p.etat["temperature"] == 27.5

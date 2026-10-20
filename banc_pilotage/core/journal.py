@@ -32,6 +32,7 @@ COLONNES = [
     ("convergee", "convergee"),
     ("dp", "dP [Pa]"),
     ("temperature", "T [degC]"),
+    ("temperature_source", "source T"),
     ("p_amont", "P amont [Pa]"),
     ("rho", "rho [kg/m3]"),
     ("qm", "qm [kg/s]"),

@@ -64,6 +64,9 @@ def _seuil_bascule(v, valeurs):
                 "(domaine de validité ISO 5167)")
     return None
 
+def _temperature_saisie(v, _):
+    return None if -10.0 <= v <= 60.0 else "doit être entre -10 et 60 °C"
+
 def _alpha(v, _):
     return None if 0 <= v < 1e-3 else "coefficient de dilatation invraisemblable"
 
@@ -96,6 +99,7 @@ DEFAUTS_CLES_RECENTES = {
     ("regulation", "marge_consigne_dp_relative"): 0.95,
     ("mesure_dp", "dp_min_mesurable_pa"): 0.15,
     ("mesure_dp", "seuil_debit_nul_pa"): 0.05,
+    ("temperature", "valeur_manuelle_c"): 20.0,
 }
 
 PARAMETRES = [
@@ -2925,7 +2929,7 @@ class Application(QMainWindow):
             ("veine", "longueur_caracteristique_m"): 0.2,
         }
 
-        def _grp(titre: str, rows: list[tuple], col: int, row: int) -> None:
+        def _grp(titre: str, rows: list[tuple], col: int, row: int) -> QWidget:
             """Groupe en carte : (chemin_tuple, libelle, unite, valeur_fmt, validation|None)."""
             card = QWidget()
             card.setStyleSheet(
@@ -2999,6 +3003,7 @@ class Application(QMainWindow):
                 rwl.addWidget(lbl_u)
                 cvl.addWidget(rw)
             gl.addWidget(card, row, col)
+            return card
 
         cfg = self.cfg
         act = cfg.get("actionneurs", {})
@@ -3028,6 +3033,27 @@ class Application(QMainWindow):
             (("fluide","sutherland_t_ref"),   "T référence",      "K",    "{:.2f}", _positif),
             (("fluide","sutherland_s"),       "Constante S",      "K",    "{:.1f}", _positif),
         ], col=0, row=2)
+
+        # température de l'air : PT100 en temps réel ou saisie à la main
+        carte_t = _grp("Température de l'air", [
+            (("temperature","valeur_manuelle_c"), "Température saisie", "°C",
+             "{:.1f}", _temperature_saisie),
+        ], col=1, row=3)
+        rw_t = QWidget()
+        rw_t.setStyleSheet("background:transparent; border:none;")
+        rwl_t = QHBoxLayout(rw_t)
+        rwl_t.setContentsMargins(16, 11, 16, 11)
+        self.chk_t_manuelle = QCheckBox(
+            "Utiliser la température saisie (PT100 ignorée)")
+        self.chk_t_manuelle.setToolTip(
+            "Coché : ρ, μ et le Re sont calculés avec la température saisie "
+            "ci-dessus ; la PT100 n'est plus lue pour les calculs ni "
+            "surveillée. Décoché : PT100 en temps réel.")
+        self.chk_t_manuelle.setChecked(
+            cfg.get("temperature", {}).get("source") == "manuelle")
+        self.chk_t_manuelle.setEnabled(False)
+        rwl_t.addWidget(self.chk_t_manuelle)
+        carte_t.layout().addWidget(rw_t)
 
         _grp("Géométrie veine d'essai (rectangulaire)", [
             (("veine","hauteur_m"),             "Hauteur H",        "m",    "{:.3f}", _positif),
@@ -3682,6 +3708,7 @@ class Application(QMainWindow):
             return
         for entree, _ in self.champs.values():
             entree.setEnabled(unlock)
+        self.chk_t_manuelle.setEnabled(unlock)
         self.btn_enregistrer.setEnabled(unlock)
         self.lbl_cfg_statut.setText("")
 
@@ -3692,6 +3719,8 @@ class Application(QMainWindow):
                 entree.setText(str(_cfg_lire(self.cfg, chemin)))
             except (KeyError, TypeError):
                 pass
+        self.chk_t_manuelle.setChecked(
+            self.cfg.get("temperature", {}).get("source") == "manuelle")
 
     def _synchroniser_affichage_config(self) -> None:
         """Après toute écriture de la configuration (Appliquer d'un
@@ -3767,6 +3796,8 @@ class Application(QMainWindow):
             except (KeyError, TypeError, ValueError):
                 pass
             _cfg_ecrire(candidat, chemin, v)
+        _cfg_ecrire(candidat, ("temperature", "source"),
+                    "manuelle" if self.chk_t_manuelle.isChecked() else "pt100")
         try:
             banc = Banc(candidat)
         except (ValueError, KeyError) as exc:
@@ -4297,8 +4328,10 @@ class Application(QMainWindow):
         P_abs = self.pilote.banc.patm_pa + (e.get("p_amont") or 0.0)
 
         if T is not None:
-            # Affichage température
-            self._lbl_air_temp.setText(f"{T:.1f}".replace(".", ","))
+            # Affichage température (utilisée par les calculs)
+            saisie = e.get("temperature_source") == "manuelle"
+            self._lbl_air_temp.setText(f"{T:.1f}".replace(".", ",")
+                                       + (" (saisie)" if saisie else ""))
 
             # Récupérer l'humidité relative depuis la config
             HR_pct = self.cfg.get("fluide", {}).get("humidite_relative", 0.0)
