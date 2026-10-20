@@ -604,6 +604,7 @@ class Pilote:
         self._biais_ff: dict = {}          # mode -> (id table, biais relatif appris)
         self._t_ecart_variateur = None     # début de l'écart commande / recopie AM
         self._re_cible_max = None          # consigne max mesurable (None = pas de limite)
+        self._cache_re_max_miller: tuple = (None, None)   # ((T, P), Re max)
         self._re_cible_min = None          # consigne min tenable en mode PdC
         self._pdc_attente_depuis = None    # démarrage PdC : vanne pas encore placée
         # dernière butée LUE de la vanne 3 voies (diaphragme dont le capteur
@@ -930,6 +931,7 @@ class Pilote:
         le gain appris est conservé (la dynamique du banc ne change pas)."""
         with self._verrou:
             self.banc = banc
+            self._cache_re_max_miller = (None, None)
 
     def appliquer_config(self, cfg: dict) -> None:
         """Relit les réglages mis en cache au démarrage, après une édition
@@ -945,6 +947,7 @@ class Pilote:
         Les grandeurs APPRISES (gain, table, u_min) ne sont pas touchées :
         elles ne viennent pas de la saisie utilisateur.
         """
+        self._cache_re_max_miller = (None, None)
         with self._verrou:
             r = cfg.get("regulation", {})
             self.periode = r.get("periode_s", self.periode)
@@ -1680,6 +1683,9 @@ class Pilote:
                 qm_vise, T, self.banc.patm_pa + p_amont)["re_conduite"]
 
             nouveau_diaph = self.banc.choisir_diaphragme(re_cond_attendu, diaph)
+            if nouveau_diaph == "miller" and self._miller_insuffisant(
+                    re_cond_attendu, T, p_amont):
+                nouveau_diaph = "iso"     # le Miller saturerait son capteur
             diaphragme_change = nouveau_diaph != diaph
 
             # La préparation ne commande AUCUNE vanne ni tension : la boucle
@@ -2625,7 +2631,7 @@ class Pilote:
             haut = re_cond >= seuil - hyst
         else:
             haut = re_cond > seuil + hyst
-        if haut:
+        if haut or self._miller_insuffisant(re_cond):
             return MODE_NORMAL_HIGH
 
         if courant == MODE_PDC_CONTROL:
@@ -2692,6 +2698,46 @@ class Pilote:
             return u0 * self._gain_re_par_volt, u1 * self._gain_re_par_volt
         return None
 
+    def _re_max_miller(self, T: float | None = None,
+                       p_amont: float | None = None) -> float | None:
+        """Re conduite maximal mesurable sur le Miller : ΔP Miller attendu à
+        la limite des consignes (marge_consigne_dp × saturation_dp × pleine
+        échelle), aux T et P amont données (sinon les dernières mesurées).
+        Au-delà, le Miller saturerait : c'est l'ISO qu'il faut, quel que soit
+        le seuil de bascule configuré (≈ 8 200 Re conduite à 20 °C, 7 900 à
+        30 °C : le ΔP croît avec μ à Re donné)."""
+        T = self.etat.get("temperature") if T is None else T
+        p_amont = self.etat.get("p_amont") if p_amont is None else p_amont
+        if not _nombre(T):
+            return None
+        p_amont = p_amont if _nombre(p_amont) else 0.0
+        cle = (round(T, 1), round(p_amont, -1))
+        if self._cache_re_max_miller[0] == cle:
+            return self._cache_re_max_miller[1]
+        dp_lim = self.marge_consigne_dp * self.saturation_dp \
+            * self._dp_pleine_echelle[CLE_DP["miller"]]
+        re_max = None
+        try:
+            qm = self.banc.re_conduite_vers_qm(self.banc.seuil_re, T, p_amont)
+            for _ in range(6):            # ΔP ~ qm² : convergence en 2-3 pas
+                dp = self.banc.dP_attendu("miller", qm, T, p_amont)
+                if dp <= 0:
+                    break
+                qm *= (dp_lim / dp) ** 0.5
+            else:
+                re_max = self.banc.qm_vers_re(
+                    qm, T, self.banc.patm_pa + p_amont)["re_conduite"]
+        except (ValueError, ZeroDivisionError):
+            re_max = None
+        self._cache_re_max_miller = (cle, re_max)
+        return re_max
+
+    def _miller_insuffisant(self, re_cond: float, T: float | None = None,
+                            p_amont: float | None = None) -> bool:
+        """Consigne hors de portée du capteur Miller : ISO obligatoire."""
+        re_max = self._re_max_miller(T, p_amont)
+        return re_max is not None and re_cond > re_max
+
     def _mode_cible_courant(self, re_cible_cond: float) -> ModeRegulation:
         """Mode visé pour la consigne (gestion_modes), avec sa mémoire
         d'hystérésis. Seul point de décision : la boucle et la redirection
@@ -2709,6 +2755,9 @@ class Pilote:
             precedent = ModeRegulation(self._mode_regulation)
         mode = determiner_mode_cible(re_cible_cond, self._config_modes,
                                      precedent)
+        if mode == ModeRegulation.NORMAL_LOW \
+                and self._miller_insuffisant(re_cible_cond):
+            mode = ModeRegulation.NORMAL_HIGH
         self._mode_cible_precedent = mode
         return mode
 

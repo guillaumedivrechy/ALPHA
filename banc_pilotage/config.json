@@ -39,8 +39,8 @@
     "dp_iso_500": 0.02
   },
   "selection_diaphragme": {
-    "_commentaire": "Miller si Re conduite attendu < seuil, ISO sinon. Hysteresis contre les commutations répétées.",
-    "seuil_re": 5000.0,
+    "_commentaire": "Bascule ISO / Miller, en Re CONDUITE (= 1,870 x Re veine) : Miller sous seuil - hysteresis, ISO au-dessus de seuil + hysteresis, choix precedent conserve entre les deux. Le Miller (orifice 21 mm) donne ~10 fois plus de Delta-P que l'ISO a debit egal : le garder le plus haut possible ameliore la precision. Limites : (1) ISO 5167 valable pour Re conduite >= 5000 (seuil - hysteresis >= 5000) ; (2) cote haut, la boucle bascule d'elle-meme en ISO des que le Delta-P Miller attendu depasserait le capteur (marge_consigne_dp x saturation_dp x 500 Pa, soit ~8200 Re conduite a 20 degC, ~7900 a 30 degC). 8000 +- 500 : Miller sous 7500 (4010 Re veine).",
+    "seuil_re": 8000.0,
     "hysteresis_re": 500.0
   },
   "actionneurs": {

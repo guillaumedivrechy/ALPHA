@@ -1114,7 +1114,7 @@ def test_seuil_bas_re_de_config_au_dela_du_seuil_miller_ignore():
     figé à u_min, consigne inatteignable et sans alarme. Le seuil est
     désormais ignoré et le motif publié."""
     pilote, es = _pilote_en_position("fc_3voies_90")
-    pilote.seuil_bas_re = 7547.0
+    pilote.seuil_bas_re = pilote.banc.seuil_re + 2547.0   # au-delà du seuil
     pilote.u_min_ventilateur = 0.3
     pilote.table_gains = TableGains()
     pilote.table_gains_bas_re = TableGains()
@@ -1177,7 +1177,7 @@ def test_seuil_bas_re_derive_de_la_table_miller():
     qui surestime le Re tenu à u_min et enverrait en PdC des consignes que
     le variateur à u_min ne peut pas atteindre."""
     pilote, es = _pilote_en_position("fc_3voies_90")
-    pilote.seuil_bas_re = 7547.0                         # config : ignoré
+    pilote.seuil_bas_re = pilote.banc.seuil_re + 2547.0  # config : ignoré
     pilote.u_min_ventilateur = 1.5
     pilote.table_gains = TableGains([(1.0, 3500.0), (9.0, 31500.0)])
     pilote.table_gains_bas_re = TableGains([(1.5, 2000.0), (5.0, 7000.0)])
@@ -1207,7 +1207,9 @@ def test_seuil_manuel_retenu_si_le_seuil_mesure_est_inutilisable():
     """config.json : seuil_bas_re_mesure = 7547 (inutilisable, au-delà du
     seuil Miller/ISO) masquait le seuil manuel réglé depuis l'IHM."""
     cfg = json.loads(json.dumps(CFG))
-    cfg["strategie_bas_re"].update({"seuil_bas_re_mesure": 7547, "seuil_re": 1800})
+    au_dela = cfg["selection_diaphragme"]["seuil_re"] + 2547
+    cfg["strategie_bas_re"].update({"seuil_bas_re_mesure": au_dela,
+                                    "seuil_re": 1800})
     pilote = Pilote(Banc(cfg), StubES({"temperature": 20.0}), cfg)
     assert pilote.seuil_bas_re == 1800
     cfg["strategie_bas_re"].update({"seuil_bas_re_mesure": 2500})
@@ -1305,7 +1307,9 @@ def test_seuils_diaphragme_de_la_boucle_alignes_sur_le_banc():
     pilote, es = _pilote_en_position("fc_3voies_0")
     pilote.bas_re_actif = False
     es.mesures["dp_iso_500"] = 20.0
-    pilote.definir_consigne(4600.0, "conduite")
+    # dans la bande d'hystérésis, côté bas (4600 avec l'ancien seuil 5000)
+    pilote.definir_consigne(pilote.banc.seuil_re
+                            - 0.8 * pilote.banc.hysteresis_re, "conduite")
     pilote.demarrer_regulation()
     for _ in range(5):
         pilote._cycle()

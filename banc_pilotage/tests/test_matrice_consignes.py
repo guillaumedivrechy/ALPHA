@@ -91,12 +91,17 @@ def test_consigne_depuis_chaque_etat(monkeypatch, tmp_path, depart, re, ref):
 
 def test_frontiere_iso_miller_sans_battement(monkeypatch, tmp_path):
     """Consignes alternées de part et d'autre du seuil ISO/Miller, dans la
-    bande d'hystérésis : aucune manœuvre de vanne."""
+    bande d'hystérésis : aucune manœuvre de vanne. Côté haut, la bande est
+    bornée par ce que le capteur Miller mesure (au-delà, ISO forcé)."""
     b = _banc(monkeypatch, tmp_path, "Miller")
-    b.consigne(5000.0, "conduite")
+    seuil, hyst = b.p.banc.seuil_re, b.p.banc.hysteresis_re
+    haut = min(seuil + 0.6 * hyst, 0.98 * b.p._re_max_miller())
+    bas = seuil - 0.6 * hyst
+    assert haut > seuil
+    b.consigne(seuil, "conduite")
     b.cycles(30)
     motifs = []
-    for re in (5400.0, 4600.0, 5400.0, 4600.0, 5400.0):
+    for re in (haut, bas, haut, bas, haut):
         b.consigne(re, "conduite")
         motifs += b.suivre(30.0)
     assert b.nb_manoeuvres_tor(motifs) == 0
@@ -322,3 +327,42 @@ def test_mode_pdc_avec_recopie_a_une_autre_echelle(monkeypatch, tmp_path, depart
     assert b.jusqu_a_convergence(80.0) is not None
     assert not b.p.etat.get("arret_securite")
     assert b.p.etat["re_moyen"] == pytest.approx(re, rel=0.01)
+
+
+def test_3000_re_veine_depuis_l_iso_passe_en_miller(monkeypatch, tmp_path):
+    """Constaté au banc avec l'ancien seuil (5000 Re conduite) : 3000 Re
+    veine (5610 conduite) restait en ISO, à ~20 Pa sur un capteur de
+    500 Pa. Bascule à 8000 ± 500 : Miller (~210 Pa), bypass ouvert."""
+    b = _banc(monkeypatch, tmp_path, "ISO")
+    b.consigne(3000.0, "veine")
+    assert b.jusqu_a_convergence(90) is not None
+    e = b.p.etat
+    assert b.p._mode_regulation == "normal_low"
+    assert e["diaphragme_lu"] == "miller"
+    assert e["mesures_brutes"]["fc_bypass_ouvert"]
+    assert e["dp"] > 150.0
+    assert not b.violations, b.violations[:3]
+
+
+@pytest.mark.parametrize("t_c", [20.0, 30.0])
+def test_miller_hors_capteur_bascule_en_iso(monkeypatch, tmp_path, t_c):
+    """Depuis le Miller, consigne dans la bande d'hystérésis mais au-delà de
+    ce que le capteur Miller mesure (ΔP croît avec μ, donc avec T) : ISO,
+    sans saturation ni consigne limitée. Sans ce garde-fou, 8000 ± 500
+    saturait le Miller (481 Pa à 8500 Re conduite et 20 °C)."""
+    b = BancSimule(monkeypatch, tmp_path, cfg_sur={
+        "simulation": {"temperature_c": t_c}})
+    b.consigne(2000.0, "veine")
+    assert b.jusqu_a_convergence(150) is not None
+    b.cycles(10)
+    re_max = b.p._re_max_miller()
+    seuil, hyst = b.p.banc.seuil_re, b.p.banc.hysteresis_re
+    assert re_max < seuil + hyst                 # garde-fou utile ici
+    consigne = 0.5 * (re_max + seuil + hyst)     # dans la bande, Miller saturé
+    b.consigne(consigne, "conduite")
+    assert b.jusqu_a_convergence(90) is not None
+    e = b.p.etat
+    assert b.p._mode_regulation == "normal_high"
+    assert e["diaphragme_lu"] == "iso"
+    assert not e.get("consigne_limitee") and not e.get("dp_sature")
+    assert e["re_moyen"] == pytest.approx(consigne, rel=0.01)

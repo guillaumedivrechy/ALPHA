@@ -18,8 +18,12 @@ deux fichiers** (qm, Re, C, ε, Y1).
    Ø76,6 mm ou veine d'essai) et démarre la régulation.
 2. Le logiciel convertit la consigne en débit massique visé, en déduit le
    **Re conduite attendu**, et commande la **vanne TOR 3 voies** vers le bon
-   diaphragme : Miller si Re < 5000, ISO sinon (hystérésis ±500 contre les
-   commutations répétées).
+   diaphragme : Miller sous la bascule, ISO au-dessus (8000 ± 500 Re
+   conduite par défaut, soit Miller sous ≈ 4 010 Re veine ; réglable dans
+   l'onglet Configuration). Le Miller donne ~10 fois plus de ΔP que l'ISO à
+   débit égal : il est gardé le plus haut possible. Au-delà de ce que son
+   capteur mesure (≈ 8 200 Re conduite à 20 °C, 7 900 à 30 °C), la boucle
+   passe d'elle-même en ISO.
 3. Le **ΔP attendu** est calculé (modèle inverse). Une consigne dont le
    ΔP dépasserait la plage du capteur est **bornée au maximum mesurable**
    (alerte « consigne limitée »). La tension variateur est la somme :
@@ -136,7 +140,7 @@ séquence.
 | `veine` | **à renseigner** : section [m²] et longueur caractéristique [m] pour le Re veine |
 | `fluide` | γ, Sutherland, humidité relative, valeurs forcées ρ/μ optionnelles |
 | `zero_capteurs` | offsets de zéro des capteurs ΔP (apprentissage « zéro capteurs ») |
-| `selection_diaphragme` | seuil Re = 5000 et hystérésis (± hystérésis autour du seuil) |
+| `selection_diaphragme` | bascule ISO / Miller en Re conduite (8000) et hystérésis (± 500) ; seuil − hystérésis ≥ 5000 (validité ISO) |
 | `actionneurs` | temps de course des vannes (chiens de garde), butées de la recopie PdC |
 | `regulation` | période, gains, rampe, tolérance, saturation ΔP (< 1), bornes PT100 |
 | `modbus` | IP du coupleur, **mapping des voies**, diaphragme de chaque butée 3 voies |
@@ -219,7 +223,11 @@ Points que le logiciel ne peut pas trancher seul :
   arrête le banc si l'écart-type du ΔP reste sous 0,1 Pa pendant 10 s en
   régulation : un capteur très peu bruité pourrait la déclencher à tort.
 - **Domaine de validité.** La corrélation RHG (prises d'angle, β = 0,535)
-  est normalisée pour ReD ≥ 5000 ; l'hystérésis garde l'ISO jusqu'à 4500.
+  est normalisée pour ReD ≥ 5000 : la saisie de la bascule impose
+  seuil − hystérésis ≥ 5000 (ISO employée au-dessus de 7500 par défaut).
+  La corrélation Miller est employée jusqu'à ≈ 8 200 Re conduite (limite
+  de son capteur) : sa validité dans cette plage est à confirmer au §8 de
+  MISE_EN_SERVICE.md (comparaison à une référence).
   En Miller, un ΔP sous 0,3 Pa (Re conduite ≈ 210) est lu comme un débit
   nul.
 - **Viscosité.** Avec `fluide.humidite_relative` > 0, μ suit la
@@ -287,7 +295,7 @@ python -m pytest tests/ -q
 |-------|---------------|-------|-------------|
 | **qm** | Débit massique | kg/s | Débit d'air traversant le diaphragme, calculé depuis ΔP (ISO 5167 / Miller) |
 | **qv** | Débit volumique | m³/s | qv = qm / ρ (conservation de la masse) |
-| **Re** | Nombre de Reynolds | - | Critère d'écoulement (Re = ρ·v·Lc/μ). Re > 5000 → diaphragme ISO ; Re < 5000 → Miller |
+| **Re** | Nombre de Reynolds | - | Critère d'écoulement (Re = ρ·v·Lc/μ). Re conduite au-dessus de la bascule (8000 par défaut) → ISO ; en dessous → Miller |
 | **ΔP** (dP) | Différence de pression | Pa | Pression différentielle au diaphragme, mesurée par capteurs FCO432 |
 | **P1_abs** | Pression absolue amont | Pa | P1_abs = P_atm + P_amont (gauge). Nécessaire pour calcul ρ (gaz parfait) |
 | **T** | Température | °C | Mesurée par PT100 (module 750-450), utilisée pour ρ et μ |
@@ -303,14 +311,14 @@ python -m pytest tests/ -q
 
 | Terme | Description |
 |-------|-------------|
-| **Diaphragme ISO** | Diaphragme normalisé ISO 5167-1 (NFX 10-102), d=41,018 mm, pour Re > 5000 (vanne 3V à 0° par défaut) |
-| **Diaphragme Miller** | Diaphragme corrélation Miller, d=21,113 mm, pour Re < 5000 (vanne 3V à 90° par défaut) |
+| **Diaphragme ISO** | Diaphragme normalisé ISO 5167-1 (NFX 10-102), d=41,018 mm, pour Re conduite au-dessus de la bascule ISO / Miller (vanne 3V à 0° par défaut) |
+| **Diaphragme Miller** | Diaphragme corrélation Miller, d=21,113 mm, pour Re conduite sous la bascule ISO / Miller (vanne 3V à 90° par défaut) |
 | **Vanne 3 voies** | Vanne TOR (carte GF3) : 0° → diaphragme ISO ; 90° → diaphragme Miller |
 | **Vanne bypass** | Vanne TOR : ouverte pendant manœuvre 3 voies pour éviter surpression |
 | **Re conduite** | Reynolds calculé dans la conduite Ø76,6 mm (critère de sélection diaphragme) |
 | **Re veine** | Reynolds dans la veine d'essai rectangulaire (consigne utilisateur possible) |
 | **Maître/esclave** | Montage de 2 capteurs (50 Pa + 500 Pa) avec bascule automatique pour précision bas ΔP |
-| **Hystérésis** | Marge de ±500 Re autour du seuil 5000 pour éviter commutations répétées |
+| **Hystérésis** | Marge de ±500 Re conduite autour de la bascule ISO / Miller (8000) pour éviter les commutations répétées |
 | **Anti-windup** | Limitation de l'intégrale du PI pour éviter dépassements lors de saturations |
 | **Bande morte** | Zone ±0,5% autour de la consigne où le terme P est nul (évite oscillations bruit capteur) |
 | **Séparation intégrale** | Au-delà de ±3% d'erreur, intégrale gelée tant que la mesure évolue (évite wind-up pendant montée) |
@@ -337,7 +345,7 @@ python -m pytest tests/ -q
 | Terme | Description |
 |-------|-------------|
 | **ISO 5167-1** | Norme internationale pour diaphragmes à Re > 5000. Calcul itératif de C (RHG ou Stolz) |
-| **Corrélation Miller** | Formule empirique pour diaphragmes à Re < 5000 (non normalisé ISO) |
+| **Corrélation Miller** | Formule empirique (non normalisée ISO), employée sous la bascule ISO / Miller |
 | **Gaz parfait** | ρ = P/(R·T) avec R = 287,05 J/(kg·K) pour l'air sec |
 | **Sutherland** | μ(T) = μ_ref · (T/T_ref)^(3/2) · (T_ref + S)/(T + S) avec S=110,4 K |
 | **Magnus-Tetens** | Formule pression vapeur saturante (humidité relative → correction ρ) |

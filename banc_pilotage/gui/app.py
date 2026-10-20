@@ -52,6 +52,18 @@ def _seuil_saturation(v, _):
 def _positif_ou_nul(v, _):
     return None if v >= 0 else "doit être positif ou nul"
 
+def _seuil_bascule(v, valeurs):
+    """Seuil de bascule ISO / Miller (Re conduite) : l'ISO n'est employée
+    qu'au-dessus de seuil − hystérésis, qui doit rester dans le domaine de
+    validité de la norme (ISO 5167-2, prises d'angle, β ≤ 0,56 :
+    Re conduite ≥ 5000). Côté haut, la boucle bascule d'elle-même en ISO
+    dès que le ΔP Miller sortirait de son capteur."""
+    hyst = valeurs.get(("selection_diaphragme", "hysteresis_re"), 0.0)
+    if v - hyst < 5000:
+        return ("seuil − hystérésis doit rester ≥ 5000 Re conduite "
+                "(domaine de validité ISO 5167)")
+    return None
+
 def _alpha(v, _):
     return None if 0 <= v < 1e-3 else "coefficient de dilatation invraisemblable"
 
@@ -97,8 +109,8 @@ PARAMETRES = [
     ]),
     ("Conditions et sélection", [
         (("patm_pa",),                              "Pression atmosphérique",   "Pa", _positif),
-        (("selection_diaphragme", "seuil_re"),      "Seuil Re Miller / ISO",    "—",  _positif),
-        (("selection_diaphragme", "hysteresis_re"), "Hystérésis de commutation","—",  _positif_ou_nul),
+        (("selection_diaphragme", "seuil_re"),      "Bascule ISO / Miller",     "Re cond.", _seuil_bascule),
+        (("selection_diaphragme", "hysteresis_re"), "Hystérésis de bascule",    "± Re cond.", _positif_ou_nul),
     ]),
 ]
 
@@ -2681,8 +2693,9 @@ class Application(QMainWindow):
         lbl_m = QLabel(
             "<b>7. Re mapping Miller (plage basse)</b><br>"
             "Détecte le décrochage du ventilateur et détermine u_min, u_seuil et PDC min. "
-            "Couvre la plage basse 250-5000 Re (Miller, bypass ouvert).<br>"
-            "<i>Paliers 12s, mesure automatique u_seuil et PDC min.</i>")
+            "Couvre toute la plage Miller (bypass ouvert), jusqu'à la saturation de "
+            "son capteur ΔP (≈ 8 200 Re conduite), au-delà de la bascule ISO / Miller.<br>"
+            "<i>Paliers 12 s, mesure automatique u_seuil (tension à la bascule) et PDC min.</i>")
         lbl_m.setWordWrap(True)
         lbl_m.setObjectName("muted")
         cml.addWidget(lbl_m)
@@ -2733,7 +2746,7 @@ class Application(QMainWindow):
         lbl_iso = QLabel(
             "<b>8. Re mapping ISO (plage haute)</b><br>"
             "Caractérisation plage haute (ISO, bypass fermé, PdC ouverte), "
-            "avec chevauchement de la plage Miller vers Re ≈ 3000-5000. "
+            "avec chevauchement de la plage Miller autour de la bascule ISO / Miller. "
             "Utilise le gain déjà appris, s'il existe, pour choisir sa "
             "tension de départ.<br>"
             "<i>Paliers de 12 s : descente vers Re ≈ 3000, puis montée "
@@ -3232,9 +3245,20 @@ class Application(QMainWindow):
         ], col=0, row=7)
 
         # colonne droite - section B
-        _grp("Sélection diaphragme", [
-            (("selection_diaphragme","seuil_re"),     "Seuil Re",    "—", "{:.0f}", _positif),
-            (("selection_diaphragme","hysteresis_re"),"Hystérésis",  "±", "{:.0f}", _positif_ou_nul),
+        # le seuil est en Re CONDUITE (il porte sur le débit vu par le
+        # diaphragme) ; son équivalent veine est rappelé dans le titre
+        try:
+            banc = Banc(self.cfg)
+            k = banc.qm_vers_re(1.0, 20.0, banc.patm_pa)
+            k = k["re_conduite"] / k["re_veine"]      # 1,870 : géométrie seule
+            sel = self.cfg["selection_diaphragme"]
+            equiv = (f" — Miller sous {(sel['seuil_re'] - sel.get('hysteresis_re', 0)) / k:.0f}"
+                     f" / ISO au-dessus de {(sel['seuil_re'] + sel.get('hysteresis_re', 0)) / k:.0f} Re veine")
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            equiv = ""
+        _grp("Bascule ISO / Miller (Re conduite)" + equiv, [
+            (("selection_diaphragme","seuil_re"),     "Bascule ISO / Miller", "Re cond.", "{:.0f}", _seuil_bascule),
+            (("selection_diaphragme","hysteresis_re"),"Hystérésis",  "± Re cond.", "{:.0f}", _positif_ou_nul),
         ], col=1, row=6)
 
         _grp("Actionneurs — temps de course", [

@@ -131,8 +131,8 @@ Temps mesurés sur le banc simulé, à titre de repère.
 | Consigne | Attendu | Repère simulé | Relevé |
 |---|---|---|---|
 | 12 000 Re veine depuis le repos | ISO, bypass fermé | « RÉGULÉ ✓ » ≤ 30 s | |
-| 3 000 depuis 12 000 | reste en ISO, aucune manœuvre | ≤ 15 s | |
-| 2 000 depuis 3 000 | Miller, bypass ouvert, variateur | ≤ 30 s | |
+| 3 000 depuis 12 000 | Miller, bypass ouvert (Miller sous ≈ 4 010 Re veine) | ≤ 30 s | |
+| 2 000 depuis 3 000 | reste en Miller, aucune manœuvre | ≤ 15 s | |
 | 300 depuis 2 000 | mode PdC, ventilateur fixe, sans creux sous la consigne | ≤ 40 s | |
 | 600 depuis le repos | mode PdC : PdC positionnée, PUIS ventilateur, dépassement < 10 % | ≤ 40 s | |
 | 15 000 | limitée ≈ 13 700 (« consigne limitée ») | ≤ 30 s | |
@@ -146,8 +146,13 @@ Temps mesurés sur le banc simulé, à titre de repère.
 
 - [ ] Comparer débit / Re à un instrument de référence en plusieurs points
       ISO et Miller.
-- [ ] Continuité Miller / ISO dans la zone de recouvrement (≈ 4 500 à
-      5 500 Re conduite) : écart entre les deux diaphragmes : ______ %.
+- [ ] Continuité Miller / ISO dans la zone de recouvrement (≈ 7 500 à
+      8 200 Re conduite, autour de la bascule) : écart entre les deux
+      diaphragmes : ______ %.
+- [ ] **Validité de la corrélation Miller jusqu'à la bascule** : le Miller
+      est désormais employé jusqu'à ≈ 8 200 Re conduite (avant : 5 000).
+      Comparer à la référence vers 6 000, 7 000 et 8 000 Re conduite.
+      Écart > tolérance : abaisser la bascule (onglet Configuration).
 - [ ] Facteur conduite / veine (1,870 avec la géométrie de `config.json`)
       cohérent avec la veine réelle (`veine.hauteur_m`, `largeur_m`).
 

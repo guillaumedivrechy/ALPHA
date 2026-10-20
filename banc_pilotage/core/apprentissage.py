@@ -911,7 +911,7 @@ class Apprentissage:
 
         # Config déjà correcte : bypass ouvert (Phase 1), PDC 100%
         # Seuil cible (Re de transition mode normal ↔ bas-Re)
-        re_seuil_cible = 5000.0
+        re_seuil_cible = self.pilote.banc.seuil_re   # bascule ISO / Miller
         u_seuil = None
 
         # Recherche u_seuil par paliers montants depuis u_min
@@ -1120,8 +1120,9 @@ class Apprentissage:
         Zone PDC (≤1V) garde pas fin 0.1V pour précision vanne lente.
 
         Phase 1  : Descente variateur (bypass ouvert, PDC 100%, Miller)
-        Phase 1b : Montée jusqu'à 6.5V pour créer chevauchement avec ISO
-        Phase 2  : Mesure u_seuil (tension au seuil Re=5000)
+        Phase 1b : Montée jusqu'à saturation du ΔP Miller (ou 10 V) : la
+                   table couvre toute la plage où le Miller peut être en ligne
+        Phase 2  : Mesure u_seuil (tension au seuil de bascule ISO / Miller)
         Phase 3  : Mesure PDC minimale exploitable
 
         Cette séquence peut être lancée indépendamment, puis complétée par
@@ -1213,13 +1214,16 @@ class Apprentissage:
         self._variateur(0.0)
         u_min_reco = round(min(derniere_stable + pas_precedent, u_depart), 2)
 
-        # ---- Phase 1b : montée Miller (pour couvrir au-delà du seuil 5000 Re) ----
-        # Objectif : étendre la table Miller jusqu'à ~6000-6500 Re pour créer un
-        # chevauchement avec la table ISO et assurer continuité au seuil 5000 Re.
+        # ---- Phase 1b : montée Miller jusqu'à la saturation de son capteur ----
+        # La table Miller doit couvrir toute la plage où le Miller peut être
+        # en ligne : jusqu'au seuil de bascule + hystérésis (8 500 Re conduite
+        # par défaut), et au plus jusqu'à la saturation du ΔP Miller, où la
+        # boucle passe d'elle-même en ISO. Arrêtée à 6,5 V (≈ 6 500 Re), elle
+        # ne couvrait que l'ancien seuil de 5 000.
         self.etat["statut"] = "Phase 1b : montée Miller (extension plage haute)"
 
-        # Partir de u_depart et monter jusqu'à 6.5V max (cible ~6000-6500 Re)
-        u_max_miller = 6.5
+        # Partir de u_depart et monter jusqu'à saturation du ΔP Miller ou 10 V
+        u_max_miller = 10.0
         u = u_depart
         pas_montee = 1.0  # Optimisé : 0.2→1.0V (R²>99.91% valide pas large)
 
@@ -1255,7 +1259,7 @@ class Apprentissage:
 
         # ---- Phase 2 : mesure u_seuil ----
         self.etat["statut"] = "mesure u_seuil (tension au seuil bas-Re)"
-        re_seuil_cible = 5000.0
+        re_seuil_cible = self.pilote.banc.seuil_re   # bascule ISO / Miller
         u_seuil = None
         u_test = u_min_reco
         pas_u = 0.5

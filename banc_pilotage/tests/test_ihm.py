@@ -242,3 +242,16 @@ def test_ordres_pendant_une_coupure_du_coupleur(ihm):
     a._arreter()
     non_transmis = [m for m in ihm.journal if "ordre non transmis" in m]
     assert len(non_transmis) >= 4, ihm.journal[:8]
+
+
+def test_bascule_iso_miller_validee_et_affichee_en_veine(ihm):
+    """Onglet Configuration : la bascule ISO / Miller est en Re conduite,
+    son équivalent veine est rappelé, et seuil − hystérésis ne peut pas
+    descendre sous 5000 Re conduite (validité ISO 5167)."""
+    import gui.app as gapp
+    from PySide6.QtWidgets import QLabel
+    cle_h = ("selection_diaphragme", "hysteresis_re")
+    assert gapp._seuil_bascule(8000.0, {cle_h: 500.0}) is None
+    assert "5000" in gapp._seuil_bascule(5200.0, {cle_h: 500.0})
+    textes = " ".join(w.text() for w in ihm.app.findChildren(QLabel))
+    assert "MILLER SOUS 4011 / ISO AU-DESSUS DE 4546 RE VEINE" in textes
