@@ -255,3 +255,21 @@ def test_bascule_iso_miller_validee_et_affichee_en_veine(ihm):
     assert "5000" in gapp._seuil_bascule(5200.0, {cle_h: 500.0})
     textes = " ".join(w.text() for w in ihm.app.findChildren(QLabel))
     assert "MILLER SOUS 4011 / ISO AU-DESSUS DE 4546 RE VEINE" in textes
+
+
+def test_changement_de_reference_convertit_la_consigne_saisie(ihm):
+    """8000 saisi en conduite devenait 8000 veine (1,87 fois le débit) au
+    passage en veine ; la courbe mêlait les deux unités."""
+    app = ihm.app
+    app._set_ref_re("conduite")
+    app.inp_re.setText("8000")
+    app._set_ref_re("veine")
+    assert int(app.inp_re.text()) == round(8000 / app._calculer_k())   # 4278
+    app._set_ref_re("conduite")
+    assert abs(int(app.inp_re.text()) - 8000) <= 1
+    app._hist_re.extend([5000.0, 5100.0])
+    app._hist_cible.extend([5000.0, 5000.0])
+    app._ref_courbe = "conduite"
+    app._historiser({"re_mesure": 2700.0, "reference": "veine",
+                     "regulation": False, "re_vise": 2700.0})
+    assert list(app._hist_re) == [2700.0] and list(app._hist_cible) == [0.0]

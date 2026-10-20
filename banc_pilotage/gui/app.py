@@ -3467,7 +3467,20 @@ class Application(QMainWindow):
 
     def _set_ref_re(self, ref: str, marquer: bool = True) -> None:
         """Change la référence Re (conduite/veine) et adapte les limites du slider."""
+        ancienne = self._ref_re
         self._ref_re = ref
+        if ancienne != ref:
+            # la consigne saisie désigne un débit : elle est convertie dans
+            # la nouvelle référence (×/÷ 1,87). Gardée telle quelle, « 8000 »
+            # conduite devenait 8000 veine au prochain « Appliquer », soit
+            # 1,87 fois le débit voulu.
+            try:
+                val = float(self.inp_re.text().replace(",", ".").replace(" ", ""))
+                k = self._calculer_k()
+                val = val / k if ref == "veine" else val * k
+                self.inp_re.setText(str(int(round(val))))
+            except (ValueError, AttributeError, ZeroDivisionError):
+                pass
         self._seg_set(self._ref_btns, 0 if ref == "conduite" else 1)
         self._unit_re.setText(f"Re {ref}")
         # hors régulation, le Re mesuré affiché suit ce choix
@@ -3478,15 +3491,18 @@ class Application(QMainWindow):
         slider_max = 100
         self._echelle_re = re_max / slider_max
 
-        # Adapter la consigne actuelle si elle dépasse le nouveau maximum
+        # Adapter la consigne actuelle si elle dépasse le nouveau maximum,
+        # et caler le curseur sur la nouvelle échelle
         try:
             consigne_actuelle = int(self.inp_re.text().replace(",", ".").replace(" ", ""))
             if consigne_actuelle > re_max:
+                consigne_actuelle = re_max
                 self.inp_re.setText(str(re_max))
-                self._slider_re.blockSignals(True)
-                self._slider_re.setValue(slider_max)
-                self._slider_re.blockSignals(False)
-        except (ValueError, AttributeError):
+            self._slider_re.blockSignals(True)
+            self._slider_re.setValue(min(slider_max, int(
+                consigne_actuelle / self._echelle_re)))
+            self._slider_re.blockSignals(False)
+        except (ValueError, AttributeError, ZeroDivisionError):
             pass
 
         if marquer:
@@ -3786,10 +3802,19 @@ class Application(QMainWindow):
             return
         if e.get("diaphragme_lu") == "en_transit":
             return                 # vanne 3 voies en course : pas de mesure
-        # consigne réellement visée (bornée au maximum mesurable)
-        cible = e.get("re_vise", e.get("re_cible", 0.0))
+        # consigne réellement visée (bornée au maximum mesurable) ; hors
+        # régulation, pas de consigne (la ligne restait sur l'ancienne)
+        cible = e.get("re_vise", e.get("re_cible", 0.0)) \
+            if e.get("regulation") else 0.0
         if not isinstance(cible, (int, float)) or not math.isfinite(cible):
             cible = 0.0
+        # référence changée : la courbe repart, sans mêler Re conduite et
+        # Re veine (1,87 fois plus petit) sur le même axe
+        ref = e.get("reference")
+        if ref != getattr(self, "_ref_courbe", ref):
+            self._hist_re.clear()
+            self._hist_cible.clear()
+        self._ref_courbe = ref
         if self._t0_acq is None:
             self._t0_acq = datetime.now()
         self._hist_re.append(re)

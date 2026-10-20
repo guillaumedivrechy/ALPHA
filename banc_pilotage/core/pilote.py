@@ -507,6 +507,10 @@ class Pilote:
         # carte P6 n'est pas réglée sur 0-10 V) : c'est lui qui dit si la
         # vanne est arrivée (attente du ventilateur, tenue sur la table).
         self._pdc_position_modele = 10.0
+        # modèle de diagnostic : la commande suivie à vitesse nominale, SANS
+        # recalage (ni recopie ni fins de course) -> une vanne bloquée s'en
+        # écarte durablement. Calé une fois, sur la première recopie.
+        self._pdc_modele_diag = 10.0
         self._pdc_cycles_divergents = 0
         self._pdc_recopie_vue = False      # estimée pas encore calée sur la recopie
         self._t_dernier_cycle = None
@@ -1800,6 +1804,9 @@ class Pilote:
             ecart_m = self._pdc_consigne - self._pdc_position_modele
             pas_m = min(abs(ecart_m), vitesse * dt)
             self._pdc_position_modele += pas_m if ecart_m > 0 else -pas_m
+            ecart_d = self._pdc_consigne - self._pdc_modele_diag
+            pas_d = min(abs(ecart_d), vitesse * dt)
+            self._pdc_modele_diag += pas_d if ecart_d > 0 else -pas_d
         if mesures.get("fc_pdc_ouvert") and not mesures.get("fc_pdc_ferme"):
             self._pdc_position_modele = max(self._pdc_position_modele,
                                             10.0 - self.ecart_course_pdc_v / 2)
@@ -1818,13 +1825,26 @@ class Pilote:
                 self._pdc_recopie_vue = True
                 self._pdc_cycles_divergents = 0
                 self.etat["defaut_pdc"] = False
-            # diagnostic : recopie incohérente avec le modèle d'actionneur
-            elif abs(pdc_recopie - self._pdc_position_estimee) > 1.0:
-                self._pdc_cycles_divergents += 1
+                plage0 = self.pdc_recopie_max - self.pdc_recopie_min
+                if plage0 > 0:
+                    self._pdc_modele_diag = min(max(
+                        (pdc_recopie - self.pdc_recopie_min) / plage0 * 10.0,
+                        0.0), 10.0)
             else:
-                self._pdc_cycles_divergents = 0
-                # recalage du modèle sur la réalité
+                # recalage de l'estimée (position publiée sans recopie, log)
                 self._pdc_position_estimee = pdc_recopie
+            # diagnostic : recopie comparée à la commande suivie à vitesse
+            # nominale (modèle jamais recalé). Comparée à l'estimée recalée
+            # sur la recopie à chaque cycle (pas de course ~0,1 V < seuil
+            # 1 V), une vanne bloquée n'était jamais signalée.
+            plage = self.pdc_recopie_max - self.pdc_recopie_min
+            if self._pdc_recopie_vue and plage > 0:
+                attendue = self.pdc_recopie_min \
+                    + self._pdc_modele_diag / 10.0 * plage
+                if abs(pdc_recopie - attendue) > max(1.0, 0.2 * plage):
+                    self._pdc_cycles_divergents += 1
+                else:
+                    self._pdc_cycles_divergents = 0
             self.etat["defaut_pdc"] = self._pdc_cycles_divergents \
                 > max(3, int(5.0 / self.periode))
         else:

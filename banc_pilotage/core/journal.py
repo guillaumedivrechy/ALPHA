@@ -25,6 +25,8 @@ COLONNES = [
     ("t_s", "t [s]"),
     ("re_cible", "Re consigne"),
     ("re_mesure", "Re calculé"),
+    ("re_vise", "Re consigne visée (bornée)"),
+    ("re_conduite", "Re conduite"),
     ("re_moyen", "Re moyen"),
     ("re_ecart_type", "Re ecart-type"),
     ("convergee", "convergee"),
@@ -47,7 +49,8 @@ COLONNES = [
 ]
 
 # grandeurs déduites du ΔP : sans objet pendant la course de la vanne 3 voies
-_MESURES_DEBIT = ("re_mesure", "re_moyen", "re_ecart_type", "dp", "qm")
+_MESURES_DEBIT = ("re_mesure", "re_conduite", "re_moyen", "re_ecart_type",
+                  "dp", "qm")
 
 # drapeaux de défaut recopiés dans la colonne « defauts »
 _DEFAUTS = ("erreur_com", "defaut_capteur", "defaut_vanne",
@@ -60,7 +63,8 @@ _DEFAUTS = ("erreur_com", "defaut_capteur", "defaut_vanne",
 # L'arrondi est une pure mise en forme : l'état du pilote et la boucle
 # continuent de travailler en flottant.
 COLONNES_ENTIERES = frozenset((
-    "re_cible", "re_mesure", "re_moyen", "re_ecart_type",
+    "re_cible", "re_mesure", "re_vise", "re_conduite", "re_moyen",
+    "re_ecart_type",
 ))
 
 

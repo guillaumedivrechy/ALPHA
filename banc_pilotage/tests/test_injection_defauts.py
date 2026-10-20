@@ -212,3 +212,17 @@ def test_pas_de_faux_signal_fige_au_demarrage_lent(monkeypatch, tmp_path):
     b.consigne(10000.0, "veine")
     assert b.jusqu_a_convergence(90) is not None
     assert not b.p.etat.get("arret_securite"), b.p.etat.get("arret_motif")
+
+
+def test_vanne_pdc_bloquee_signalee(monkeypatch, tmp_path):
+    """Mode PdC : l'actionneur PdC ne suit plus sa commande (bloqué grande
+    ouverte). Défaut PdC signalé (alerte), la régulation continue."""
+    b = _banc(monkeypatch, tmp_path, (12000.0, "veine"))
+    monkeypatch.setattr(b.sim, "ecrire_vanne_perte_charge", lambda v: None)
+    b.consigne(300.0, "veine")              # mode PdC : la vanne doit fermer
+    vu = False
+    for _ in range(int(90 / b.p.periode)):
+        b.cycles(b.p.periode, verifier=False)
+        vu = vu or bool(b.p.etat["defaut_pdc"])
+    assert b.p._mode_regulation == "pdc_control"
+    assert vu
