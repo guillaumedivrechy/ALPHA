@@ -94,15 +94,16 @@ def iso_qm_depuis_dP(geo: GeometrieDiaphragme, dP: float, T_celsius: float,
                      P1_abs: float, rho: float, nu: float, gamma: float,
                      formule_C: str = "RHG", L1: float = 0.0, L2p: float = 0.0,
                      Co: float = 0.0, qm_init: float = 0.1,
-                     tol: float = 1e-9, max_iter: int = 50) -> dict:
+                     tol: float = 1e-9, max_iter: int = 50,
+                     dP_nul: float = 0.3) -> dict:
     """Calcul direct ISO : ΔP mesuré [Pa] -> débit massique qm [kg/s].
 
     Itératif (le coefficient de décharge dépend de Re, qui dépend de qm),
     identique aux colonnes "1ère itér. / 2è itér. / 3è itér." du classeur.
     """
-    # Seuil de bruit : si ΔP < 0.3 Pa, débit considéré nul
+    # Seuil de bruit : si ΔP < dP_nul, débit considéré nul
     # Évite racine négative si offset capteur > ΔP mesuré
-    if dP < 0.3:
+    if dP < dP_nul:
         return {"qm": 0.0, "ReD": 0.0, "C": float("nan"), "epsilon": 1.0,
                 "v": 0.0, "iterations": 0}
     D, d = geo.diametres_a_T(T_celsius)
@@ -198,7 +199,7 @@ def _Y1_miller(beta: float, dP: float, P1_abs: float, gamma: float) -> float:
 
 def miller_qm_depuis_dP(geo: GeometrieDiaphragme, dP: float, T_celsius: float,
                         P1_abs: float, rho: float, mu: float,
-                        gamma: float) -> dict:
+                        gamma: float, dP_nul: float = 0.3) -> dict:
     """Calcul direct Miller : ΔP mesuré [Pa] -> débit massique q [kg/s].
 
     Formule I3 du classeur :
@@ -206,8 +207,8 @@ def miller_qm_depuis_dP(geo: GeometrieDiaphragme, dP: float, T_celsius: float,
 
     NB : la dilatation thermique du classeur Miller est référencée à 293,15 K.
     """
-    # Seuil de bruit : si ΔP < 0.3 Pa, débit considéré nul
-    if dP < 0.3:
+    # Seuil de bruit : si ΔP < dP_nul, débit considéré nul
+    if dP < dP_nul:
         return {"qm": 0.0, "ReD": 0.0, "C": float("nan"), "Y1": 1.0}
     TK = T_celsius + 273.15
     D = geo.D20 * (1.0 + geo.alpha_conduite * (TK - 293.15))

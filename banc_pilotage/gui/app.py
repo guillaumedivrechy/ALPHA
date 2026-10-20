@@ -94,6 +94,8 @@ def _beta_iso(v, valeurs):
 DEFAUTS_CLES_RECENTES = {
     ("strategie_bas_re", "u_ventilateur_pdc_v"): 0.0,
     ("regulation", "marge_consigne_dp_relative"): 0.95,
+    ("mesure_dp", "dp_min_mesurable_pa"): 0.15,
+    ("mesure_dp", "seuil_debit_nul_pa"): 0.05,
 }
 
 PARAMETRES = [
@@ -155,20 +157,14 @@ def _cfg_ecrire(cfg, chemin, valeur):
         chemin: Liste de clés (ex: ["regulation", "kp"])
         valeur: Valeur à écrire
 
-    Raises:
-        KeyError: Si une clé du chemin (sauf la dernière) n'existe pas
+    Une section absente (config.json antérieur à son ajout, ex. mesure_dp)
+    est créée : sans cela, l'onglet Configuration ne pouvait plus rien
+    enregistrer dès qu'il affichait un réglage récent.
     """
     v = cfg
-    try:
-        for k in chemin[:-1]:
-            v = v[k]
-        v[chemin[-1]] = valeur
-    except KeyError as e:
-        chemin_str = ".".join(str(k) for k in chemin)
-        raise KeyError(
-            f"Clé parente manquante dans config.json : {chemin_str} "
-            f"(échec à '{e.args[0]}' dans {chemin[:-1]})"
-        ) from e
+    for k in chemin[:-1]:
+        v = v.setdefault(k, {})
+    v[chemin[-1]] = valeur
 
 def _hsep():
     sep = QFrame()
@@ -2716,7 +2712,7 @@ class Application(QMainWindow):
         lbl_pdc = QLabel(
             "<b>7b. Table PdC seule (très bas Re)</b><br>"
             "Ventilateur tenu à la tension du mode PdC (onglet Configuration), "
-            "PdC fermée par paliers tant que le Re reste mesurable (ΔP Miller ≥ 1 Pa). "
+            "PdC fermée par paliers tant que le Re reste mesurable (ΔP Miller ≥ plancher de mesure, onglet Configuration). "
             "Utilise le u_min du Re mapping Miller. ~5 min.")
         lbl_pdc.setWordWrap(True)
         lbl_pdc.setObjectName("muted")
@@ -3270,6 +3266,10 @@ class Application(QMainWindow):
 
         _grp("Très bas Re (vanne PdC)", [
             (("strategie_bas_re","u_ventilateur_pdc_v"), "Ventilateur en mode PdC", "V",
+             "{:.2f}", _positif_ou_nul),
+            (("mesure_dp","dp_min_mesurable_pa"), "Plancher de mesure ΔP Miller", "Pa",
+             "{:.2f}", _positif),
+            (("mesure_dp","seuil_debit_nul_pa"), "Débit nul sous", "Pa",
              "{:.2f}", _positif_ou_nul),
         ], col=0, row=8)
 

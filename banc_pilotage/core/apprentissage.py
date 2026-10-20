@@ -264,12 +264,14 @@ class Apprentissage:
         13 000, feed-forward extrapolé hors table)."""
         return self.pilote.etat.get("re_conduite") or 0.0
 
-    def _re_min_mesurable(self, dp_min_pa: float = 1.0) -> float:
+    def _re_min_mesurable(self, dp_min_pa: float | None = None) -> float:
         """Re conduite sous lequel le Miller ne mesure plus utilement : ΔP
-        Miller de dp_min_pa (le logiciel lit 0 sous 0,3 Pa). Remplace un
-        seuil fixe de 200 Re, pensé pour une unité et sans rapport avec le
-        capteur : la phase PdC enregistrait des paliers à ΔP < 1 Pa (bruit
-        du même ordre que la mesure), ou n'en enregistrait aucun en Re veine."""
+        Miller de mesure_dp.dp_min_mesurable_pa (0,15 Pa : ~80 Re veine sur
+        la voie maître/esclave 50/500 Pa ; le débit est lu nul sous
+        seuil_debit_nul_pa). Borne la table PdC, donc la consigne la plus
+        basse. Remplace un seuil fixe de 200 Re, pensé pour une unité."""
+        if dp_min_pa is None:
+            dp_min_pa = self.pilote.dp_min_mesurable
         e = self.pilote.etat
         T = e.get("temperature") or 20.0
         p_amont = e.get("p_amont") or 0.0
@@ -1042,7 +1044,7 @@ class Apprentissage:
                         bruit = (max(re_mesures) - min(re_mesures)) / max(re_moy, 1.0)
 
                         # Critères de décrochage :
-                        # - Re sous la plage mesurable du Miller (ΔP < 1 Pa)
+                        # - Re sous la plage mesurable du Miller (plancher ΔP)
                         # - Bruit > 20% (instabilité forte, tests empiriques : 50% OK)
                         decrochage = (re_moy < self._re_min_mesurable() or bruit > 0.20)
 
@@ -1356,7 +1358,7 @@ class Apprentissage:
         msg_pdc_min = f", PDC min ≈ {pdc_min_exploitable:.0f}%" if pdc_min_exploitable else ""
         msg_re_min = f" (Re min ≈ {re_min_exploitable:.0f})" if re_min_exploitable else ""
         if not paliers_pdc:
-            msg_pdc_min = (", PdC : aucun palier mesurable (ΔP Miller < 1 Pa)"
+            msg_pdc_min = (", PdC : aucun palier mesurable (ΔP Miller sous le plancher de mesure)"
                            " — mode PdC inactif")
         self.etat["statut"] = (
             f"terminé Miller : u_min ≈ {u_min_reco}V{msg_u_seuil}{msg_pdc_min}{msg_re_min}")
@@ -1467,7 +1469,7 @@ class Apprentissage:
         else:
             self.etat["statut"] = (
                 f"terminé : ventilateur {u_vent:.2f} V, aucun palier PdC "
-                "mesurable (ΔP Miller < 1 Pa) — mode PdC inactif")
+                "mesurable (ΔP Miller sous le plancher de mesure) — mode PdC inactif")
 
     def _test_re_mapping_iso(self, u_seuil: float | None = None,
                              pas: float = 1.5, t_palier_s: float = 12.0) -> None:

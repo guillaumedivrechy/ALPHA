@@ -147,6 +147,12 @@ Temps mesurés sur le banc simulé, à titre de repère.
 - [ ] « RÉGULÉ ✓ » ne s'allume que Re stabilisé (jamais pendant une
       transition) et ne clignote pas en régime établi.
 - [ ] Bruit du Re à 300 Re veine en mode PdC : ______ %.
+- [ ] Très bas Re (100 Re veine ≈ 0,24 Pa sur le Miller) : écart-type du
+      ΔP Miller ventilateur arrêté (page Voies) : ______ Pa — doit rester
+      nettement sous le plancher de mesure (0,15 Pa) et le seuil de débit
+      nul (0,05 Pa), onglet Configuration. La « Table PdC » indique le Re
+      min atteint PdC fermée : s'il dépasse la cible, baisser « Ventilateur
+      en mode PdC » (0,5 V atteint 100 Re veine en simulation) et la refaire.
 
 ## 8. Métrologie
 

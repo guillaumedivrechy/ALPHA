@@ -38,6 +38,11 @@
     "dp_diaph_500": 0.01,
     "dp_iso_500": 0.02
   },
+  "mesure_dp": {
+    "_commentaire": "Tres bas debit, voie Delta-P Miller (couple maitre/esclave 50/500 Pa, resolution ~0,015 Pa). seuil_debit_nul_pa : Delta-P sous lequel le debit est lu nul (bruit et offset du capteur ; 0,3 Pa auparavant, soit ~110 Re veine lus 0). dp_min_mesurable_pa : plancher de mesure ; la table PdC s'arrete a ce Delta-P, ce qui borne la consigne la plus basse (0,15 Pa ~ 80 Re veine ; 1 Pa auparavant, ~200 Re veine). A verifier au banc : ecart-type du Delta-P Miller ventilateur arrete, nettement sous ces valeurs. Changer dp_min_mesurable_pa : refaire l'apprentissage Table PdC.",
+    "seuil_debit_nul_pa": 0.05,
+    "dp_min_mesurable_pa": 0.15
+  },
   "selection_diaphragme": {
     "_commentaire": "Bascule ISO / Miller, en Re CONDUITE (= 1,870 x Re veine) : Miller sous seuil - hysteresis, ISO au-dessus de seuil + hysteresis, choix precedent conserve entre les deux. Le Miller (orifice 21 mm) donne ~10 fois plus de Delta-P que l'ISO a debit egal : le garder le plus haut possible ameliore la precision. Limites : (1) ISO 5167 valable pour Re conduite >= 5000 (seuil - hysteresis >= 5000) ; (2) cote haut, la boucle bascule d'elle-meme en ISO des que le Delta-P Miller attendu depasserait le capteur (marge_consigne_dp x saturation_dp x 500 Pa, soit ~8200 Re conduite a 20 degC, ~7900 a 30 degC). 8000 +- 500 : Miller sous 7500 (4010 Re veine).",
     "seuil_re": 8000.0,

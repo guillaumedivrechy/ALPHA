@@ -83,6 +83,8 @@ class Banc:
         self.hysteresis_re = s.get("hysteresis_re", 500)
 
         self.patm_pa = cfg.get("patm_pa", 101325.0)
+        # ΔP sous lequel le débit est lu nul (bruit / offset du capteur)
+        self.dp_nul_pa = cfg.get("mesure_dp", {}).get("seuil_debit_nul_pa", 0.05)
         self.D_conduite = self.geo_iso.D20             # conduite commune Ø81,4
 
     # ---------------------------------------------------------------- consigne
@@ -151,10 +153,11 @@ class Banc:
         nu = self.fluide.nu(P1_abs, T)
         if diaphragme == "iso":
             r = iso_qm_depuis_dP(self.geo_iso, dP, T, P1_abs, rho, nu,
-                                 self.fluide.gamma, self.formule_C_iso)
+                                 self.fluide.gamma, self.formule_C_iso,
+                                 dP_nul=self.dp_nul_pa)
         else:
             r = miller_qm_depuis_dP(self.geo_miller, dP, T, P1_abs, rho, mu,
-                                    self.fluide.gamma)
+                                    self.fluide.gamma, dP_nul=self.dp_nul_pa)
         r.update(self.qm_vers_re(r["qm"], T, P1_abs))
         r["rho"] = rho
         r["mu"] = mu

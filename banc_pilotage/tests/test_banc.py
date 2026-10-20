@@ -57,3 +57,20 @@ def test_mesure_coherente_avec_inverse(banc):
         dp = banc.dP_attendu(diaph, qm, T=20.0, P1_eff=25.0)
         r = banc.qm_depuis_mesures(diaph, dp, T=20.0, P1_eff=25.0)
         assert r["qm"] == pytest.approx(qm, rel=1e-6)
+
+
+def test_tres_bas_debit_mesure_sous_0_3_pa():
+    """Constaté au banc : le Re stagnait à ~200 Re veine. 100 Re veine
+    donnent 0,24 Pa sur le Miller, lus comme un débit nul sous l'ancien
+    seuil de 0,3 Pa. Seuil réglable (mesure_dp.seuil_debit_nul_pa, 0,05)."""
+    import json
+    from pathlib import Path
+    from core.banc import Banc
+    cfg = json.loads((Path(__file__).resolve().parent.parent / "config.json")
+                     .read_text(encoding="utf-8"))
+    banc = Banc(cfg)
+    r = banc.qm_depuis_mesures("miller", 0.241, 24.0, 0.0)
+    assert r["re_veine"] == pytest.approx(100.0, rel=0.02)
+    assert banc.qm_depuis_mesures("miller", 0.04, 24.0, 0.0)["qm"] == 0.0
+    cfg["mesure_dp"]["seuil_debit_nul_pa"] = 0.3            # ancien réglage
+    assert Banc(cfg).qm_depuis_mesures("miller", 0.241, 24.0, 0.0)["qm"] == 0.0

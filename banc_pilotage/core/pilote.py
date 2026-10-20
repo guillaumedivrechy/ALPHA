@@ -543,6 +543,9 @@ class Pilote:
         self.marge_ventilateur_pdc = _marge_pdc(srcfg.get("marge_ventilateur_pdc", 1.15))
         # tension imposée au ventilateur en mode PdC (0 = u_min × marge)
         self.u_ventilateur_pdc = srcfg.get("u_ventilateur_pdc_v", 0.0) or 0.0
+        # plancher de mesure du ΔP Miller (borne la table PdC apprise)
+        self.dp_min_mesurable = cfg.get("mesure_dp", {}).get(
+            "dp_min_mesurable_pa", 0.15)
         # PDC minimale exploitable (%) mesurée par apprentissage, défaut 50%
         # (limite physique décrochage observée empiriquement)
         self.pdc_min_exploitable_pct = srcfg.get("pdc_min_exploitable_pct", 50.0)
@@ -1039,6 +1042,8 @@ class Pilote:
                 "marge_ventilateur_pdc", self.marge_ventilateur_pdc))
             self.u_ventilateur_pdc = sr.get("u_ventilateur_pdc_v",
                                             self.u_ventilateur_pdc) or 0.0
+            self.dp_min_mesurable = cfg.get("mesure_dp", {}).get(
+                "dp_min_mesurable_pa", self.dp_min_mesurable)
             self.pdc_min_exploitable_pct = sr.get("pdc_min_exploitable_pct",
                                                    self.pdc_min_exploitable_pct)
             self.re_min_exploitable = sr.get("re_min_exploitable",
