@@ -541,6 +541,8 @@ class Pilote:
         self.u_seuil_bas_re = srcfg.get("u_seuil_bas_re_v", 0.0)
         # facteur (×) sur u_min : tension du ventilateur en mode PdC (cf. _u_pdc)
         self.marge_ventilateur_pdc = _marge_pdc(srcfg.get("marge_ventilateur_pdc", 1.15))
+        # tension imposée au ventilateur en mode PdC (0 = u_min × marge)
+        self.u_ventilateur_pdc = srcfg.get("u_ventilateur_pdc_v", 0.0) or 0.0
         # PDC minimale exploitable (%) mesurée par apprentissage, défaut 50%
         # (limite physique décrochage observée empiriquement)
         self.pdc_min_exploitable_pct = srcfg.get("pdc_min_exploitable_pct", 50.0)
@@ -1035,6 +1037,8 @@ class Pilote:
             self.u_seuil_bas_re = sr.get("u_seuil_bas_re_v", self.u_seuil_bas_re)
             self.marge_ventilateur_pdc = _marge_pdc(sr.get(
                 "marge_ventilateur_pdc", self.marge_ventilateur_pdc))
+            self.u_ventilateur_pdc = sr.get("u_ventilateur_pdc_v",
+                                            self.u_ventilateur_pdc) or 0.0
             self.pdc_min_exploitable_pct = sr.get("pdc_min_exploitable_pct",
                                                    self.pdc_min_exploitable_pct)
             self.re_min_exploitable = sr.get("re_min_exploitable",
@@ -2710,7 +2714,16 @@ class Pilote:
         if self.seuil_bas_re and not self._seuil_bas_re_config_invalide():
             return self.seuil_bas_re
         bornes = self._re_bornes_bas_re()
-        return 0.5 * (bornes[0] + bornes[1]) if bornes else 0.0
+        if not bornes:
+            return 0.0
+        if self.u_ventilateur_pdc and self.u_ventilateur_pdc > \
+                (self.u_min_ventilateur or 0.0) * self.marge_ventilateur_pdc:
+            # tension du mode PdC imposée : le mode PdC prend le relais dès
+            # Re(u_pdc), le variateur ne descend pas (ou guère) en dessous.
+            # / 1,06 : PdC ouverte, le mode PdC couvre encore le haut de la
+            # bande d'hystérésis (seuil × 1,05).
+            return bornes[1] / 1.06
+        return 0.5 * (bornes[0] + bornes[1])
 
     def _mode_pdc_caracterise(self) -> bool:
         """Le mode PdC fixe le ventilateur à u_min × marge : il n'est sûr
@@ -2739,9 +2752,12 @@ class Pilote:
         return self.table_gains_bas_re.re_pour_u_ff(self.u_min_ventilateur)
 
     def _u_pdc(self) -> float:
-        """Tension du ventilateur en mode PdC : u_min × marge_ventilateur_pdc."""
+        """Tension du ventilateur en mode PdC : u_min × marge_ventilateur_pdc,
+        ou la tension imposée (u_ventilateur_pdc_v) si elle est plus haute :
+        ventilateur tenu à une vitesse plus franche, la PdC règle le débit."""
         u_min = self.u_min_ventilateur or _U_MIN_VENTILATEUR_FALLBACK
-        return min(u_min * self.marge_ventilateur_pdc, 10.0)
+        return min(max(u_min * self.marge_ventilateur_pdc,
+                       self.u_ventilateur_pdc or 0.0), 10.0)
 
     def _re_bornes_bas_re(self) -> tuple[float, float] | None:
         """(Re(u_min), Re(u_pdc)) en Miller, bypass ouvert, PdC ouverte :

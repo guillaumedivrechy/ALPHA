@@ -102,6 +102,12 @@ Après « Appliquer » d'un Re mapping, le message indique les paliers écartés
 - [ ] Re mapping Miller → Appliquer. Relever u_min : ______ V. **La valeur
       actuelle de `strategie_bas_re.u_min_ventilateur_v` (0,3 V) ne vient pas
       de ce banc : elle doit être remplacée par la mesure.**
+- [ ] Table PdC (7b), si le ventilateur doit être tenu plus haut que u_min en
+      très bas Re : régler d'abord « Ventilateur en mode PdC » (onglet
+      Configuration, 1,0 V retenu), puis lancer « 7b. Table PdC » →
+      Appliquer. Le mode PdC prend le relais sous Re(cette tension) / 1,06.
+      « Aucun palier mesurable » : à cette tension, ΔP Miller < 1 Pa dès la
+      PdC ouverte — monter la tension.
 - [ ] Re mapping ISO → Appliquer.
 - [ ] Essai indiciel → Appliquer (kp, ki, τ).
 - [ ] Au redémarrage suivant, plus de message « Stratégie bas-Re

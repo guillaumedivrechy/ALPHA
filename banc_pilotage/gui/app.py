@@ -89,6 +89,13 @@ def _beta_iso(v, valeurs):
             return f"β = {beta:.3f} hors plage ISO 5167 (0,10 à 0,75)"
     return None
 
+# clés de config.json ajoutées en cours de vie du logiciel : valeur prise
+# par le pilote quand elles manquent (affichée telle quelle dans l'onglet)
+DEFAUTS_CLES_RECENTES = {
+    ("strategie_bas_re", "u_ventilateur_pdc_v"): 0.0,
+    ("regulation", "marge_consigne_dp_relative"): 0.95,
+}
+
 PARAMETRES = [
     ("Diaphragme ISO 5167", [
         (("diaphragme_iso", "D20_mm"),         "Diamètre conduite D20",  "mm",   _positif),
@@ -2704,6 +2711,23 @@ class Application(QMainWindow):
         self._lbl_statut_re_mapping_miller = QLabel("—")
         self._lbl_statut_re_mapping_miller.setObjectName("mono")
         cml.addWidget(self._lbl_statut_re_mapping_miller)
+        # table PdC seule : re-mesurée à la tension du mode PdC
+        # (strategie_bas_re.u_ventilateur_pdc_v), sans refaire tout le Miller
+        lbl_pdc = QLabel(
+            "<b>7b. Table PdC seule (très bas Re)</b><br>"
+            "Ventilateur tenu à la tension du mode PdC (onglet Configuration), "
+            "PdC fermée par paliers tant que le Re reste mesurable (ΔP Miller ≥ 1 Pa). "
+            "Utilise le u_min du Re mapping Miller. ~5 min.")
+        lbl_pdc.setWordWrap(True)
+        lbl_pdc.setObjectName("muted")
+        cml.addWidget(lbl_pdc)
+        self._btn_table_pdc = QPushButton("▶  7b. Lancer Table PdC")
+        self._btn_table_pdc.setMinimumHeight(40)
+        self._btn_table_pdc.clicked.connect(lambda: self._lancer_test("table_pdc"))
+        cml.addWidget(self._btn_table_pdc)
+        self._lbl_statut_table_pdc = QLabel("—")
+        self._lbl_statut_table_pdc.setObjectName("mono")
+        cml.addWidget(self._lbl_statut_table_pdc)
         cml.addStretch()
         vm.addWidget(col_m, 0)
         self._plot_re_mapping_miller = pg.PlotWidget()
@@ -2931,7 +2955,10 @@ class Application(QMainWindow):
                 try:
                     raw = _cfg_lire(self.cfg, chemin)
                 except (KeyError, TypeError):
-                    raw = "—"
+                    # clé ajoutée après la création de ce config.json : sa
+                    # valeur par défaut (sinon « — » rendait tout
+                    # enregistrement de l'onglet impossible)
+                    raw = DEFAUTS_CLES_RECENTES.get(chemin, "—")
                 rw = QWidget()
                 rw.setStyleSheet(
                     "background:transparent; border-bottom:1px solid #E9EEF1;")
@@ -3240,6 +3267,11 @@ class Application(QMainWindow):
             (("regulation","recul_saturation_v_par_s"),"Recul si saturé", "V/s",
              "{:.2f}", _positif),
         ], col=0, row=7)
+
+        _grp("Très bas Re (vanne PdC)", [
+            (("strategie_bas_re","u_ventilateur_pdc_v"), "Ventilateur en mode PdC", "V",
+             "{:.2f}", _positif_ou_nul),
+        ], col=0, row=8)
 
         # colonne droite - section B
         # le seuil est en Re CONDUITE (il porte sur le débit vu par le
@@ -4214,6 +4246,11 @@ class Application(QMainWindow):
              lambda r: (f"K={r['gain_re_par_v']} Re/V  "
                         f"τ={r['tau_s']} s  "
                         f"kp={r['kp_propose']}  ki={r['ki_propose']}"))
+        _maj(self._btn_table_pdc, self._lbl_statut_table_pdc, "table_pdc",
+             lambda r: (f"{len(r['paliers_PDC_Re'])} paliers à {r['u_ventilateur_v']} V  "
+                        f"PdC min = {r['pdc_min_exploitable_pct']} %  "
+                        f"Re min = {r['re_min_exploitable']}")
+             if r["paliers_PDC_Re"] else "aucun palier mesurable : mode PdC inactif")
         # Re mapping Miller (plage basse)
         _maj(self._btn_re_mapping_miller, self._lbl_statut_re_mapping_miller, "re_mapping_miller",
              lambda r: (f"U min = {r['u_min_exploitable_v']} V  "

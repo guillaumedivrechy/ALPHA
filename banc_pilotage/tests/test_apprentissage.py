@@ -344,3 +344,42 @@ def test_miller_sans_palier_pdc_efface_les_resultats_pdc_precedents(tmp_path):
     miller = json.loads((tmp_path / "apprentissages" / "miller.json")
                         .read_text("utf-8"))
     assert "table_gains_pdc" not in miller["tables"]
+
+
+def test_table_pdc_seule_a_la_tension_imposee_puis_regulation(monkeypatch,
+                                                              tmp_path):
+    """Choix d'exploitation : ventilateur tenu à une tension imposée en mode
+    PdC (au-dessus de u_min × marge), la PdC règle le débit. L'apprentissage
+    « Table PdC » mesure la table à cette tension sans refaire le Re mapping
+    Miller ; « Appliquer » garde u_seuil dans miller.json ; une consigne
+    très basse passe en mode PdC, ventilateur à la tension imposée."""
+    import time as _time
+    from banc_simule import BancSimule
+    b = BancSimule(monkeypatch, tmp_path, cfg_sur={
+        "strategie_bas_re": {"u_ventilateur_pdc_v": 2.0}})
+    p = b.p
+    assert p._u_pdc() == 2.0                        # > u_min 1,3 × 1,15
+    monkeypatch.setattr(_time, "sleep",
+                        lambda s: b.cycles(max(s, p.periode), verifier=False))
+    p.suspendre_maintien_tor()
+    app = Apprentissage(p, b.cfg, tmp_path / "config.json")
+    monkeypatch.setattr(app._annule, "wait", lambda t=None: b.cycles(
+        max(t or 0.0, p.periode), verifier=False) or False)
+    u_seuil = p.u_seuil_bas_re
+    app._test_table_pdc()
+    r = app.resultats["table_pdc"]
+    assert r["u_ventilateur_v"] == 2.0 and len(r["paliers_PDC_Re"]) >= 3
+    app.appliquer()
+    miller = json.loads((tmp_path / "apprentissages" / "miller.json")
+                        .read_text("utf-8"))
+    assert miller["parametres"]["u_seuil_bas_re_v"] == u_seuil
+    assert len(miller["tables"]["table_gains_pdc"]) == len(r["paliers_PDC_Re"])
+    p.reprendre_maintien_tor()
+    # seuil : Re(2 V) / 1,06 ; consigne 20 % plus bas -> mode PdC
+    seuil = p._seuil_bas_re()
+    assert seuil == pytest.approx(p.table_gains_bas_re.re_pour_u_ff(2.0) / 1.06)
+    b.consigne(0.8 * seuil, "conduite")
+    assert b.jusqu_a_convergence(150) is not None
+    assert p._mode_regulation == "pdc_control"
+    assert p.etat["u_variateur"] == pytest.approx(2.0)
+    assert p.etat["pdc_consigne"] < 9.0              # la PdC règle

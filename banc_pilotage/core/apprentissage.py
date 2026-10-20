@@ -72,10 +72,15 @@ class Apprentissage:
                  "re_mapping": self._test_re_mapping,
                  "re_mapping_miller": self._test_re_mapping_miller,
                  "re_mapping_iso": self._test_re_mapping_iso,
+                 "table_pdc": self._test_table_pdc,
                  "zero_capteurs": self._test_zero_capteurs,
                  "verif_cablage": self._test_verif_cablage}.get(test)
         if cible is None:
             return f"Test inconnu : {test}"
+        if test == "table_pdc" and not (self.pilote.u_min_ventilateur
+                                        and self.pilote.table_gains_bas_re.valide_ff()):
+            return ("Lancer d'abord le Re mapping Miller : la table PdC se "
+                    "mesure à partir du u_min qu'il détermine.")
         if test == "indiciel" and not self.pilote.table_gains.valide_ff():
             return ("Lancer d'abord la courbe de gain : les kp/ki proposés "
                     "par l'essai indiciel s'appliquent à la correction en "
@@ -999,8 +1004,7 @@ class Apprentissage:
         if t is not None:
             # table PdC apprise à la tension du ventilateur EN MODE PdC
             # (u_min × marge_ventilateur_pdc), celle où la boucle l'utilise
-            self._variateur(round(
-                u_min_reco * self.pilote.marge_ventilateur_pdc, 2))
+            self._variateur(round(self._u_ventilateur_pdc(u_min_reco), 2))
 
             # PDC ouverte au départ
             self.pilote.commander_vanne_perte_charge_pct(100.0)
@@ -1326,6 +1330,50 @@ class Apprentissage:
             u_seuil = min(u_test, 10.0)
 
         # ---- Phase 3 : mesure PDC minimale et table de gains PDC ----
+        pdc_min_exploitable, re_min_exploitable, paliers_pdc = \
+            self._mesurer_table_pdc(self._u_ventilateur_pdc(u_min_reco))
+
+        self._variateur(0.0)
+
+        # Sauvegarder résultats Miller
+        if self._interrompu():
+            # résultats partiels : rien d'applicable (« Appliquer » les
+            # écrirait en configuration)
+            self._statut_annule()
+            return
+        self.resultats["re_mapping_miller"] = {
+            "u_min_exploitable_v": u_min_reco,
+            "u_seuil_bas_re_v": u_seuil,
+            "derniere_stable_v": derniere_stable,
+            "re_a_u_min": round(re_a_derniere),
+            "pdc_min_exploitable_pct": round(pdc_min_exploitable, 1) if pdc_min_exploitable else None,
+            "re_min_exploitable": round(re_min_exploitable) if re_min_exploitable else None,
+            "paliers_V_Re": [[v, re] for v, re in paliers],
+            "paliers_PDC_Re": [[pdc, re] for pdc, re in paliers_pdc],
+        }
+
+        msg_u_seuil = f", u_seuil ≈ {u_seuil:.1f}V" if u_seuil else ""
+        msg_pdc_min = f", PDC min ≈ {pdc_min_exploitable:.0f}%" if pdc_min_exploitable else ""
+        msg_re_min = f" (Re min ≈ {re_min_exploitable:.0f})" if re_min_exploitable else ""
+        if not paliers_pdc:
+            msg_pdc_min = (", PdC : aucun palier mesurable (ΔP Miller < 1 Pa)"
+                           " — mode PdC inactif")
+        self.etat["statut"] = (
+            f"terminé Miller : u_min ≈ {u_min_reco}V{msg_u_seuil}{msg_pdc_min}{msg_re_min}")
+
+    def _u_ventilateur_pdc(self, u_min: float) -> float:
+        """Tension du ventilateur en mode PdC pour ce u_min : même règle que
+        Pilote._u_pdc (u_min × marge, ou la tension imposée si plus haute)."""
+        return max(u_min * self.pilote.marge_ventilateur_pdc,
+                   self.pilote.u_ventilateur_pdc or 0.0)
+
+    def _mesurer_table_pdc(self, u_ventilateur: float) -> tuple:
+        """Phase PdC : Miller, bypass ouvert, ventilateur tenu à
+        u_ventilateur ; la PdC se ferme par paliers tant que le Re reste
+        mesurable. Retourne (pdc_min_exploitable_pct, re_min_exploitable,
+        paliers [(pdc_pct, Re conduite)]) ; (None, None, []) sans palier."""
+        dt = self.pilote.periode
+        es = self.pilote.es
         self.etat["statut"] = "mesure PDC minimale exploitable"
         t = self._chronometrer_vanne(lambda: es.ecrire_vanne_bypass(True),
                                      "fc_bypass_ouvert", "ouverture bypass")
@@ -1334,10 +1382,9 @@ class Apprentissage:
         paliers_pdc = []  # Table de gains PDC : [(pdc_pct, re), ...]
 
         if t is not None:
-            # table PdC apprise à la tension du ventilateur EN MODE PdC
-            # (u_min × marge_ventilateur_pdc), celle où la boucle l'utilise
-            self._variateur(round(
-                u_min_reco * self.pilote.marge_ventilateur_pdc, 2))
+            # table PdC apprise à la tension du ventilateur EN MODE PdC,
+            # celle où la boucle l'utilise
+            self._variateur(round(u_ventilateur, 2))
             self.pilote.commander_vanne_perte_charge_pct(100.0)
             ok = self._attendre_pdc_extreme(10.0, 90.0, "ouverture PDC")
 
@@ -1390,34 +1437,37 @@ class Apprentissage:
                 if re_derniere_stable is not None:
                     pdc_min_exploitable = min(pdc_derniere_stable + pas_pdc_precedent, 100.0)
                     re_min_exploitable = re_derniere_stable
+        return pdc_min_exploitable, re_min_exploitable, paliers_pdc
 
+    def _test_table_pdc(self) -> None:
+        """Table PdC seule (phase PdC du Re mapping Miller), à la tension du
+        ventilateur en mode PdC (strategie_bas_re.u_ventilateur_pdc_v) :
+        évite de refaire tout le Re mapping Miller quand seule cette
+        tension change. Utilise le u_min déjà appris."""
+        u_min = self.pilote.u_min_ventilateur
+        t = self._positionner_diaphragme("miller")
+        if t is None:
+            return
+        u_vent = self._u_ventilateur_pdc(u_min)
+        pdc_min, re_min, paliers = self._mesurer_table_pdc(u_vent)
         self._variateur(0.0)
-
-        # Sauvegarder résultats Miller
         if self._interrompu():
-            # résultats partiels : rien d'applicable (« Appliquer » les
-            # écrirait en configuration)
             self._statut_annule()
             return
-        self.resultats["re_mapping_miller"] = {
-            "u_min_exploitable_v": u_min_reco,
-            "u_seuil_bas_re_v": u_seuil,
-            "derniere_stable_v": derniere_stable,
-            "re_a_u_min": round(re_a_derniere),
-            "pdc_min_exploitable_pct": round(pdc_min_exploitable, 1) if pdc_min_exploitable else None,
-            "re_min_exploitable": round(re_min_exploitable) if re_min_exploitable else None,
-            "paliers_V_Re": [[v, re] for v, re in paliers],
-            "paliers_PDC_Re": [[pdc, re] for pdc, re in paliers_pdc],
+        self.resultats["table_pdc"] = {
+            "u_ventilateur_v": round(u_vent, 2),
+            "pdc_min_exploitable_pct": round(pdc_min, 1) if pdc_min else None,
+            "re_min_exploitable": round(re_min) if re_min else None,
+            "paliers_PDC_Re": [[pdc, re] for pdc, re in paliers],
         }
-
-        msg_u_seuil = f", u_seuil ≈ {u_seuil:.1f}V" if u_seuil else ""
-        msg_pdc_min = f", PDC min ≈ {pdc_min_exploitable:.0f}%" if pdc_min_exploitable else ""
-        msg_re_min = f" (Re min ≈ {re_min_exploitable:.0f})" if re_min_exploitable else ""
-        if not paliers_pdc:
-            msg_pdc_min = (", PdC : aucun palier mesurable (ΔP Miller < 1 Pa)"
-                           " — mode PdC inactif")
-        self.etat["statut"] = (
-            f"terminé Miller : u_min ≈ {u_min_reco}V{msg_u_seuil}{msg_pdc_min}{msg_re_min}")
+        if paliers:
+            self.etat["statut"] = (
+                f"terminé : ventilateur {u_vent:.2f} V, {len(paliers)} paliers PdC, "
+                f"PdC min ≈ {pdc_min:.0f} % (Re min ≈ {re_min:.0f} Re conduite)")
+        else:
+            self.etat["statut"] = (
+                f"terminé : ventilateur {u_vent:.2f} V, aucun palier PdC "
+                "mesurable (ΔP Miller < 1 Pa) — mode PdC inactif")
 
     def _test_re_mapping_iso(self, u_seuil: float | None = None,
                              pas: float = 1.5, t_palier_s: float = 12.0) -> None:
@@ -1726,6 +1776,7 @@ class Apprentissage:
         "re_mapping": "Re mapping",
         "re_mapping_miller": "Re mapping Miller",
         "re_mapping_iso": "Re mapping ISO",
+        "table_pdc": "Table PdC (très bas Re)",
         "indiciel": "Essai indiciel",
     }
     # marge appliquée au temps de course mesuré (chien de garde)
@@ -1775,6 +1826,14 @@ class Apprentissage:
             elif nom == "re_mapping_iso":
                 n = len(r.get("paliers_plage_haute") or [])
                 lignes.append((titre, f"table ISO ({n} paliers)"))
+            elif nom == "table_pdc":
+                n = len(r.get("paliers_PDC_Re") or [])
+                lignes.append((titre, (
+                    f"table PdC ({n} paliers, ventilateur {r['u_ventilateur_v']} V), "
+                    f"PdC min {sbr.get('pdc_min_exploitable_pct', '—')} → "
+                    f"{r['pdc_min_exploitable_pct']} %, Re min "
+                    f"{sbr.get('re_min_exploitable', '—')} → {r['re_min_exploitable']}")
+                    if n else "aucun palier mesurable : mode PdC inactif"))
             elif nom == "verif_cablage":
                 lignes.append((titre, "mapping vanne 3 voies ISO/Miller interverti"
                                if r.get("mapping_inverse") else
@@ -1939,6 +1998,26 @@ class Apprentissage:
                 setattr(self.pilote, cle, v)
                 if v is not None:
                     lignes.append(fmt.format(v))
+        # Table PdC seule (re-mesurée à la tension du mode PdC)
+        if "table_pdc" in self.resultats:
+            r = self.resultats["table_pdc"]
+            from core.pilote import TableGains
+            if r.get("paliers_PDC_Re"):
+                self.pilote.table_gains_pdc = TableGains(r["paliers_PDC_Re"])
+                lignes.append(f"table gains PDC ({len(r['paliers_PDC_Re'])} points, "
+                              f"ventilateur {r['u_ventilateur_v']} V)")
+            else:
+                self.pilote.table_gains_pdc = TableGains()
+                lignes.append("table PdC : aucun palier mesurable — mode PdC "
+                              "(très bas Re) inactif")
+            sbr = self.cfg.setdefault("strategie_bas_re", {})
+            for cle, fmt in (("pdc_min_exploitable_pct", "PDC min exploitable = {:.1f}%"),
+                             ("re_min_exploitable", "Re min exploitable = {}")):
+                v = r.get(cle) if r.get("paliers_PDC_Re") else None
+                sbr[cle] = v
+                setattr(self.pilote, cle, v)
+                if v is not None:
+                    lignes.append(fmt.format(v))
         # Gestion séparée des résultats re_mapping_iso
         if "re_mapping_iso" in self.resultats:
             r = self.resultats["re_mapping_iso"]
@@ -1966,7 +2045,8 @@ class Apprentissage:
             # Déterminer quel type d'apprentissage a été fait
             # le re_mapping combiné produit les deux tables
             apprentissage_miller = ("re_mapping_miller" in self.resultats
-                                    or "re_mapping" in self.resultats)
+                                    or "re_mapping" in self.resultats
+                                    or "table_pdc" in self.resultats)
             apprentissage_iso = ("re_mapping_iso" in self.resultats
                                  or "re_mapping" in self.resultats)
 
@@ -2015,14 +2095,15 @@ class Apprentissage:
                     parametres_miller['u_min_ventilateur_v'] = self.pilote.u_min_ventilateur
                     log.info(f"  - u_min_ventilateur_v: {self.pilote.u_min_ventilateur}V")
 
-                r_miller = self.resultats.get("re_mapping_miller") \
-                    or self.resultats.get("re_mapping", {})
-                if r_miller.get("u_seuil_bas_re_v"):
-                    parametres_miller['u_seuil_bas_re_v'] = r_miller["u_seuil_bas_re_v"]
-                if r_miller.get("pdc_min_exploitable_pct"):
-                    parametres_miller['pdc_min_exploitable_pct'] = r_miller["pdc_min_exploitable_pct"]
-                if r_miller.get("re_min_exploitable"):
-                    parametres_miller['re_min_exploitable'] = r_miller["re_min_exploitable"]
+                # valeurs EN VIGUEUR (déjà appliquées ci-dessus) : une table
+                # PdC re-mesurée seule ne fait pas perdre u_seuil, et un
+                # Re mapping Miller sans palier PdC n'écrit pas d'ancien Re min
+                for cle, v in (("u_seuil_bas_re_v", self.pilote.u_seuil_bas_re),
+                               ("pdc_min_exploitable_pct",
+                                self.pilote.pdc_min_exploitable_pct),
+                               ("re_min_exploitable", self.pilote.re_min_exploitable)):
+                    if v:
+                        parametres_miller[cle] = v
 
                 self.pilote.gestionnaire_apprentissages.sauvegarder_miller(
                     tables_miller, parametres_miller,
