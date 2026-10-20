@@ -168,3 +168,47 @@ def test_recopie_pdc_figee_signalee(monkeypatch, tmp_path):
     assert b.p.etat["defaut_pdc"]
     assert b.p.regulation_active
     assert b.sim.u_ecrite <= b.p._u_pdc() + 1e-6
+
+
+def test_vanne_plus_lente_que_la_course_configuree(monkeypatch, tmp_path):
+    """Constaté au banc : vanne 3 voies ER20 (11 s) avec une course
+    configurée de 3,9 s -> défaut au chien de garde, puis la vanne arrive
+    en butée. Le message donne les durées et l'issue (refaire
+    l'apprentissage de la course)."""
+    b = _banc(monkeypatch, tmp_path, (2000.0, "veine"))
+    b.sim._v3._vitesse = 90.0 / 11.0
+    b.consigne(12000.0, "veine")
+    b.cycles(15, verifier=False)
+    _assert_repli(b, "defaut_vanne", "non atteinte en")
+    assert "course configurée 3.9 s" in b.p.etat["defaut_vanne"]
+    assert "apprentissage" in b.p.etat["defaut_vanne"]
+    b.cycles(10, verifier=False)
+    assert b.p.etat["diaphragme_lu"] == "iso"      # arrivée après le défaut
+
+
+def test_pas_de_faux_signal_fige_au_demarrage_lent(monkeypatch, tmp_path):
+    """Démarrage depuis l'arrêt avec un débit lent à s'établir (rampe
+    interne du 3G3MV, inertie) : la fenêtre de 10 s du détecteur de signal
+    figé était pleine des zéros d'avant la relance -> faux « signal ΔP
+    figé » et arrêt de sécurité. Le détecteur n'arme qu'une fois le
+    ventilateur en marche depuis toute la fenêtre."""
+    b = BancSimule(monkeypatch, tmp_path, cfg_sur={
+        "simulation": {"constante_temps_s": 8.0}})
+    sim, st = b.sim, {"u": 0.0, "cmd": 0.0, "t": b.t[0]}
+
+    def ecrire(v):
+        sim.u_ecrite = v
+        st["cmd"] = min(max(v, 0.0), 10.0)
+    avancer = sim._avancer
+
+    def avancer_avec_rampe():                       # 3G3MV : 1 V/s
+        dt, st["t"] = b.t[0] - st["t"], b.t[0]
+        e = st["cmd"] - st["u"]
+        st["u"] += max(-dt, min(dt, e))
+        sim._u_variateur = st["u"]
+        avancer()
+    monkeypatch.setattr(sim, "ecrire_variateur", ecrire)
+    monkeypatch.setattr(sim, "_avancer", avancer_avec_rampe)
+    b.consigne(10000.0, "veine")
+    assert b.jusqu_a_convergence(90) is not None
+    assert not b.p.etat.get("arret_securite"), b.p.etat.get("arret_motif")

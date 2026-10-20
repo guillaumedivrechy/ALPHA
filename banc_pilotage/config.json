@@ -44,10 +44,10 @@
     "hysteresis_re": 500.0
   },
   "actionneurs": {
-    "_commentaire": "Temps de course des vannes motorisees ER20, mesures par les apprentissages vanne_3voies / vanne_bypass / vanne_pdc (avec marge) et utilises comme chien de garde : defaut vanne si la fin de course n'arrive pas dans facteur_chien_garde x ce temps. Le delai global d'attente des vannes avant regulation en est derive. Ordres de grandeur constructeur : ER20 standard 11 s pour 90 deg, ER20 POSI (vanne perte de charge) 25 s. pdc_recopie_min_v / max_v : recopie de la PdC aux butees fermee / ouverte (apprentissage calibration_pdc).",
-    "vanne_3voies_temps_s": 3.6,
-    "vanne_bypass_temps_s": 9.7,
-    "vanne_perte_charge_course_s": 16.2,
+    "_commentaire": "Temps de course des vannes motorisees ER20, mesures par les apprentissages vanne_3voies / vanne_bypass / vanne_pdc (avec marge) et utilises comme chien de garde : defaut vanne si la fin de course n'arrive pas dans facteur_chien_garde x ce temps. Le delai global d'attente des vannes avant regulation en est derive. Ordres de grandeur constructeur : ER20 standard 11 s pour 90 deg, ER20 POSI (vanne perte de charge) 25 s. Valeurs livrees = valeurs constructeur (une course sous-estimee declenche un faux defaut vanne) ; les remplacer par les apprentissages vanne_3voies / vanne_bypass / vanne_pdc du banc. pdc_recopie_min_v / max_v : recopie de la PdC aux butees fermee / ouverte (apprentissage calibration_pdc).",
+    "vanne_3voies_temps_s": 11.0,
+    "vanne_bypass_temps_s": 11.0,
+    "vanne_perte_charge_course_s": 25.0,
     "marge_apres_manoeuvre_s": 2.0,
     "facteur_chien_garde": 1.5,
     "pdc_recopie_min_v": 2.389,

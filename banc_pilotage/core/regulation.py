@@ -130,9 +130,13 @@ class RegulateurTrim:
       l'IHM au lieu d'être silencieusement rattrapée
     - gels commandés par l'appelant : tant que la consigne filtrée bouge ou
       que le variateur n'a pas rejoint sa commande (recopie AM), l'erreur ne
-      renseigne pas sur le réglage -> intégrale tenue, et P nul tant que
-      l'actionneur est en route (sinon il pousse une commande que le
-      variateur n'a pas encore atteinte -> dépassement garanti)
+      renseigne pas sur le réglage -> intégrale tenue, et P TENU à sa
+      dernière valeur tant que l'actionneur est en route (il ne pousse pas
+      une commande que le variateur n'a pas encore atteinte). Tenu et non
+      remis à zéro : un P annulé fait chuter la commande, le variateur la
+      rejoint, le P revient, la commande remonte, le variateur décroche à
+      nouveau -> cycle limite en paliers (constaté sur le 3G3MV, rampe
+      d'accélération interne de 10 s)
     - anti-windup par intégration conditionnelle sur toute saturation de la
       sortie totale (u_min, u_max, plafond de saturation ΔP, rampe)
     - rampe sur la sortie totale
@@ -154,6 +158,7 @@ class RegulateurTrim:
         self._integrale = 0.0
         self._u_prec = 0.0
         self._trim = 0.0
+        self._p = 0.0                      # dernier terme P appliqué [V]
 
     @property
     def integrale(self) -> float:
@@ -172,6 +177,7 @@ class RegulateurTrim:
         self._integrale = min(max(integrale, -self.trim_max), self.trim_max)
         self._u_prec = u_initial
         self._trim = self._integrale
+        self._p = 0.0
 
     def calculer(self, consigne: float, mesure: float, u_ff: float,
                  pente: float, u_max: float | None = None,
@@ -184,13 +190,18 @@ class RegulateurTrim:
             u = min(max(u_ff, self.u_min), u_max_eff)
             self._u_prec = u
             self._trim = 0.0
+            self._p = 0.0
             return u
 
         erreur_rel = (consigne - mesure) / consigne
         erreur_v = (consigne - mesure) / pente
 
-        p = 0.0 if (geler_p or abs(erreur_rel) < self.bande_morte) \
-            else self.kp * erreur_v
+        if geler_p:
+            p = self._p
+        else:
+            p = 0.0 if abs(erreur_rel) < self.bande_morte \
+                else self.kp * erreur_v
+            self._p = p
         i_candidate = self._integrale if geler_integrale \
             else self._integrale + self.ki * erreur_v * self.dt
         i_candidate = min(max(i_candidate, -self.trim_max), self.trim_max)

@@ -19,6 +19,9 @@ n'est pas entièrement cochée. Noter les valeurs relevées dans la marge.
 - [ ] Arrêt d'urgence physique : coupe bien le moteur, indépendamment du PC.
 - [ ] Variateur 3G3MV : référence de fréquence par la borne FR (n004 = 2),
       marche par S1 (n003 = 1), fréquence max 50,0 Hz (n011).
+- [ ] Temps d'accélération / décélération du 3G3MV (n016 / n017) : 10 s
+      (réglage usine) au plus. Plus lent, la régulation dépasse la
+      consigne (≈ 9 % en simulation avec 20 s). Valeur relevée : ______ s.
 - [ ] **Watchdog Modbus du coupleur 750-362 activé** (doc WAGO du coupleur) :
       sur perte de liaison, les sorties doivent retomber (référence 0 V, RUN
       ouvert). Indispensable : le logiciel ne peut plus rien écrire quand la
@@ -56,6 +59,12 @@ lecture dans la page Maintenance (image process et valeur convertie).
 
 ## 3. Actionneurs (page Maintenance, ventilateur arrêté)
 
+**Faire les apprentissages de course des vannes (§5) avant toute
+régulation.** Les temps livrés dans `config.json` sont les valeurs
+constructeur (ER20 : 11 s, PdC : 25 s). Une course plus longue que
+celle configurée × 1,5 déclenche un défaut vanne alors que la vanne
+arrive en butée quelques secondes plus tard (constaté au premier essai).
+
 - [ ] Vanne 3 voies : « Ordre F → 0° » d'abord (vanne d'usine à 0° : elle ne
       doit pas bouger), puis « Ordre I → 90° », puis retour. Temps de course
       relevé : ______ s.
@@ -81,6 +90,9 @@ lecture dans la page Maintenance (image process et valeur convertie).
 ## 5. Apprentissages, dans l'ordre de l'onglet
 
 Vérifier dans la confirmation « Appliquer » les valeurs ancienne → nouvelle.
+Après « Appliquer » d'un Re mapping, le message indique les paliers écartés
+(« N écarté(s) : Re nul ou non croissant »). Plus d'un ou deux paliers
+écartés : relancer l'apprentissage (paliers pas encore établis ou bruit).
 
 - [ ] Zéro capteurs → Appliquer.
 - [ ] Calibration recopie PdC → Appliquer (fermée ≈ 0 V, ouverte ≈ 10 V).

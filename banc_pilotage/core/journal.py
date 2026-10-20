@@ -34,6 +34,10 @@ COLONNES = [
     ("rho", "rho [kg/m3]"),
     ("qm", "qm [kg/s]"),
     ("u_variateur", "U variateur [V]"),
+    ("u_recopie_am", "U recopie AM variateur [V]"),
+    ("phase_regulation", "phase regulation"),
+    ("u_ff", "U feed-forward table [V]"),
+    ("integrale_v", "correction integrale [V]"),
     ("pdc_position", "vanne PdC [V]"),
     ("diaphragme", "diaphragme"),
     ("reference", "reference"),
@@ -158,6 +162,10 @@ class JournalEssai:
             str(etat[c]) if isinstance(etat.get(c), str) else c
             for c in _DEFAUTS if etat.get(c))
         valeurs = dict(etat)
+        # recopie AM du 3G3MV : montre si le variateur suit la commande
+        # (rampe interne d'accélération), cf. phase « suivi variateur »
+        valeurs["u_recopie_am"] = (etat.get("mesures_brutes") or {}).get(
+            "frequence_variateur")
         # diaphragme dont le capteur ΔP est exploité (butée lue)
         valeurs["diaphragme"] = etat.get("diaphragme_mesure",
                                          etat.get("diaphragme"))

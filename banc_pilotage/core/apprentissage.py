@@ -21,6 +21,13 @@ from core.fichiers import ecrire_json_atomique
 log = logging.getLogger(__name__)
 
 
+def _ecartes(table) -> str:
+    """Mention des paliers que le feed-forward ignore (Re nul sous le
+    décrochage, ou non croissant : bruit, palier pas encore établi)."""
+    n = table.nb_points_ecartes()
+    return f", {n} écarté(s) : Re nul ou non croissant" if n else ""
+
+
 class Apprentissage:
     def __init__(self, pilote, cfg: dict, chemin_cfg):
         self.pilote = pilote
@@ -69,7 +76,7 @@ class Apprentissage:
                  "verif_cablage": self._test_verif_cablage}.get(test)
         if cible is None:
             return f"Test inconnu : {test}"
-        if test == "indiciel" and not self.pilote.table_gains.est_valide():
+        if test == "indiciel" and not self.pilote.table_gains.valide_ff():
             return ("Lancer d'abord la courbe de gain : les kp/ki proposés "
                     "par l'essai indiciel s'appliquent à la correction en "
                     "volts, qui s'appuie sur la pente de la table de gains.")
@@ -1834,16 +1841,18 @@ class Apprentissage:
             if r.get("paliers_V_Re"):
                 from core.pilote import TableGains
                 self.pilote.table_gains_bas_re = TableGains(r["paliers_V_Re"])
-                lignes.append(f"table gains bas-Re ({len(r['paliers_V_Re'])} points, bypass ouvert)")
+                lignes.append(f"table gains bas-Re ({len(r['paliers_V_Re'])} points, bypass ouvert"
+                              + _ecartes(self.pilote.table_gains_bas_re) + ")")
             # Créer table de gains mode NORMAL à partir des paliers plage haute
             if r.get("paliers_plage_haute"):
                 from core.pilote import TableGains
                 t_haute = TableGains(r["paliers_plage_haute"])
-                if t_haute.est_valide():
+                if t_haute.valide_ff():
                     self.pilote.table_gains = t_haute
-                    lignes.append(f"table gains plage haute ({len(r['paliers_plage_haute'])} points, bypass fermé)")
+                    lignes.append(f"table gains plage haute ({len(r['paliers_plage_haute'])} points, bypass fermé"
+                                  + _ecartes(t_haute) + ")")
                 else:
-                    lignes.append("table gains plage haute ignorée (Re non monotone)")
+                    lignes.append("table gains plage haute ignorée (moins de deux paliers à Re croissant)")
             # Sauvegarder PDC min et Re min mesurés (si disponibles)
             if r.get("pdc_min_exploitable_pct") is not None:
                 self.cfg["strategie_bas_re"]["pdc_min_exploitable_pct"] = r["pdc_min_exploitable_pct"]
@@ -1869,7 +1878,8 @@ class Apprentissage:
             if r.get("paliers_V_Re"):
                 from core.pilote import TableGains
                 self.pilote.table_gains_bas_re = TableGains(r["paliers_V_Re"])
-                lignes.append(f"table gains bas-Re ({len(r['paliers_V_Re'])} points, bypass ouvert)")
+                lignes.append(f"table gains bas-Re ({len(r['paliers_V_Re'])} points, bypass ouvert"
+                              + _ecartes(self.pilote.table_gains_bas_re) + ")")
             # Table de gains PDC (PDC variable, tension fixe u_min)
             if r.get("paliers_PDC_Re"):
                 from core.pilote import TableGains
@@ -1891,11 +1901,12 @@ class Apprentissage:
             if r.get("paliers_plage_haute"):
                 from core.pilote import TableGains
                 t_haute = TableGains(r["paliers_plage_haute"])
-                if t_haute.est_valide():
+                if t_haute.valide_ff():
                     self.pilote.table_gains = t_haute
-                    lignes.append(f"table gains plage haute ({len(r['paliers_plage_haute'])} points, bypass fermé)")
+                    lignes.append(f"table gains plage haute ({len(r['paliers_plage_haute'])} points, bypass fermé"
+                                  + _ecartes(t_haute) + ")")
                 else:
-                    lignes.append("table gains plage haute ignorée (Re non monotone)")
+                    lignes.append("table gains plage haute ignorée (moins de deux paliers à Re croissant)")
         if not lignes:
             return "Aucun résultat à appliquer."
 
@@ -1921,21 +1932,21 @@ class Apprentissage:
             pression_pa = None
 
             # ========== SAUVEGARDE APPRENTISSAGE MILLER ==========
-            if apprentissage_miller and (self.pilote.table_gains_bas_re.est_valide() or
-                                        self.pilote.table_gains_pdc.est_valide()):
+            if apprentissage_miller and (self.pilote.table_gains_bas_re.valide_ff() or
+                                        self.pilote.table_gains_pdc.valide_ff()):
                 log.info("\n[Miller] Préparation sauvegarde apprentissage Miller")
 
                 tables_miller = {}
-                if self.pilote.table_gains_bas_re.est_valide():
+                if self.pilote.table_gains_bas_re.valide_ff():
                     tables_miller['table_gains_bas_re'] = self.pilote.table_gains_bas_re.to_list()
                     log.info(f"  - table_gains_bas_re: {len(tables_miller['table_gains_bas_re'])} points")
 
-                if self.pilote.table_gains_pdc.est_valide():
+                if self.pilote.table_gains_pdc.valide_ff():
                     tables_miller['table_gains_pdc'] = self.pilote.table_gains_pdc.to_list()
                     log.info(f"  - table_gains_pdc: {len(tables_miller['table_gains_pdc'])} points")
 
                 # Ajouter régressions
-                if self.pilote.table_gains_bas_re.est_valide():
+                if self.pilote.table_gains_bas_re.valide_ff():
                     reg = self.pilote.table_gains_bas_re.obtenir_regression()
                     if reg['valide']:
                         tables_miller['regression_miller'] = {
@@ -1945,7 +1956,7 @@ class Apprentissage:
                         }
                         log.info(f"  - regression_miller: a={reg['a']:.2f}, b={reg['b']:.2f}, R²={reg['r2']:.4f}")
 
-                if self.pilote.table_gains_pdc.est_valide():
+                if self.pilote.table_gains_pdc.valide_ff():
                     reg_pdc = self.pilote.table_gains_pdc.obtenir_regression()
                     if reg_pdc['valide']:
                         tables_miller['regression_pdc'] = {
@@ -1976,7 +1987,7 @@ class Apprentissage:
                 log.info(f"  → Sauvegardé dans apprentissages/miller.json")
 
             # ========== SAUVEGARDE APPRENTISSAGE ISO ==========
-            if apprentissage_iso and self.pilote.table_gains.est_valide():
+            if apprentissage_iso and self.pilote.table_gains.valide_ff():
                 log.info("\n[ISO] Préparation sauvegarde apprentissage ISO")
 
                 tables_iso = {}

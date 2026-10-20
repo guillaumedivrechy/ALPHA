@@ -541,7 +541,9 @@ def test_separation_integrale_tant_que_la_mesure_bouge():
 
 def test_correction_gelee_tant_que_le_variateur_suit_sa_rampe():
     """Recopie AM loin de la commande : le ventilateur accélère encore,
-    l'erreur ne dit rien du réglage -> P et I gelés (sortie = feed-forward)."""
+    l'erreur ne dit rien du réglage -> P et I gelés : la correction est
+    TENUE (ni poussée par l'erreur, ni remise à zéro), sortie = feed-forward
+    + correction tenue."""
     pilote, es = _pilote_en_position("fc_3voies_0")
     pilote.bas_re_actif = False
     pilote.table_gains = TableGains([(1.0, 3000.0), (9.0, 30000.0)])
@@ -549,13 +551,75 @@ def test_correction_gelee_tant_que_le_variateur_suit_sa_rampe():
     pilote.definir_consigne(8000.0, "conduite")
     pilote.demarrer_regulation()
     es.mesures["dp_iso_500"] = 5.0             # Re mesuré très bas
+    trims = []
     for _ in range(30):
         pilote._cycle()
         es.mesures["frequence_variateur"] = 0.0    # variateur à la traîne
+        if pilote.etat["phase_regulation"] == "suivi variateur":
+            trims.append(pilote.etat["trim_v"])
     assert pilote.etat["phase_regulation"] == "suivi variateur"
-    assert pilote.etat["trim_v"] == pytest.approx(0.0, abs=1e-9)
-    assert pilote.etat["u_variateur"] == pytest.approx(pilote.etat["u_ff"],
-                                                       abs=1e-3)
+    assert len(trims) > 20
+    assert max(trims) - min(trims) < 1e-9          # correction tenue
+    assert abs(trims[-1]) < 0.2                    # pas poussée par l'erreur
+    assert pilote.etat["u_variateur"] == pytest.approx(
+        pilote.etat["u_ff"] + trims[-1], abs=2e-3)
+
+
+def test_pas_de_paliers_quand_le_variateur_suit_sa_rampe_interne():
+    """3G3MV réel : rampe d'accélération interne (10 s pour 0-50 Hz par
+    défaut, 1 V/s), procédé lent. Le gel du P pendant le suivi remettait
+    le P à zéro : la commande chutait, le variateur la rejoignait, le P
+    revenait, le variateur décrochait à nouveau -> commande en paliers
+    (constaté au banc). Tenu, le P ne crée plus ce cycle limite."""
+    import tempfile
+    from pathlib import Path
+    from statistics import pstdev
+    from banc_simule import BancSimule
+
+    class _MP:
+        def __init__(self):
+            self.annul = []
+
+        def setattr(self, o, n, v):
+            self.annul.append((o, n, getattr(o, n)))
+            setattr(o, n, v)
+
+    mp = _MP()
+    try:
+        b = BancSimule(mp, Path(tempfile.mkdtemp()), cfg_sur={
+            "simulation": {"bruit_relatif": 0.02, "constante_temps_s": 5.0}})
+        sim, st = b.sim, {"u": 0.0, "cmd": 0.0, "t": b.t[0]}
+
+        def ecrire(v):
+            sim.u_ecrite = v
+            st["cmd"] = min(max(v, 0.0), 10.0)
+        avancer = sim._avancer
+
+        def avancer_avec_rampe():                   # 1 V/s comme le 3G3MV
+            dt, st["t"] = b.t[0] - st["t"], b.t[0]
+            e = st["cmd"] - st["u"]
+            st["u"] += max(-dt, min(dt, e))
+            sim._u_variateur = st["u"]
+            avancer()
+        sim.ecrire_variateur = ecrire
+        sim._avancer = avancer_avec_rampe
+        b.consigne(10000.0, "veine")
+        phases, us = [], []
+        for _ in range(int(60 / b.p.periode)):
+            b.cycles(b.p.periode, verifier=False)
+            phases.append(b.p.etat.get("phase_regulation"))
+            us.append(b.p.etat.get("u_variateur") or 0.0)
+        assert b.p.etat["convergee"] and not b.p.etat.get("arret_securite")
+        # chaque marche = un passage « régulation » <-> « suivi variateur » :
+        # 62 en 60 s avec le P remis à zéro, 12 avec le P tenu
+        alternances = sum(1 for a, c in zip(phases, phases[1:])
+                          if a != c and "suivi variateur" in (a, c))
+        assert alternances < 30, alternances
+        # régime établi (20 dernières s) : la commande ne bat pas
+        assert pstdev(us[-100:]) < 0.15
+    finally:
+        for o, n, v in reversed(mp.annul):
+            setattr(o, n, v)
 
 
 def test_critere_bas_re_en_reference_veine():

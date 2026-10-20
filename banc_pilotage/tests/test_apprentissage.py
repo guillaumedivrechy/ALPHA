@@ -266,3 +266,30 @@ def test_appliquer_ne_reapplique_pas_les_resultats_deja_appliques(tmp_path):
     app.resultats["vanne_bypass"] = {"ouverture_s": 9.0, "fermeture_s": 9.5,
                                      "max_s": 9.5}
     assert app.resultats_a_appliquer() == ["vanne_bypass"]
+
+
+def test_table_iso_non_monotone_appliquee_sauvegardee_et_relue(tmp_path,
+                                                               monkeypatch):
+    """Banc réel : un palier un peu bas (bruit, palier pas encore établi)
+    rendait la table ISO non monotone ; « Appliquer » la rejetait EN BLOC
+    (« ignorée (Re non monotone) »), rien n'était enregistré et la
+    régulation perdait son feed-forward. Le palier fautif seul est écarté."""
+    app, pilote = _app_cfg(tmp_path)
+    app.resultats["re_mapping_iso"] = {
+        "paliers_plage_haute": [[2.25, 6100.0], [1.75, 4300.0],
+                                [1.25, 4400.0],            # palier fautif
+                                [3.75, 11500.0], [5.25, 16800.0]]}
+    message = app.appliquer()
+    assert "ignorée" not in message and "1 écarté" in message
+    assert pilote.table_gains.valide_ff()
+    assert pilote.table_gains.u_pour_re_ff(11500.0) == pytest.approx(3.75)
+    iso = json.loads((tmp_path / "apprentissages" / "iso.json")
+                     .read_text("utf-8"))
+    assert len(iso["tables"]["table_gains"]) == 5
+    # relue au démarrage suivant
+    import core.pilote
+    monkeypatch.setattr(core.pilote, "RACINE", tmp_path)
+    cfg = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    relu = Pilote(Banc(cfg), StubES(), cfg)
+    assert relu.table_gains.valide_ff()
+    assert relu.table_gains.u_pour_re_ff(16800.0) == pytest.approx(5.25)

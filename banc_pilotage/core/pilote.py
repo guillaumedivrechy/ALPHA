@@ -130,7 +130,12 @@ def _table_depuis_fichier(points, nom: str):
                   "(relancer l'apprentissage correspondant)")
         return None
     t = TableGains(propres)
-    return t if t.est_valide() else None
+    if not t.valide_ff():
+        return None
+    if t.nb_points_ecartes():
+        log.warning(f"Apprentissage : table {nom}, {t.nb_points_ecartes()} "
+                    "palier(s) écarté(s) (Re non croissant ou nul)")
+    return t
 
 
 class TableGains:
@@ -276,7 +281,17 @@ class TableGains:
         return pts
 
     def valide_ff(self) -> bool:
+        """Table exploitable : au moins deux paliers à Re strictement
+        croissant. C'est LE critère d'acceptation d'une table (Appliquer,
+        sauvegarde, relecture) : sur le banc réel, le bruit ou un palier pas
+        encore établi suffit à rendre deux paliers voisins non croissants ;
+        exiger une table parfaitement monotone (est_valide) la faisait
+        rejeter en bloc et la régulation perdait son feed-forward."""
         return len(self._points_ff()) >= 2
+
+    def nb_points_ecartes(self) -> int:
+        """Paliers ignorés par le feed-forward (Re nul ou non croissant)."""
+        return len(self.points) - len(self._points_ff())
 
     def u_pour_re_ff(self, re: float) -> float:
         """Tension d'équilibre pour un Re visé (interpolation inverse,
@@ -577,6 +592,7 @@ class Pilote:
         # Fenêtre de 10s (réf. rapport_comparaison_final.md R2.1)
         self._historique_dp = deque(maxlen=max(2, int(10.0 / self.periode)))
         self._cycles_signal_fige = 0       # cycles consécutifs de variance nulle
+        self._ventilateur_depuis: float | None = None   # u > 0,5 V continûment
         self._re_conduite_prec = None      # garde-fou anti-transitoire de l'apprentissage du gain
         self._echelon_depuis = None        # Re cible avant le dernier échelon de séquence
         self._re_cible_conduite = 0.0      # Re conduite équivalent de la consigne (calé à la préparation)
@@ -1148,6 +1164,7 @@ class Pilote:
             "angle_attendu": angle_attendu,  # vanne 3 voies : une butée
             "t_debut": time.monotonic(),
             "t_max": time.monotonic() + t_course * self.facteur_chien_garde,
+            "t_course": t_course,            # temps de course configuré
             "t_fin_gel": None,               # fin de course + marge
         }
 
@@ -1266,13 +1283,13 @@ class Pilote:
             log.critical(f"ARRÊT INCOMPLET : {len(erreurs_arret)} erreurs")
         # persistance des grandeurs apprises pour les sessions suivantes
         # (mêmes clés que la relecture du __init__ : gain, table, u_min)
-        if self._gain_re_par_volt or self.table_gains.est_valide() \
+        if self._gain_re_par_volt or self.table_gains.valide_ff() \
                 or self.u_min_ventilateur:
             try:
                 donnees = {}
                 if self._gain_re_par_volt:
                     donnees["gain_re_par_volt"] = self._gain_re_par_volt
-                if self.table_gains.est_valide():
+                if self.table_gains.valide_ff():
                     donnees["table_gains"] = self.table_gains.to_list()
                 if self.u_min_ventilateur:
                     donnees["u_min_ventilateur_v"] = self.u_min_ventilateur
@@ -1511,6 +1528,13 @@ class Pilote:
         self.etat["mesures_brutes"] = dict(mesures)
         self.etat["image_process"] = getattr(self.es, "image_process", None)
         self.etat["cycles"] = self.etat.get("cycles", 0) + 1
+        # depuis quand le ventilateur tourne (commande du cycle précédent,
+        # publiée sur tous les chemins : manœuvre et attente l'écrivent à 0)
+        if (self.etat.get("u_variateur") or 0.0) > 0.5:
+            if self._ventilateur_depuis is None:
+                self._ventilateur_depuis = time.monotonic()
+        else:
+            self._ventilateur_depuis = None
         # attente « PdC avant ventilateur » : ne vaut que si elle se poursuit
         # d'un cycle au suivant (sinon un épisode ancien, interrompu par une
         # manœuvre, le manuel ou un arrêt, déclenchait le chien de garde)
@@ -1807,9 +1831,17 @@ class Pilote:
                 # (variateur 0 V ET ordre RUN retiré, comme sur défaut variateur)
                 self._repli_sur()
                 cible = m["fc_attendue"] or f"butée {m['angle_attendu']}°"
+                # durées dans le message : une vanne simplement plus lente
+                # que le temps de course configuré (valeur non apprise sur ce
+                # banc) se reconnaît à sa butée atteinte peu après
                 self.etat.update({
-                    "defaut_vanne": f"{m['motif']} : {cible} non atteinte "
-                                    f"(vanne bloquée ou câblage)",
+                    "defaut_vanne": f"{m['motif']} : {cible} non atteinte en "
+                                    f"{maintenant - m['t_debut']:.1f} s (course "
+                                    f"configurée {m['t_course']:.1f} s × "
+                                    f"{self.facteur_chien_garde:g}) — vanne "
+                                    f"bloquée ou câblage ; si la vanne arrive "
+                                    f"en butée peu après, refaire "
+                                    f"l'apprentissage de sa course",
                     "manoeuvre": None, "regulation": False,
                     "u_variateur": 0.0, "convergee": False,
                 })
@@ -1910,9 +1942,19 @@ class Pilote:
             # corruption des calibrations si signal figé (table gains, tau, kp/ki).
             # Note: on ne teste pas pendant les manœuvres (ΔP peut être stable)
             # NE PAS tester en mode bas-Re : procédé lent → variance naturellement faible
+            # ventilateur en marche depuis au moins la fenêtre entière : la
+            # fenêtre ne contient alors que des mesures ventilateur tournant.
+            # Sinon, au démarrage, elle est pleine des zéros d'avant la
+            # relance et le débit n'est pas encore établi (rampe interne du
+            # 3G3MV, inertie) : faux « signal figé » et arrêt de sécurité.
+            ventilateur_etabli = (
+                self._ventilateur_depuis is not None
+                and time.monotonic() - self._ventilateur_depuis
+                >= self._historique_dp.maxlen * self.periode)
             actionneurs_actifs = ((self.regulation_active or self._maintien_tor_suspendu)
                                  and self._manoeuvre is None
                                  and self.etat.get("u_variateur", 0.0) > 0.5
+                                 and ventilateur_etabli
                                  and not self._mode_bas_re
                                  and not self.mode_manuel)
             if variance_dp < 0.01 and actionneurs_actifs:
@@ -2643,9 +2685,9 @@ class Pilote:
         if self.table_gains_bas_re.valide_ff():
             t = self.table_gains_bas_re
             return t.re_pour_u_ff(u0), t.re_pour_u_ff(u1)
-        if self.table_gains.est_valide():
+        if self.table_gains.valide_ff():
             t = self.table_gains
-            return t.re_pour_tension(u0), t.re_pour_tension(u1)
+            return t.re_pour_u_ff(u0), t.re_pour_u_ff(u1)
         if self._gain_re_par_volt:
             return u0 * self._gain_re_par_volt, u1 * self._gain_re_par_volt
         return None
