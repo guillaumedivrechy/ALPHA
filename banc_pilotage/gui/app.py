@@ -647,6 +647,20 @@ class Application(QMainWindow):
         self._motifs_arret = []
         self._bandeau_arret.setVisible(False)
 
+    def _bloque_par_apprentissage(self) -> bool:
+        """Refuse les commandes opérateur pendant une séquence
+        d'apprentissage : « Appliquer » démarrait la régulation par-dessus
+        le Re mapping, un bouton de vanne bougeait la vanne 3 voies en pleine
+        mesure. Seul ARRÊT VARIATEUR (et l'annulation) restent possibles."""
+        if not self.apprentissage.etat["en_cours"]:
+            return False
+        QMessageBox.warning(
+            self, "Apprentissage en cours",
+            "Une séquence d'apprentissage pilote le banc.\n\n"
+            "Attendez sa fin ou annulez-la (onglet Apprentissages) ; "
+            "ARRÊT VARIATEUR reste disponible.")
+        return True
+
     def _bloque_par_arret_securite(self) -> bool:
         """Refuse toute relance tant que l'arrêt de sécurité n'est pas
         acquitté (bandeau rouge)."""
@@ -1213,9 +1227,9 @@ class Application(QMainWindow):
 
         # Mode segmenté (Manuel | Asservi | Séquence)
         mode_box, self._mode_btns = self._seg(["Manuel", "Asservi", "Séquence"])
-        self._mode_btns[0].clicked.connect(lambda: self._set_mode("manuel"))
-        self._mode_btns[1].clicked.connect(lambda: self._set_mode("asservi"))
-        self._mode_btns[2].clicked.connect(lambda: self._set_mode("sequence"))
+        self._mode_btns[0].clicked.connect(lambda: self._choisir_mode("manuel"))
+        self._mode_btns[1].clicked.connect(lambda: self._choisir_mode("asservi"))
+        self._mode_btns[2].clicked.connect(lambda: self._choisir_mode("sequence"))
         vl.addWidget(mode_box)
 
         # Consigne Reynolds
@@ -1920,6 +1934,14 @@ class Application(QMainWindow):
     def _mes_tension(self, valeur: int) -> None:
         if not self._mes_run_arme:
             return                     # deplacement programme, pas operateur
+        # le pilote refuse aussi toute relance pendant un arret de securite ;
+        # ici, le curseur est desarme et ramene a 0 avec un message
+        if valeur > 0 and self._bloque_par_arret_securite():
+            self._mes_run_arme = False
+            self._mes_slider.blockSignals(True)
+            self._mes_slider.setValue(0)
+            self._mes_slider.blockSignals(False)
+            return
         self.pilote.mode_manuel_tension(valeur / 100.0)
 
     def _mes_arret(self) -> None:
@@ -1928,7 +1950,10 @@ class Application(QMainWindow):
         self._mes_run_arme = False
         self._mes_slider.setValue(0)
         self.pilote.arreter_regulation()
-        self.pilote.reprendre_maintien_tor()
+        # pendant un apprentissage, c'est la séquence (qui s'interrompt sur
+        # cet arrêt) qui rend la main sur les vannes, pas cette page
+        if not self.apprentissage.etat["en_cours"]:
+            self.pilote.reprendre_maintien_tor()
         self._log("Maintenance : ARRET", COLORS["error"])
 
     def _mes_reg_charger(self) -> None:
@@ -1967,6 +1992,8 @@ class Application(QMainWindow):
 
     def _mes_reg_appliquer(self) -> None:
         """Applique les paramètres de régulation et les sauvegarde dans config.json."""
+        if self._bloque_par_apprentissage():
+            return
         try:
             # Copie de la configuration EN MÉMOIRE (fichier de --config), et non
             # relecture du config.json du dossier du programme : la sauvegarde
@@ -2031,6 +2058,14 @@ class Application(QMainWindow):
         self._mes_lbl_bas_re.setText(
             f"Stratégie bas-Re indisponible : {motif_bas_re}" if motif_bas_re else "")
         occupe = bool(e.get("regulation")) or self.apprentissage.etat["en_cours"]
+        if self._mes_run_arme and not self.pilote.mode_manuel:
+            # le RUN de cette page n'est plus en vigueur (ARRET VARIATEUR du
+            # rail, repli de securite, regulation) : curseur desarme, sans
+            # quoi le bouger relancait le ventilateur sans confirmation
+            self._mes_run_arme = False
+            self._mes_slider.blockSignals(True)
+            self._mes_slider.setValue(0)
+            self._mes_slider.blockSignals(False)
         for w in self._mes_actionneurs:
             w.setEnabled(not occupe and (w is not self._mes_slider
                                          or self._mes_run_arme))
@@ -3337,6 +3372,13 @@ class Application(QMainWindow):
 
     # ══════════════════════════════════════════════════════════════ COMMANDES
 
+    def _choisir_mode(self, mode: str) -> None:
+        """Clic opérateur sur Manuel / Asservi / Séquence."""
+        if self._bloque_par_apprentissage():
+            self._update_mode_seg()          # bouton ramené sur le mode actuel
+            return
+        self._set_mode(mode)
+
     def _set_mode(self, mode: str) -> None:
         self._mode = mode
         if mode == "manuel":
@@ -3405,7 +3447,7 @@ class Application(QMainWindow):
         self._lbl_mode_badge.setText(f"mode {self._mode}")
 
     def _appliquer(self) -> None:
-        if self._bloque_par_arret_securite():
+        if self._bloque_par_arret_securite() or self._bloque_par_apprentissage():
             return
         if self._mode == "sequence":
             QMessageBox.information(
@@ -3495,10 +3537,14 @@ class Application(QMainWindow):
         self.close()
 
     def _cmd_diaph(self, pos: str) -> None:
+        if self._bloque_par_apprentissage():
+            return
         if self._commande("vanne 3 voies", self.pilote.commander_diaphragme, pos):
             self._log(f"Vanne Diaphragme → {pos.upper()}", "#FF9900")
 
     def _cmd_bypass(self, ouvert: bool) -> None:
+        if self._bloque_par_apprentissage():
+            return
         if self._commande("bypass", self.pilote.commander_bypass, ouvert):
             self._log(f"Bypass → {'Ouvert' if ouvert else 'Fermé'}", COLORS["ok"])
 
@@ -3706,6 +3752,9 @@ class Application(QMainWindow):
                                 "Arrêtez la régulation avant de modifier.")
             self.chk_unlock.setChecked(False)
             return
+        if unlock and self._bloque_par_apprentissage():
+            self.chk_unlock.setChecked(False)
+            return
         for entree, _ in self.champs.values():
             entree.setEnabled(unlock)
         self.chk_t_manuelle.setEnabled(unlock)
@@ -3737,6 +3786,8 @@ class Application(QMainWindow):
         self.lbl_cfg_statut.setText("modifications annulées")
 
     def _enregistrer_configuration(self) -> None:
+        if self._bloque_par_apprentissage():
+            return
         valeurs, erreurs = {}, []
         for chemin, (entree, validation) in self.champs.items():
             brut = entree.text().strip().replace(",", ".")

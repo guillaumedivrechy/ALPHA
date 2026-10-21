@@ -227,3 +227,25 @@ def test_coupleur_muet_cause_publiee_sans_attendre_le_repli(coupleur, tmp_path,
     finally:
         coupleur.latence_s = 0.0
         p.arreter()
+
+
+def test_arret_ne_bloque_pas_l_ihm_sur_coupleur_muet(coupleur, tmp_path,
+                                                    monkeypatch):
+    """Revue : sur un coupleur muet, le bouton ARRÊT (thread Qt) attendait
+    le verrou de la boucle puis sa propre transaction : IHM figée ~8 s.
+    L'écriture d'arrêt part dans un thread ; l'appel rend la main en
+    < 0,5 s, l'arrêt reste latché."""
+    p, _ = _pilote(coupleur, tmp_path, monkeypatch)
+    try:
+        time.sleep(0.8)
+        p.mode_manuel_tension(3.0)
+        time.sleep(0.8)
+        coupleur.latence_s = 120.0
+        time.sleep(0.5)                      # la boucle est bloquée
+        t0 = time.monotonic()
+        p.arreter_regulation()
+        assert time.monotonic() - t0 < 0.5
+        assert not p.mode_manuel and not p.regulation_active
+    finally:
+        coupleur.latence_s = 0.0
+        p.arreter()

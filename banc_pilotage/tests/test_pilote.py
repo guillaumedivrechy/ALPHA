@@ -888,7 +888,12 @@ def test_defaut_vanne_acquitte_au_redemarrage():
     pilote._cycle()
     assert pilote.etat["defaut_vanne"] is not None
 
+    # arrêt de sécurité non acquitté : relance refusée par le pilote
+    assert "refusé" in (pilote.demarrer_regulation() or "")
+    assert not pilote.regulation_active
+    pilote.acquitter_arret_securite()
     pilote.demarrer_regulation()
+    assert pilote.regulation_active
     assert pilote.etat["defaut_vanne"] is None
     assert pilote.etat["defaut_capteur"] is None
 

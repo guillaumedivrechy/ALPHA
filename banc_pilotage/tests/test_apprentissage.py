@@ -383,3 +383,36 @@ def test_table_pdc_seule_a_la_tension_imposee_puis_regulation(monkeypatch,
     assert p._mode_regulation == "pdc_control"
     assert p.etat["u_variateur"] == pytest.approx(2.0)
     assert p.etat["pdc_consigne"] < 9.0              # la PdC règle
+
+
+def test_controle_cablage_relatif_a_la_configuration(monkeypatch, tmp_path):
+    """Revue : le contrôle câblage attendait toujours « 0° = ISO » et
+    « Appliquer » PERMUTAIT la configuration : plomberie croisée corrigée,
+    un second contrôle la ré-inversait. Il compare désormais à la
+    correspondance en vigueur et Appliquer écrit le mapping mesuré. Le gain
+    Re/V n'est pas appris pendant la séquence (Miller saturé : −21 %)."""
+    import time as _time
+    from banc_simule import BancSimule
+    b = BancSimule(monkeypatch, tmp_path, caracterise=True, cfg_sur={
+        "modbus": {"positions_vanne_3voies": {
+            "diaphragme_a_0deg": "miller", "diaphragme_a_90deg": "iso"}}})
+    p = b.p
+    monkeypatch.setattr(_time, "sleep",
+                        lambda s: b.cycles(max(s, p.periode), verifier=False))
+    p.suspendre_maintien_tor()
+    app = Apprentissage(p, b.cfg, tmp_path / "config.json")
+    monkeypatch.setattr(app._annule, "wait", lambda t=None: b.cycles(
+        max(t or 0.0, p.periode), verifier=False) or False)
+    gain = p._gain_re_par_volt
+    app._test_verif_cablage()
+    r = app.resultats["verif_cablage"]
+    assert r["mapping_inverse"] and "DIFFÉRENT" in r["resume"]
+    assert r["mapping_mesure"] == {"diaphragme_a_0deg": "iso",
+                                   "diaphragme_a_90deg": "miller"}
+    assert p._gain_re_par_volt == gain               # gain non appris
+    app.appliquer()
+    assert p._diaphragme_par_angle == {"0": "iso", "90": "miller"}
+    app._test_verif_cablage()                        # second contrôle
+    r = app.resultats["verif_cablage"]
+    assert r["resume"] == "câblage conforme" and not r["mapping_inverse"]
+    assert "rien à écrire" in app.apercu_application()[0][1]

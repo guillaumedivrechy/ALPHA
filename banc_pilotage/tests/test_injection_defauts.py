@@ -249,3 +249,47 @@ def test_temperature_saisie_remplace_la_pt100(monkeypatch, tmp_path):
     b.p.appliquer_config(cfg)
     b.cycles(10, verifier=False)
     _assert_repli(b, "defaut_capteur", "température invraisemblable")
+
+
+def test_aucune_relance_avant_acquittement(monkeypatch, tmp_path):
+    """Revue : le curseur de la page Maintenance relançait le ventilateur
+    pendant un arrêt de sécurité (seule l'IHM bloquait, et pas ce chemin).
+    Le pilote refuse lui-même manuel > 0, régulation et séquence."""
+    b = _banc(monkeypatch, tmp_path)
+    b.sim.defaut_variateur = True
+    b.cycles(2, verifier=False)
+    b.sim.defaut_variateur = False
+    assert b.p.etat["arret_securite"]
+    assert "refusé" in (b.p.mode_manuel_tension(5.0) or "")
+    assert "refusé" in (b.p.demarrer_regulation() or "")
+    assert "refusé" in (b.p.demarrer_sequence([(0.0, 8000.0)], "veine") or "")
+    assert b.p.mode_manuel_tension(0.0) is None          # 0 V toujours permis
+    b.cycles(5, verifier=False)
+    assert b.sim.u_ecrite == 0.0 and b.sim._run is False
+
+
+def test_defaut_variateur_pendant_une_manoeuvre(monkeypatch, tmp_path):
+    """Revue : le défaut variateur n'était testé qu'après la sortie
+    « manœuvre de vanne » ; pendant une course (jusqu'à ~18 s au banc), il
+    restait ignoré et RUN maintenu. Repli dès le cycle suivant."""
+    b = _banc(monkeypatch, tmp_path, (12000.0, "veine"))
+    b.consigne(2000.0, "veine")                 # bascule ISO -> Miller
+    b.cycles(1, verifier=False)
+    assert b.p.etat.get("manoeuvre")
+    b.sim.defaut_variateur = True
+    b.cycles(0.4, verifier=False)
+    _assert_repli(b, "defaut_variateur", "3G3MV")
+
+
+def test_capteur_miller_fige_detecte(monkeypatch, tmp_path):
+    """Revue : la détection de signal figé était coupée dans tout le Miller
+    (jusqu'à 8 000 Re conduite) ; un capteur Miller bloqué laissait le Re
+    affiché constant sans défaut. Détectée au-delà de 40 Pa."""
+    b = _banc(monkeypatch, tmp_path, (2000.0, "veine"))   # ≈ 93 Pa Miller
+    assert b.p._mode_regulation == "normal_low"
+    figee = b.p.etat["mesures_brutes"]["dp_diaph_500"]
+    retablir = _alterer(b, lambda m: m.update(dp_diaph_500=figee))
+    b.cycles(15, verifier=False)
+    _assert_repli(b, "defaut_capteur", "signal ΔP figé")
+    retablir()
+    _assert_reprise_apres_acquittement(b, (2000.0, "veine"))

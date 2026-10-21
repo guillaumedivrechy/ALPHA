@@ -558,6 +558,9 @@ class Pilote:
         # plancher de mesure du ΔP Miller (borne la table PdC apprise)
         self.dp_min_mesurable = cfg.get("mesure_dp", {}).get(
             "dp_min_mesurable_pa", 0.15)
+        # ΔP Miller moyen au-delà duquel un signal figé est détecté
+        self.dp_min_detection_fige = cfg.get("mesure_dp", {}).get(
+            "dp_min_detection_fige_pa", 40.0)
         # PDC minimale exploitable (%) mesurée par apprentissage, défaut 50%
         # (limite physique décrochage observée empiriquement)
         self.pdc_min_exploitable_pct = srcfg.get("pdc_min_exploitable_pct", 50.0)
@@ -807,7 +810,22 @@ class Pilote:
         self._plafond_u_sature = None
         self.pi.u_max = 10.0
 
-    def demarrer_regulation(self) -> None:
+    def _relance_interdite(self, quoi: str) -> str | None:
+        """Arrêt de sécurité non acquitté : toute relance du ventilateur est
+        refusée ICI, et pas seulement par l'IHM (le curseur de la page
+        Maintenance relançait le ventilateur, bandeau rouge affiché).
+        Retourne le motif du refus, ou None."""
+        if self.etat.get("arret_securite"):
+            msg = (f"{quoi} refusé : arrêt de sécurité de "
+                   f"{self.etat['arret_securite']} non acquitté")
+            log.warning(msg)
+            return msg
+        return None
+
+    def demarrer_regulation(self) -> str | None:
+        refus = self._relance_interdite("démarrage de la régulation")
+        if refus:
+            return refus
         self._acquitter_defauts()
         with self._verrou:
             self.mode_manuel = False
@@ -828,6 +846,9 @@ class Pilote:
         Retourne un message d'erreur ou None."""
         if not points:
             return "Séquence vide."
+        refus = self._relance_interdite("démarrage de la séquence")
+        if refus:
+            return refus
         self._acquitter_defauts()
         with self._verrou:
             self.mode_manuel = False
@@ -901,6 +922,15 @@ class Pilote:
         self.etat["arret_securite"] = None
         self.etat["arret_motif"] = None
 
+    def _ecrire_arret_variateur(self) -> None:
+        """0 V puis RUN off ; jamais d'exception (liaison coupée : la boucle
+        réécrira l'arrêt latché au retour du coupleur)."""
+        try:
+            self.es.ecrire_variateur(0.0)
+            self.es.ecrire_variateur_run(False)
+        except OSError as exc:
+            log.warning(f"Arrêt : écriture variateur impossible ({exc})")
+
     def arreter_regulation(self) -> None:
         """Arrêt du variateur : coupe la régulation, le mode manuel ET la
         séquence (sinon la boucle réappliquerait une consigne au cycle
@@ -912,14 +942,15 @@ class Pilote:
         self._convergee_depuis = None
         if self.journal is not None:
             self.journal.fermer()
-        # liaison coupée : l'arrêt est latché ci-dessus, la boucle réécrira
-        # 0 V et RUN off dès le retour du coupleur — le bouton ne doit pas
-        # lever d'exception dans l'IHM
-        try:
-            self.es.ecrire_variateur(0.0)
-            self.es.ecrire_variateur_run(False)
-        except OSError as exc:
-            log.warning(f"Arrêt : écriture variateur impossible ({exc})")
+        # écriture immédiate de 0 V et RUN off, dans un thread : appelée
+        # depuis l'IHM, elle bloquait le thread Qt jusqu'à ~8 s sur un
+        # coupleur muet (verrou de la boucle + délai × tentatives). On attend
+        # au plus 0,3 s : l'arrêt est latché ci-dessus, la boucle réécrit
+        # 0 V et RUN off à chaque cycle, y compris au retour du coupleur.
+        ecriture = threading.Thread(target=self._ecrire_arret_variateur,
+                                    name="arret-variateur", daemon=True)
+        ecriture.start()
+        ecriture.join(0.3)
         self._run_actif = False
         self.pi.reinitialiser(0.0)
         # le biais de table appris (_biais_ff) est conservé : il traduit la
@@ -935,7 +966,11 @@ class Pilote:
         self._re_cible_min = None
         self.etat["consigne_limitee"] = None
 
-    def mode_manuel_tension(self, volts: float) -> None:
+    def mode_manuel_tension(self, volts: float) -> str | None:
+        if volts > 0:
+            refus = self._relance_interdite("mode manuel")
+            if refus:
+                return refus
         with self._verrou:
             self.mode_manuel = True
             self.regulation_active = False
@@ -1059,6 +1094,8 @@ class Pilote:
                                             self.u_ventilateur_pdc) or 0.0
             self.dp_min_mesurable = cfg.get("mesure_dp", {}).get(
                 "dp_min_mesurable_pa", self.dp_min_mesurable)
+            self.dp_min_detection_fige = cfg.get("mesure_dp", {}).get(
+                "dp_min_detection_fige_pa", self.dp_min_detection_fige)
             self.pdc_min_exploitable_pct = sr.get("pdc_min_exploitable_pct",
                                                    self.pdc_min_exploitable_pct)
             self.re_min_exploitable = sr.get("re_min_exploitable",
@@ -1891,6 +1928,24 @@ class Pilote:
             self.etat["pdc_position"] = self._pdc_position_estimee
             self.etat["defaut_pdc"] = False
 
+        # ---- défaut variateur ---------------------------------------------
+        # remonté par le contact NF MB du 3G3MV. L'entrée est déclarée
+        # "inverse" en config : un fil coupé se lit donc comme un défaut, et
+        # non comme une absence de défaut. Testé AVANT les manœuvres de vanne
+        # (qui sortent du cycle) et avant l'écriture du RUN : placé après, il
+        # restait ignoré toute une course de vanne (jusqu'à ~18 s, RUN
+        # maintenu) et laissait passer une impulsion RUN d'un cycle.
+        if mesures.get("defaut_variateur"):
+            self._repli_sur()
+            self.etat.update({
+                "defaut_variateur": "défaut signalé par le 3G3MV "
+                                    "(relais MA/MB) — acquitter sur le "
+                                    "variateur puis relancer",
+                "regulation": False, "u_variateur": 0.0, "convergee": False,
+            })
+            return
+        self.etat["defaut_variateur"] = None
+
         # ---- gel pendant une manœuvre de vanne TOR -------------------------
         # Fin de gel : fin de course atteinte (+ marge). Chien de garde :
         # défaut vanne si la fin de course n'arrive pas à temps.
@@ -2016,11 +2071,13 @@ class Pilote:
         if len(self._historique_dp) >= self._historique_dp.maxlen:
             # Fenêtre pleine : calculer variance
             variance_dp = pstdev(self._historique_dp) ** 2 if len(self._historique_dp) > 1 else 0.0
-            # Actionneurs actifs : régulation en cours OU apprentissage en cours
-            # (variateur actif). Détection aussi pendant apprentissages pour éviter
-            # corruption des calibrations si signal figé (table gains, tau, kp/ki).
-            # Note: on ne teste pas pendant les manœuvres (ΔP peut être stable)
-            # NE PAS tester en mode bas-Re : procédé lent → variance naturellement faible
+            # Banc en régulation, hors manœuvre, ventilateur établi. Pas en
+            # mode manuel (apprentissages compris : paliers à très bas débit).
+            # Pas en mode PdC : procédé lent, ΔP de quelques dixièmes de Pa,
+            # variance naturellement faible. En Miller, seulement au-delà de
+            # dp_min_detection_fige_pa (40 Pa, ordre du bas de la plage ISO
+            # où le critère est éprouvé) : la détection était coupée dans
+            # tout le Miller, jusqu'à 8 000 Re conduite (revue).
             # ventilateur en marche depuis au moins la fenêtre entière : la
             # fenêtre ne contient alors que des mesures ventilateur tournant.
             # Sinon, au démarrage, elle est pleine des zéros d'avant la
@@ -2034,7 +2091,10 @@ class Pilote:
                                  and self._manoeuvre is None
                                  and self.etat.get("u_variateur", 0.0) > 0.5
                                  and ventilateur_etabli
-                                 and not self._mode_bas_re
+                                 and self._mode_regulation != MODE_PDC_CONTROL
+                                 and (self._mode_regulation == MODE_NORMAL_HIGH
+                                      or fmean(self._historique_dp)
+                                      >= self.dp_min_detection_fige)
                                  and not self.mode_manuel)
             if variance_dp < 0.01 and actionneurs_actifs:
                 # Signal suspect : variance trop faible alors que le banc régule
@@ -2098,8 +2158,12 @@ class Pilote:
         # le cycle précédent, sans quoi une montée fausserait le gain.
         etabli = (self._re_conduite_prec is not None and re_cond > 0
                   and abs(re_cond - self._re_conduite_prec) < 0.01 * re_cond)
+        # pas pendant les apprentissages ni la page Maintenance (maintien TOR
+        # suspendu) : vannes manœuvrées à la main, ΔP parfois saturé — le
+        # contrôle câblage faussait ainsi le gain de 21 % (revue)
         if (etabli and u_courant > 0.3 and re_cond > 200
                 and not self._mode_bas_re
+                and not self._maintien_tor_suspendu
                 and not mesures.get("fc_bypass_ouvert")):
             g = re_cond / u_courant
             if self._gain_re_par_volt is None:
@@ -2125,20 +2189,6 @@ class Pilote:
         run_voulu = (manuel and u_manu > 0.05) or (regul and re_cible > 0)
         self.es.ecrire_variateur_run(run_voulu)
         self._run_actif = run_voulu
-
-        # défaut variateur remonté par le contact NF MB du 3G3MV. L'entrée est
-        # déclarée "inverse" en config : un fil coupé se lit donc comme un
-        # défaut, et non comme une absence de défaut.
-        if mesures.get("defaut_variateur"):
-            self._repli_sur()
-            self.etat.update({
-                "defaut_variateur": "défaut signalé par le 3G3MV "
-                                    "(relais MA/MB) — acquitter sur le "
-                                    "variateur puis relancer",
-                "regulation": False, "u_variateur": 0.0, "convergee": False,
-            })
-            return
-        self.etat["defaut_variateur"] = None
 
         # ---- capteur ΔP saturé : plafond de commande ----------------------
         # Au-delà de saturation_dp × pleine échelle, le Re calculé plafonne au

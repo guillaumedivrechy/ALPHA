@@ -291,3 +291,44 @@ def test_temperature_saisie_choisie_dans_la_configuration(ihm):
                                   "valeur_manuelle_c": 27.5}
     ihm.avancer(1.0)
     assert ihm.b.p.etat["temperature"] == 27.5
+
+
+def test_curseur_maintenance_ne_relance_pas_apres_arret(ihm):
+    """Revue : RUN depuis Maintenance, puis ARRÊT VARIATEUR du rail (ou un
+    repli) ; bouger ensuite le curseur relançait le ventilateur sans
+    confirmation. Le curseur est désarmé dès que le manuel n'est plus actif."""
+    app = ihm.app
+    app._nav(app.PAGE_MAINTENANCE)
+    app._mes_run_arme = True
+    ihm.b.p.mode_manuel_tension(0.0)
+    ihm.avancer(0.5)
+    app._mes_slider.setValue(300)
+    assert ihm.b.p.tension_manuelle == pytest.approx(3.0)
+    ihm.b.p.arreter_regulation()          # ARRÊT VARIATEUR du rail
+    ihm.avancer(0.5)
+    assert not app._mes_run_arme
+    app._mes_slider.setValue(600)
+    ihm.avancer(0.5)
+    assert ihm.b.sim.u_ecrite == 0.0 and not ihm.b.p.mode_manuel
+
+
+def test_commandes_refusees_pendant_un_apprentissage(ihm):
+    """Revue : « Appliquer » en asservi démarrait la régulation par-dessus
+    un Re mapping ; un bouton de vanne bougeait la vanne 3 voies en pleine
+    mesure ; la configuration pouvait être déverrouillée et enregistrée."""
+    app = ihm.app
+    app.apprentissage.etat["en_cours"] = True     # séquence en cours
+    try:
+        app.inp_re.setText("8000")
+        app._appliquer()
+        assert not ihm.b.p.regulation_active
+        app._cmd_diaph("iso")
+        assert not ihm.b.p._manoeuvres
+        app._choisir_mode("manuel")
+        assert app._mode != "manuel"
+        app.chk_unlock.setChecked(True)
+        assert not app.chk_unlock.isChecked()
+        refus = [d for d in ihm.dialogues if d[1] == "Apprentissage en cours"]
+        assert len(refus) == 4
+    finally:
+        app.apprentissage.etat["en_cours"] = False

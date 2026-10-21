@@ -90,7 +90,10 @@ class WagoModbus(EntreesSorties):
             raise RuntimeError(
                 "pymodbus n'est pas installé : pip install pymodbus")
         self.cfg = cfg_modbus
-        self._verrou = threading.Lock()   # client pymodbus non thread-safe
+        # client pymodbus non thread-safe. Réentrant : une écriture tient le
+        # verrou du test de son cache jusqu'à sa mise à jour, transaction
+        # comprise (_transaction le reprend)
+        self._verrou = threading.RLock()
         # dernière valeur écrite par sortie : évite de réémettre une valeur
         # inchangée à chaque cycle, tout en la réaffirmant périodiquement
         # (voir _ecrire_ao_volts et _ecrire_coil)
@@ -101,9 +104,13 @@ class WagoModbus(EntreesSorties):
         # Délai après fermeture socket pour éviter TIME_WAIT (reconnexion rapide)
         self._delai_fermeture_s = cfg_modbus.get("delai_fermeture_s", 0.05)
         # Créer le client Modbus TCP
+        # retries : nouvelles tentatives par transaction (pymodbus : 3 par
+        # défaut). Une seule : un paquet perdu reste toléré, et un coupleur
+        # muet est détecté en 2 × timeout_s au lieu de 4 ×.
         self.client = ModbusTcpClient(
             host=cfg_modbus["ip"], port=cfg_modbus.get("port", 502),
-            timeout=cfg_modbus.get("timeout_s", 1.0))
+            timeout=cfg_modbus.get("timeout_s", 1.0),
+            retries=cfg_modbus.get("retries", 1))
 
         # Tentatives de connexion avec retry (robustesse à la reconnexion)
         tentatives = 3
@@ -217,19 +224,23 @@ class WagoModbus(EntreesSorties):
         # écriture sur changement seulement, avec réécriture périodique en
         # garde-fou (coupleur redémarré ou écriture perdue). Un changement
         # de valeur — dont les mises à 0 de sécurité — part immédiatement.
+        # test du cache, écriture et mise à jour du cache d'un seul tenant :
+        # sinon, ARRÊT (thread IHM) écrivait 0 V, la boucle 3 V juste
+        # derrière, puis l'IHM inscrivait 0 dans le cache -> le 0 V suivant
+        # était dédupliqué, matériel resté à 3 V jusqu'au rafraîchissement
         adresse = voie["adresse"]
-        precedent = self._ao_cache.get(adresse)
-        maintenant = time.monotonic()
-        if precedent is not None and precedent[0] == brut \
-                and maintenant - precedent[1] < self._t_rafraichissement:
-            return
-        rr = self._transaction(self.client.write_register,
-                               address=adresse, value=brut)
-        if rr.isError():
-            # ne PAS mettre en cache : une mise à 0 de sécurité refusée
-            # doit être retentée au cycle suivant, pas dédupliquée
-            raise IOError(f"Erreur Modbus écriture AO @{adresse}")
         with self._verrou:
+            precedent = self._ao_cache.get(adresse)
+            maintenant = time.monotonic()
+            if precedent is not None and precedent[0] == brut \
+                    and maintenant - precedent[1] < self._t_rafraichissement:
+                return
+            rr = self._transaction(self.client.write_register,
+                                   address=adresse, value=brut)
+            if rr.isError():
+                # ne PAS mettre en cache : une mise à 0 de sécurité refusée
+                # doit être retentée au cycle suivant, pas dédupliquée
+                raise IOError(f"Erreur Modbus écriture AO @{adresse}")
             self._ao_cache[adresse] = (brut, maintenant)
 
     def _ecrire_coil(self, voie: dict, etat: bool) -> bool:
@@ -242,18 +253,18 @@ class WagoModbus(EntreesSorties):
 
         Retourne True si la sortie a effectivement été écrite."""
         adresse = voie["adresse"]
-        precedent = self._coil_cache.get(adresse)
-        maintenant = time.monotonic()
-        if precedent is not None and precedent[0] == etat \
-                and maintenant - precedent[1] < self._t_rafraichissement:
-            return False
-        rr = self._transaction(self.client.write_coil,
-                               address=adresse, value=etat)
-        if rr.isError():
-            # ne PAS mettre en cache : un retrait de sécurité refusé doit
-            # être retenté au cycle suivant, pas dédupliqué
-            raise IOError(f"Erreur Modbus écriture coil @{adresse}")
-        with self._verrou:
+        with self._verrou:                 # même raison que les AO
+            precedent = self._coil_cache.get(adresse)
+            maintenant = time.monotonic()
+            if precedent is not None and precedent[0] == etat \
+                    and maintenant - precedent[1] < self._t_rafraichissement:
+                return False
+            rr = self._transaction(self.client.write_coil,
+                                   address=adresse, value=etat)
+            if rr.isError():
+                # ne PAS mettre en cache : un retrait de sécurité refusé doit
+                # être retenté au cycle suivant, pas dédupliqué
+                raise IOError(f"Erreur Modbus écriture coil @{adresse}")
             self._coil_cache[adresse] = (etat, maintenant)
         return True
 

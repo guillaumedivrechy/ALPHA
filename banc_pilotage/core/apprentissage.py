@@ -50,6 +50,10 @@ class Apprentissage:
             return "Une séquence est déjà en cours."
         if self.pilote.etat.get("regulation"):
             return "Arrêtez la régulation avant de lancer un apprentissage."
+        if self.pilote.etat.get("arret_securite"):
+            return ("Arrêt de sécurité non acquitté : lisez sa cause dans le "
+                    "bandeau rouge, corrigez-la et acquittez avant de lancer "
+                    "un apprentissage.")
         # Le ventilateur peut tourner en mode manuel (commandes de l'IHM ou
         # page de mise en service) sans que « regulation » soit vrai. Toute
         # séquence part d'un état connu : sans cela verif_cablage voit un
@@ -757,6 +761,10 @@ class Apprentissage:
             m1 = self._dp_moyens(4.0, "identification : butée 0°")
             if m1 is None:
                 return
+            # ventilateur coupé pendant la course de la vanne 3 voies (règle
+            # des manœuvres) : à 3 V, bypass fermé, le passage sur l'orifice
+            # Miller saturait son capteur
+            self._variateur(0.0)
             t = self._avancer_vanne_3voies(False,
                                            "identification : vers butée 90°")
             if self._interrompu():
@@ -766,7 +774,11 @@ class Apprentissage:
                 # (mesurer m2 ici accuserait à tort les capteurs ΔP)
                 rapport["v3_identification"] = False
             else:
-                if self._pause(2.0):
+                self._variateur(u_essai)
+                if self._attendre(_flux_present, 30.0,
+                                  "identification : relance du débit") is None:
+                    return
+                if self._pause(3.0):
                     self._statut_annule()
                     return
                 m2 = self._dp_moyens(4.0, "identification : butée 90°")
@@ -774,12 +786,18 @@ class Apprentissage:
                     return
                 d1 = self._capteur_dominant(*m1)
                 d2 = self._capteur_dominant(*m2)
-                if d1 == "iso" and d2 == "miller":
-                    mapping = "ok"
-                elif d1 == "miller" and d2 == "iso":
-                    mapping = "inverse"
-                else:
+                # comparé à la correspondance EN VIGUEUR, pas à « 0° = ISO » :
+                # sinon, plomberie croisée déjà corrigée, un second contrôle
+                # la déclarait de nouveau inversée et Appliquer la ré-inversait
+                attendu = self.pilote._diaphragme_par_angle
+                if {d1, d2} != {"iso", "miller"}:
                     mapping = "indetermine"
+                elif (d1, d2) == (attendu.get("0"), attendu.get("90")):
+                    mapping = "ok"
+                else:
+                    mapping = "inverse"
+                    rapport["mapping_mesure"] = {"diaphragme_a_0deg": d1,
+                                                 "diaphragme_a_90deg": d2}
                 rapport["mapping_iso_miller"] = mapping
                 rapport["dp_butee_0deg"] = [round(m1[0], 1), round(m1[1], 1)]
                 rapport["dp_butee_90deg"] = [round(m2[0], 1), round(m2[1], 1)]
@@ -789,10 +807,13 @@ class Apprentissage:
         defauts = [k for k, v in rapport.items()
                    if v is False and k != "mapping_inverse"]
         if mapping == "inverse":
-            resume = ("MAPPING ISO/MILLER INVERSÉ — la butée 0° fait réagir le "
-                      "capteur Miller et la butée 90° le capteur ISO "
+            mm = rapport["mapping_mesure"]
+            resume = ("MAPPING ISO/MILLER DIFFÉRENT DE LA CONFIGURATION — la "
+                      f"butée 0° fait réagir le capteur "
+                      f"{mm['diaphragme_a_0deg'].upper()} et la butée 90° le "
+                      f"capteur {mm['diaphragme_a_90deg'].upper()} "
                       "(plomberie croisée ou capteurs intervertis) ; "
-                      "« Appliquer » corrige positions_vanne_3voies")
+                      "« Appliquer » écrit ce mapping mesuré")
         elif defauts:
             resume = "défauts : " + ", ".join(defauts)
         elif mapping == "indetermine":
@@ -1837,9 +1858,13 @@ class Apprentissage:
                     f"{sbr.get('re_min_exploitable', '—')} → {r['re_min_exploitable']}")
                     if n else "aucun palier mesurable : mode PdC inactif"))
             elif nom == "verif_cablage":
-                lignes.append((titre, "mapping vanne 3 voies ISO/Miller interverti"
-                               if r.get("mapping_inverse") else
-                               "contrôle seul, rien à écrire"))
+                mm = r.get("mapping_mesure") or {}
+                lignes.append((titre, (
+                    "mapping vanne 3 voies → 0° = "
+                    f"{mm.get('diaphragme_a_0deg', '?').upper()}, 90° = "
+                    f"{mm.get('diaphragme_a_90deg', '?').upper()}")
+                    if r.get("mapping_inverse") else
+                    "contrôle seul, rien à écrire"))
             else:
                 lignes.append((titre, "résultat à appliquer"))
         return lignes
@@ -1877,18 +1902,25 @@ class Apprentissage:
             self.pilote.zero_capteurs = z
             lignes.append("zéros capteurs : " + ", ".join(
                 f"{v} = {o} Pa" for v, o in z.items()))
-        if self.resultats.get("verif_cablage", {}).get("mapping_inverse"):
+        r_cab = self.resultats.get("verif_cablage", {})
+        if r_cab.get("mapping_inverse"):
             pos = self.cfg.setdefault("modbus", {}).setdefault(
                 "positions_vanne_3voies", {})
-            pos["diaphragme_a_0deg"], pos["diaphragme_a_90deg"] = (
-                pos.get("diaphragme_a_90deg", "miller"),
-                pos.get("diaphragme_a_0deg", "iso"))
+            # le mapping MESURÉ est écrit (et non une permutation de
+            # l'existant, qui ré-inversait une configuration déjà juste) ;
+            # résultat sans mesure (ancienne version) : permutation
+            mm = r_cab.get("mapping_mesure") or {
+                "diaphragme_a_0deg": pos.get("diaphragme_a_90deg", "miller"),
+                "diaphragme_a_90deg": pos.get("diaphragme_a_0deg", "iso")}
+            pos["diaphragme_a_0deg"] = mm["diaphragme_a_0deg"]
+            pos["diaphragme_a_90deg"] = mm["diaphragme_a_90deg"]
             d0, d90 = pos["diaphragme_a_0deg"], pos["diaphragme_a_90deg"]
             self.pilote._diaphragme_par_angle = {"0": d0, "90": d90}
             self.pilote._angle_par_diaphragme = {d0: "0", d90: "90"}
             # la position réelle sera relue sur les fins de course
             self.pilote._position_initiale_lue = False
-            lignes.append("mapping vanne 3 voies ISO/Miller interverti")
+            lignes.append(f"mapping vanne 3 voies : 0° = {d0.upper()}, "
+                          f"90° = {d90.upper()}")
         if "calibration_pdc" in self.resultats:
             r = self.resultats["calibration_pdc"]
             act["pdc_recopie_min_v"] = r["v_min_recopie"]

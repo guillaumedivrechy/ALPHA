@@ -54,7 +54,7 @@ class _FauxClient:
 def wago():
     w = WagoModbus.__new__(WagoModbus)      # sans connexion réseau
     w.cfg = CFG_MODBUS
-    w._verrou = threading.Lock()
+    w._verrou = threading.RLock()
     w._ao_cache = {}
     w._coil_cache = {}
     w._t_rafraichissement = 2.0
@@ -150,7 +150,7 @@ def test_image_process_expose_les_registres_bruts():
     es = WagoModbus.__new__(WagoModbus)
     es.cfg = CFG_MODBUS
     es.client = _FauxClient()
-    es._verrou = threading.Lock()
+    es._verrou = threading.RLock()
     assert es.image_process is None            # rien avant la 1re lecture
 
     mesures = es.lire_mesures()
@@ -182,7 +182,7 @@ def test_image_process_distingue_un_contact_inverse():
     es = WagoModbus.__new__(WagoModbus)
     es.cfg = CFG_MODBUS
     es.client = _FauxClient()                  # tous les bits a True
-    es._verrou = threading.Lock()
+    es._verrou = threading.RLock()
     mesures = es.lire_mesures()
 
     inverses = [n for n, v in CFG_MODBUS["entrees_tor"].items()
@@ -221,3 +221,33 @@ def test_reaffirmation_de_l_ordre_3_voies_sans_pause(wago, monkeypatch):
     a90 = s["vanne_diaphragme_90deg"]["adresse"]
     # relâcher avant de coller, jamais les deux ordres ensemble
     assert ecrites[-2:] == [(a0, False), (a90, True)]
+
+
+def test_ecritures_concurrentes_cache_fidele_au_materiel(wago):
+    """Revue : ARRÊT (thread IHM) écrivait 0 V, la boucle écrivait 3 V
+    pendant que l'IHM n'avait pas encore mis 0 en cache ; le cache disait
+    0 V alors que le matériel restait à 3 V, et le 0 V suivant était
+    dédupliqué. Test, écriture et cache d'un seul tenant : le cache reflète
+    toujours le matériel."""
+    import time as _t
+    adr = CFG_MODBUS["sorties"]["variateur"]["adresse"]
+    lent = threading.Event()
+    ecrire_reg = wago.client.write_register
+    materiel = {}
+
+    def write_register_lent(address, value):
+        if value == 0 and not lent.is_set():
+            lent.set()
+            _t.sleep(0.05)              # la boucle arrive pendant ce temps
+        materiel[address] = value
+        return ecrire_reg(address=address, value=value)
+    wago.client.write_register = write_register_lent
+    wago.ecrire_variateur(2.0)
+    arret = threading.Thread(target=wago.ecrire_variateur, args=(0.0,))
+    arret.start()
+    lent.wait(1.0)
+    wago.ecrire_variateur(3.0)          # boucle, pendant l'écriture d'arrêt
+    arret.join(2.0)
+    assert wago._ao_cache[adr][0] == materiel[adr]
+    wago.ecrire_variateur(0.0)          # cycle suivant, arrêt latché
+    assert materiel[adr] == 0
