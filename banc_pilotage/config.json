@@ -39,9 +39,10 @@
     "dp_iso_500": 0.02
   },
   "temperature": {
-    "_commentaire": "Temperature de l'air utilisee dans les calculs (rho, mu, dilatation, donc le Re). source = 'pt100' : mesure en temps reel ; 'manuelle' : valeur_manuelle_c, la PT100 est ignoree (sonde absente ou douteuse ; ses controles de vraisemblance ne s'appliquent plus). Reglable dans l'onglet Configuration.",
+    "_commentaire": "Temperature de l'air utilisee dans les calculs (rho, mu, dilatation, donc le Re). source = 'pt100' : mesure en temps reel ; 'manuelle' : valeur_manuelle_c, la PT100 est ignoree (sonde absente ou douteuse ; ses controles de vraisemblance ne s'appliquent plus). offset_pt100_c : correction ajoutee a la lecture de la PT100 (positive ou negative, 0 par defaut), par exemple apres comparaison a un thermometre de reference ; ignoree en source 'manuelle'. Les bornes de vraisemblance s'appliquent a la lecture brute. Reglable dans l'onglet Configuration.",
     "source": "pt100",
-    "valeur_manuelle_c": 20.0
+    "valeur_manuelle_c": 20.0,
+    "offset_pt100_c": 0.0
   },
   "mesure_dp": {
     "_commentaire": "Tres bas debit, voie Delta-P Miller (couple maitre/esclave 50/500 Pa, resolution ~0,015 Pa). seuil_debit_nul_pa : Delta-P sous lequel le debit est lu nul (bruit et offset du capteur ; 0,3 Pa auparavant, soit ~110 Re veine lus 0). dp_min_mesurable_pa : plancher de mesure ; la table PdC s'arrete a ce Delta-P, ce qui borne la consigne la plus basse (0,15 Pa ~ 80 Re veine ; 1 Pa auparavant, ~200 Re veine). A verifier au banc : ecart-type du Delta-P Miller ventilateur arrete, nettement sous ces valeurs. Changer dp_min_mesurable_pa : refaire l'apprentissage Table PdC. dp_min_detection_fige_pa : en Miller, un signal Delta-P fige (ecart-type < 0,1 Pa sur 10 s) n'est detecte qu'au-dela de ce Delta-P moyen ; en dessous, le bruit naturel peut etre aussi faible.",

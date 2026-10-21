@@ -79,6 +79,9 @@ def _seuil_bascule(v, valeurs):
                 "(domaine de validité ISO 5167)")
     return None
 
+def _offset_pt100(v, _):
+    return None if -10.0 <= v <= 10.0 else "doit être entre -10 et +10 °C"
+
 def _temperature_saisie(v, _):
     return None if -10.0 <= v <= 60.0 else "doit être entre -10 et 60 °C"
 
@@ -115,6 +118,7 @@ DEFAUTS_CLES_RECENTES = {
     ("mesure_dp", "dp_min_mesurable_pa"): 0.15,
     ("mesure_dp", "seuil_debit_nul_pa"): 0.05,
     ("temperature", "valeur_manuelle_c"): 20.0,
+    ("temperature", "offset_pt100_c"): 0.0,
     ("fluide", "humidite_relative"): 0.0,
 }
 
@@ -3099,8 +3103,11 @@ class Application(QMainWindow):
             (("fluide","sutherland_s"),       "Constante S",      "K",    "{:.1f}", _positif),
         ], col=0, row=2)
 
-        # température de l'air : PT100 en temps réel ou saisie à la main
+        # température de l'air : PT100 en temps réel (corrigée d'un offset,
+        # positif ou négatif) ou saisie à la main
         carte_t = _grp("Température de l'air", [
+            (("temperature","offset_pt100_c"), "Offset PT100 (+ ou −)", "°C",
+             "{:.2f}", _offset_pt100),
             (("temperature","valeur_manuelle_c"), "Température saisie", "°C",
              "{:.1f}", _temperature_saisie),
         ], col=1, row=3)
@@ -3113,7 +3120,8 @@ class Application(QMainWindow):
         self.chk_t_manuelle.setToolTip(
             "Coché : ρ, μ et le Re sont calculés avec la température saisie "
             "ci-dessus ; la PT100 n'est plus lue pour les calculs ni "
-            "surveillée. Décoché : PT100 en temps réel.")
+            "surveillée. Décoché : PT100 en temps réel, corrigée de l'offset "
+            "ci-dessus (0 par défaut).")
         self.chk_t_manuelle.setChecked(
             cfg.get("temperature", {}).get("source") == "manuelle")
         self.chk_t_manuelle.setEnabled(False)
@@ -4504,8 +4512,10 @@ class Application(QMainWindow):
         if T is not None:
             # Affichage température (utilisée par les calculs)
             saisie = e.get("temperature_source") == "manuelle"
-            self._lbl_air_temp.setText(f"{T:.1f}".replace(".", ",")
-                                       + (" (saisie)" if saisie else ""))
+            offset = self.pilote.offset_pt100
+            suffixe = (" (saisie)" if saisie else
+                       f" (offset {offset:+.2f})".replace(".", ",") if offset else "")
+            self._lbl_air_temp.setText(f"{T:.1f}".replace(".", ",") + suffixe)
 
             # Récupérer l'humidité relative depuis la config
             HR_pct = self.cfg.get("fluide", {}).get("humidite_relative", 0.0)

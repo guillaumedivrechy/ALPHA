@@ -1579,3 +1579,28 @@ def test_appliquer_config_en_mode_pdc_garde_la_rampe_de_la_vanne():
     pilote.appliquer_config(json.loads(json.dumps(CFG)))
     assert pilote.pi.rampe == pytest.approx(rampe)
     assert pilote.pi.gain_scale == pytest.approx(scale)
+
+
+def test_offset_pt100(monkeypatch, tmp_path):
+    """Offset de la PT100 (onglet Configuration, 0 par défaut) : ajouté à
+    la lecture pour les calculs ; lecture brute inchangée dans
+    mesures_brutes ; sans effet en température saisie ; repris à chaud."""
+    from banc_simule import BancSimule
+    b = BancSimule(monkeypatch, tmp_path, cfg_sur={
+        "temperature": {"offset_pt100_c": -1.5}})
+    p = b.p
+    b.cycles(1.0, verifier=False)
+    brute = p.etat["mesures_brutes"]["temperature"]
+    assert p.etat["temperature"] == pytest.approx(brute - 1.5)
+    rho_corrige = p.etat["rho"]
+    b.cfg["temperature"]["offset_pt100_c"] = 0.0
+    p.appliquer_config(b.cfg)
+    b.cycles(1.0, verifier=False)
+    assert p.etat["temperature"] == pytest.approx(
+        p.etat["mesures_brutes"]["temperature"])
+    assert p.etat["rho"] < rho_corrige               # air plus chaud
+    b.cfg["temperature"].update(source="manuelle", valeur_manuelle_c=22.0,
+                                offset_pt100_c=3.0)
+    p.appliquer_config(b.cfg)
+    b.cycles(1.0, verifier=False)
+    assert p.etat["temperature"] == 22.0

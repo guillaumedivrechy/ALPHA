@@ -75,6 +75,12 @@ def _seuil_bas_re_de_config(sr: dict, seuil_diaphragme: float,
     return manuel
 
 
+def _offset_pt100(valeur) -> float:
+    """Correction de la PT100 [°C] (temperature.offset_pt100_c), 0 par
+    défaut ; bornée à ±10 °C : au-delà, c'est la sonde qu'il faut revoir."""
+    return min(max(float(valeur), -10.0), 10.0) if _nombre(valeur) else 0.0
+
+
 def _temperature_manuelle(source, valeur) -> float | None:
     """Température de l'air saisie à la main (temperature.source =
     "manuelle"), ou None : PT100 lue en temps réel."""
@@ -440,6 +446,8 @@ class Pilote:
         tcfg = cfg.get("temperature", {})
         self.t_manuelle = _temperature_manuelle(tcfg.get("source"),
                                                 tcfg.get("valeur_manuelle_c"))
+        # correction ajoutée à la lecture de la PT100 (0 par défaut)
+        self.offset_pt100 = _offset_pt100(tcfg.get("offset_pt100_c", 0.0))
         # vitesse de repli de la commande quand le capteur ΔP sature
         self.recul_saturation = r.get("recul_saturation_v_par_s", 0.5)
         # limite maximale de consigne Re pour le diaphragme ISO (évite
@@ -1042,6 +1050,8 @@ class Pilote:
             tcfg = cfg.get("temperature", {})
             self.t_manuelle = _temperature_manuelle(
                 tcfg.get("source"), tcfg.get("valeur_manuelle_c"))
+            self.offset_pt100 = _offset_pt100(
+                tcfg.get("offset_pt100_c", self.offset_pt100))
             self.recul_saturation = r.get("recul_saturation_v_par_s",
                                           self.recul_saturation)
             # la fenêtre est un nombre d'échantillons : la reconstruire à
@@ -1636,8 +1646,13 @@ class Pilote:
         # Hors bornes = sonde coupée ou module saturé. rho et mu en dépendent,
         # donc le Re : sans ce test le PI poursuit une mesure fantaisiste et
         # emmène le ventilateur en butée sans lever le moindre défaut.
+        # bornes sur la lecture BRUTE (sonde coupée, voie mal adressée),
+        # offset de l'opérateur ajouté ensuite ; mesures_brutes garde la
+        # lecture non corrigée
         elif self.t_min_c <= T <= self.t_max_c:
             self._cycles_t_invalide = 0
+            T = T + self.offset_pt100
+            mesures["temperature"] = T
             self._derniere_T_valide = T
         else:
             self._cycles_t_invalide += 1

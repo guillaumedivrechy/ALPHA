@@ -512,3 +512,25 @@ def test_validateurs_tres_bas_re():
     plancher = {("mesure_dp", "dp_min_mesurable_pa"): 0.15}
     assert gapp._seuil_debit_nul(0.2, plancher)
     assert gapp._seuil_debit_nul(0.05, plancher) is None
+
+
+def test_offset_pt100_dans_la_configuration(ihm):
+    """Champ « Offset PT100 » : 0 par défaut, écrit dans config.json et
+    appliqué au pilote ; hors ±10 °C refusé."""
+    app = ihm.app
+    champ = app.champs[("temperature", "offset_pt100_c")][0]
+    assert champ.text() == "0.00"
+    app.chk_unlock.setChecked(True)
+    champ.setText("-0,8")
+    app._enregistrer_configuration()
+    assert ihm.b.p.offset_pt100 == -0.8
+    cfg = json.loads(app.chemin_cfg.read_text(encoding="utf-8"))
+    assert cfg["temperature"]["offset_pt100_c"] == -0.8
+    ihm.avancer(1.0)
+    e = ihm.b.p.etat
+    assert e["temperature"] == pytest.approx(e["mesures_brutes"]["temperature"] - 0.8)
+    app.chk_unlock.setChecked(True)
+    champ.setText("15")
+    app._enregistrer_configuration()
+    assert ihm.dialogues[-1][1] == "Saisie invalide"
+    assert ihm.b.p.offset_pt100 == -0.8

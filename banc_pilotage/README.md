@@ -139,6 +139,7 @@ séquence.
 | `diaphragme_iso` / `diaphragme_miller` | D, d à 20 °C, coefficients de dilatation, formule de C (RHG/Stolz) |
 | `veine` | **à renseigner** : section [m²] et longueur caractéristique [m] pour le Re veine |
 | `fluide` | γ, Sutherland, humidité relative, valeurs forcées ρ/μ optionnelles |
+| `temperature` | source de la température des calculs : PT100 en temps réel (corrigée de `offset_pt100_c`, + ou −, 0 par défaut) ou valeur saisie |
 | `zero_capteurs` | offsets de zéro des capteurs ΔP (apprentissage « zéro capteurs ») |
 | `selection_diaphragme` | bascule ISO / Miller en Re conduite (8000) et hystérésis (± 500) ; seuil − hystérésis ≥ 5000 (validité ISO) |
 | `actionneurs` | temps de course des vannes (chiens de garde), butées de la recopie PdC |
