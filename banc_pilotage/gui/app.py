@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import time
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -51,6 +52,20 @@ def _seuil_saturation(v, _):
 
 def _positif_ou_nul(v, _):
     return None if v >= 0 else "doit être positif ou nul"
+
+def _tension_ventilateur_pdc(v, _):
+    # commande 0-10 V du variateur ; 0 = u_min × marge_ventilateur_pdc
+    return None if 0 <= v <= 10 else "doit être compris entre 0 et 10 V"
+
+def _seuil_debit_nul(v, valeurs):
+    # sous ce ΔP le débit est lu nul : au-dessus du plancher de mesure, des
+    # paliers « mesurables » seraient lus à débit nul
+    if v < 0:
+        return "doit être positif ou nul"
+    plancher = valeurs.get(("mesure_dp", "dp_min_mesurable_pa"))
+    if plancher is not None and v >= plancher:
+        return "doit rester sous le plancher de mesure ΔP Miller"
+    return None
 
 def _seuil_bascule(v, valeurs):
     """Seuil de bascule ISO / Miller (Re conduite) : l'ISO n'est employée
@@ -100,7 +115,22 @@ DEFAUTS_CLES_RECENTES = {
     ("mesure_dp", "dp_min_mesurable_pa"): 0.15,
     ("mesure_dp", "seuil_debit_nul_pa"): 0.05,
     ("temperature", "valeur_manuelle_c"): 20.0,
+    ("fluide", "humidite_relative"): 0.0,
 }
+
+# affichage des clés absentes sans défaut (ex. veine.hauteur_m / largeur_m,
+# que le calcul n'utilise pas) : laissées telles quelles à l'enregistrement
+NON_RENSEIGNE = "—"
+
+
+def _formater_champ(val_fmt, raw) -> str:
+    """Texte affiché d'un champ de l'onglet Configuration : format de la
+    ligne (chaîne ou fonction (valeur, valeurs)) appliqué aux nombres."""
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return str(raw)
+    if callable(val_fmt):
+        return val_fmt(raw, None)
+    return val_fmt.format(raw)
 
 PARAMETRES = [
     ("Diaphragme ISO 5167", [
@@ -506,7 +536,12 @@ class Application(QMainWindow):
         self._hist_re    = deque(maxlen=HISTORIQUE_PTS)
         self._hist_cible = deque(maxlen=HISTORIQUE_PTS)
         self._action_log: deque[dict] = deque(maxlen=20)
-        self._t0_acq: datetime | None = None
+        # instant (horloge monotone) de chaque point de la courbe : des
+        # points sont sautés (vanne 3 voies en course, Re non fini) et un
+        # pas supposé constant décalait l'axe des temps
+        self._hist_t = deque(maxlen=HISTORIQUE_PTS)
+        self._t0_acq: float | None = None
+        self._t_debut_regulation: float | None = None
         self._mode = "asservi"   # "manuel" | "asservi" | "sequence"
         self._ref_re = "veine"      # référence de la consigne Re : conduite | veine (défaut: veine)
         self._echelle_re = 250.0    # échelle slider Re (sera recalculée selon référence)
@@ -1783,14 +1818,14 @@ class Application(QMainWindow):
         # Gains PI
         h = QHBoxLayout(); h.setSpacing(18)
         h.addWidget(QLabel("Kp (gain proportionnel)"))
-        h.addWidget(spin_double("kp", 0.0, 5.0, 2))
+        h.addWidget(spin_double("kp", 0.0, 20.0, 2))
         h.addWidget(label_info("par défaut : 0.50 | correction en volts autour du feed-forward ; ↑ = plus vif, risque d'oscillation"))
         h.addStretch()
         cl.addLayout(h)
 
         h = QHBoxLayout(); h.setSpacing(18)
         h.addWidget(QLabel("Ki (gain intégral)"))
-        h.addWidget(spin_double("ki", 0.0, 2.0, 3))
+        h.addWidget(spin_double("ki", 0.0, 10.0, 3))
         h.addWidget(label_info("par défaut : 0.62 /s | annule l'écart table/banc ; ↑ = plus rapide, risque de dépassement"))
         h.addStretch()
         cl.addLayout(h)
@@ -1805,7 +1840,7 @@ class Application(QMainWindow):
 
         h = QHBoxLayout(); h.setSpacing(18)
         h.addWidget(QLabel("Tau consigne"))
-        h.addWidget(spin_double("tau_consigne_s", 0.0, 2.0, 2, " s"))
+        h.addWidget(spin_double("tau_consigne_s", 0.0, 30.0, 2, " s"))
         h.addWidget(label_info("= constante de temps du procédé (essai indiciel) | modèle de référence suivi par la correction"))
         h.addStretch()
         cl.addLayout(h)
@@ -1989,6 +2024,11 @@ class Application(QMainWindow):
         self._mes_reg_widgets["gain_scale"].setValue(sr.get("gain_scale", 0.2))
         self._mes_reg_widgets["marge_ventilateur_pdc"].setValue(
             sr.get("marge_ventilateur_pdc", 1.15))
+        # valeurs telles qu'affichées (bornées et arrondies par les spinbox) :
+        # un réglage non touché n'est pas réécrit à « Appliquer » (un tau
+        # appris de 3,5 s y devenait 2,0 s, un ki de 0,6234 0,623)
+        self._mes_reg_charges = {k: w.value()
+                                 for k, w in self._mes_reg_widgets.items()}
 
     def _mes_reg_appliquer(self) -> None:
         """Applique les paramètres de régulation et les sauvegarde dans config.json."""
@@ -2007,19 +2047,21 @@ class Application(QMainWindow):
             if "strategie_bas_re" not in cfg:
                 cfg["strategie_bas_re"] = {}
 
-            cfg["regulation"]["kp"] = self._mes_reg_widgets["kp"].value()
-            cfg["regulation"]["ki"] = self._mes_reg_widgets["ki"].value()
-            cfg["regulation"]["rampe_v_par_s"] = self._mes_reg_widgets["rampe_v_par_s"].value()
-            cfg["regulation"]["tau_consigne_s"] = self._mes_reg_widgets["tau_consigne_s"].value()
-            cfg["regulation"]["tolerance_convergence_relative"] = self._mes_reg_widgets["tolerance_convergence_relative"].value()
-            cfg["regulation"]["fenetre_convergence_s"] = self._mes_reg_widgets["fenetre_convergence_s"].value()
-            # Note : gain_scheduling n'est plus dans l'IHM (widget retiré)
-            # cfg["regulation"]["gain_scheduling"] = self._mes_reg_gain_scheduling.isChecked()
-
-            cfg["strategie_bas_re"]["seuil_re"] = self._mes_reg_widgets["seuil_re"].value()
-            cfg["strategie_bas_re"]["gain_scale"] = self._mes_reg_widgets["gain_scale"].value()
-            cfg["strategie_bas_re"]["marge_ventilateur_pdc"] = \
-                self._mes_reg_widgets["marge_ventilateur_pdc"].value()
+            sections = {"kp": "regulation", "ki": "regulation",
+                        "rampe_v_par_s": "regulation",
+                        "tau_consigne_s": "regulation",
+                        "tolerance_convergence_relative": "regulation",
+                        "fenetre_convergence_s": "regulation",
+                        "seuil_re": "strategie_bas_re",
+                        "gain_scale": "strategie_bas_re",
+                        "marge_ventilateur_pdc": "strategie_bas_re"}
+            charges = getattr(self, "_mes_reg_charges", {})
+            for cle, section in sections.items():
+                v = self._mes_reg_widgets[cle].value()
+                # seules les valeurs modifiées sont écrites
+                if cle in charges and v == charges[cle] and cle in cfg[section]:
+                    continue
+                cfg[section][cle] = v
             cfg["strategie_bas_re"].pop("split_range_point", None)   # réglage obsolète
 
             ecrire_json_atomique(self.chemin_cfg, cfg)
@@ -2144,11 +2186,13 @@ class Application(QMainWindow):
                      f"HORS BORNES {tmin:.0f}–{tmax:.0f} °C — sonde coupee, "
                      "module sature ou voie mal adressee", COLORS["error"])
 
-            # Calcul ρ (densité) et μ (viscosité)
-            P_abs = e.get("p_amont") or self.pilote.banc.patm_pa
-            from core.fluide import rho_air, mu_air
-            rho = rho_air(P_abs, T)
-            mu = mu_air(T)
+            # ρ et μ à la température lue par la sonde, avec le modèle de
+            # fluide du banc (air humide, Sutherland) ; p_amont est RELATIF
+            # (ρ affiché ~100 fois trop faible quand il était pris pour P_abs)
+            fluide = self.pilote.banc.fluide
+            P_abs = self.pilote.banc.patm_pa + (e.get("p_amont") or 0.0)
+            rho = fluide.rho(P_abs, T)
+            mu = fluide.mu(T)
             mets("pt100_rho", f"{rho:.4f} kg/m³".replace(".", ","))
             mets("pt100_mu", f"{mu:.2e} Pa·s".replace(".", ","))
 
@@ -2365,7 +2409,7 @@ class Application(QMainWindow):
         pvl.setContentsMargins(0, 0, 0, 0)
         pvl.setSpacing(0)
 
-        _col_w = [4, 2, 2, 2, 3, 2]
+        _col_w = [4, 2, 3, 2]
 
         # En-tête
         hdr = QWidget()
@@ -2373,7 +2417,9 @@ class Application(QMainWindow):
         hg = QGridLayout(hdr)
         hg.setContentsMargins(18, 14, 18, 14)
         hg.setSpacing(10)
-        for i, txt in enumerate(["VOIE", "UNITÉ", "GAIN", "OFFSET", "PLAGE", "ÉTAT"]):
+        # pas de colonnes GAIN / OFFSET : elles affichaient « 1,000 » et
+        # « 0,00 » en dur, sans lien avec la mise à l'échelle réelle
+        for i, txt in enumerate(["VOIE", "UNITÉ", "PLAGE", "ÉTAT"]):
             l = QLabel(txt)
             l.setStyleSheet(
                 "font-size:10px; font-weight:700; letter-spacing:.07em;"
@@ -2384,7 +2430,6 @@ class Application(QMainWindow):
         pvl.addWidget(hdr)
 
         self.lbl_entrees: dict[str, QLabel] = {}
-        self.lbl_fc: dict[str, QLabel] = {}   # compatibilité _tick_entrees
 
         for i, (key, name, max_val, fmt, color) in enumerate(_CHANNELS):
             unit   = _CH_UNIT[i]
@@ -2407,18 +2452,16 @@ class Application(QMainWindow):
             rg.addWidget(nw, 0, 0)
 
             rg.addWidget(self._mono(unit),  0, 1)
-            rg.addWidget(self._mono("1,000"), 0, 2)
-            rg.addWidget(self._mono("0,00"), 0, 3)
-            rg.addWidget(self._mono(plage),  0, 4)
+            rg.addWidget(self._mono(plage),  0, 2)
 
-            ok = QLabel("● Actif")
-            ok.setStyleSheet("font-size:11px; font-weight:600; color:#1F8F5B; background:transparent;")
-            rg.addWidget(ok, 0, 5)
+            ok = QLabel("—")
+            ok.setStyleSheet("font-size:11px; font-weight:600; color:#6B7E8E; background:transparent;")
+            rg.addWidget(ok, 0, 3)
 
             for c, w in enumerate(_col_w):
                 rg.setColumnStretch(c, w)
             pvl.addWidget(row)
-            self.lbl_entrees[key] = ok   # réf pour _tick_entrees (état actif/inactif)
+            self.lbl_entrees[key] = ok   # état mis à jour par _tick_entrees
 
         pvl.addStretch()
         vl.addWidget(panel, 1)
@@ -2578,6 +2621,12 @@ class Application(QMainWindow):
     def _arreter_sequence(self) -> None:
         """Fige la consigne de l'étape en cours (le ventilateur continue) :
         l'arrêt total reste le bouton ARRÊT VARIATEUR."""
+        seq = self.pilote.etat.get("sequence")
+        if not seq or seq.get("terminee"):
+            # rien à figer : la consigne saisie en asservi était sinon
+            # remplacée par la consigne courante
+            self._lbl_seq_statut.setText("aucune séquence en cours")
+            return
         self.pilote.figer_sequence()
         regule = self.pilote.regulation_active
         if regule:
@@ -2956,6 +3005,14 @@ class Application(QMainWindow):
         gl.setColumnStretch(1, 1)
 
         self.champs: dict[tuple, tuple] = {}
+        # format et texte affiché de chaque champ : une saisie inchangée
+        # garde la valeur exacte de config.json (sinon réécrite arrondie au
+        # format d'affichage : μ 1,716e-05 -> 1,72e-05)
+        self._formats_champs: dict[tuple, object] = {}
+        self._textes_affiches: dict[tuple, str] = {}
+        # valeurs en lecture seule (S, Dh, tolérance…), régénérées après
+        # chaque enregistrement
+        self._champs_lecture: dict[tuple, tuple] = {}
 
         # valeurs d'usine non calibrées (config.json : "A AJUSTER") — tant que
         # le champ garde cette valeur, on suppose qu'il n'a pas été mesuré
@@ -2985,6 +3042,7 @@ class Application(QMainWindow):
                 f" color:{COLORS['accent']}; background:transparent; border:none;")
             thl.addWidget(lt)
             cvl.addWidget(th)
+            card.titre = lt
             # lignes
             for chemin, libelle, unite, val_fmt, validation in rows:
                 try:
@@ -2993,7 +3051,7 @@ class Application(QMainWindow):
                     # clé ajoutée après la création de ce config.json : sa
                     # valeur par défaut (sinon « — » rendait tout
                     # enregistrement de l'onglet impossible)
-                    raw = DEFAUTS_CLES_RECENTES.get(chemin, "—")
+                    raw = DEFAUTS_CLES_RECENTES.get(chemin, NON_RENSEIGNE)
                 rw = QWidget()
                 rw.setStyleSheet(
                     "background:transparent; border-bottom:1px solid #E9EEF1;")
@@ -3016,7 +3074,10 @@ class Application(QMainWindow):
                 rwl.addStretch()
                 if validation is not None:
                     # champ éditable
-                    inp = QLineEdit(val_fmt.format(raw) if isinstance(raw, float) else str(raw))
+                    texte = _formater_champ(val_fmt, raw)
+                    inp = QLineEdit(texte)
+                    self._formats_champs[chemin] = val_fmt
+                    self._textes_affiches[chemin] = texte
                     inp.setObjectName("num-input")
                     inp.setAlignment(Qt.AlignmentFlag.AlignRight)
                     inp.setFixedWidth(100)
@@ -3025,7 +3086,8 @@ class Application(QMainWindow):
                     self.champs[chemin] = (inp, validation)
                 else:
                     # valeur en lecture seule (texte)
-                    lv = QLabel(str(raw))
+                    lv = QLabel(_formater_champ(val_fmt, raw))
+                    self._champs_lecture[chemin] = (lv, val_fmt)
                     lv.setStyleSheet(
                         "font-family:'IBM Plex Mono',monospace; font-size:12px;"
                         " font-weight:600; color:#14223C; background:transparent; border:none;")
@@ -3063,7 +3125,9 @@ class Application(QMainWindow):
             (("fluide","humidite_relative"),    "Humidité relative",      "%",    "{:.1f}", _humidite_relative),
         ], col=0, row=1)
 
-        _grp("Viscosité dynamique (Sutherland)", [
+        # avec une humidité relative > 0, μ vient des formules de l'air
+        # humide : ces coefficients ne servent alors plus
+        _grp("Viscosité dynamique (Sutherland, air sec : humidité 0 %)", [
             (("fluide","sutherland_mu_ref"),  "μ référence",      "Pa·s", "{:.2e}", _positif),
             (("fluide","sutherland_t_ref"),   "T référence",      "K",    "{:.2f}", _positif),
             (("fluide","sutherland_s"),       "Constante S",      "K",    "{:.1f}", _positif),
@@ -3327,26 +3391,17 @@ class Application(QMainWindow):
 
         _grp("Très bas Re (vanne PdC)", [
             (("strategie_bas_re","u_ventilateur_pdc_v"), "Ventilateur en mode PdC", "V",
-             "{:.2f}", _positif_ou_nul),
+             "{:.2f}", _tension_ventilateur_pdc),
             (("mesure_dp","dp_min_mesurable_pa"), "Plancher de mesure ΔP Miller", "Pa",
              "{:.2f}", _positif),
             (("mesure_dp","seuil_debit_nul_pa"), "Débit nul sous", "Pa",
-             "{:.2f}", _positif_ou_nul),
+             "{:.2f}", _seuil_debit_nul),
         ], col=0, row=8)
 
         # colonne droite - section B
         # le seuil est en Re CONDUITE (il porte sur le débit vu par le
         # diaphragme) ; son équivalent veine est rappelé dans le titre
-        try:
-            banc = Banc(self.cfg)
-            k = banc.qm_vers_re(1.0, 20.0, banc.patm_pa)
-            k = k["re_conduite"] / k["re_veine"]      # 1,870 : géométrie seule
-            sel = self.cfg["selection_diaphragme"]
-            equiv = (f" — Miller sous {(sel['seuil_re'] - sel.get('hysteresis_re', 0)) / k:.0f}"
-                     f" / ISO au-dessus de {(sel['seuil_re'] + sel.get('hysteresis_re', 0)) / k:.0f} Re veine")
-        except (KeyError, TypeError, ValueError, ZeroDivisionError):
-            equiv = ""
-        _grp("Bascule ISO / Miller (Re conduite)" + equiv, [
+        self._carte_bascule = _grp(self._titre_bascule(), [
             (("selection_diaphragme","seuil_re"),     "Bascule ISO / Miller", "Re cond.", "{:.0f}", _seuil_bascule),
             (("selection_diaphragme","hysteresis_re"),"Hystérésis",  "± Re cond.", "{:.0f}", _positif_ou_nul),
         ], col=1, row=6)
@@ -3377,22 +3432,53 @@ class Application(QMainWindow):
         if self._bloque_par_apprentissage():
             self._update_mode_seg()          # bouton ramené sur le mode actuel
             return
+        seq = self.pilote.etat.get("sequence")
+        if mode == "sequence" and not (seq and not seq.get("terminee")):
+            # pas de séquence en cours : on ouvre l'onglet pour charger et
+            # démarrer un profil ; le mode devient « séquence » au démarrage
+            # (avant : mode séquence sans profil, « Appliquer » refusé)
+            self._nav(2)
+            self._update_mode_seg()
+            return
         self._set_mode(mode)
+
+    def _resynchroniser_mode(self, e: dict) -> None:
+        """Mode affiché <- ce que fait réellement le pilote. Il divergeait :
+        séquence finie ou arrêtée par ARRÊT VARIATEUR (l'IHM restait en
+        « séquence » et refusait toute consigne), RUN depuis Maintenance
+        (affiché « asservi »). Sans activité (arrêt), le choix de
+        l'opérateur est conservé, sauf « séquence », qui n'a plus d'objet."""
+        if self.apprentissage.etat["en_cours"]:
+            return                    # les séquences pilotent en manuel
+        seq = e.get("sequence")
+        if seq and not seq.get("terminee"):
+            reel = "sequence"
+        elif self.pilote.mode_manuel:
+            reel = "manuel"
+        elif self.pilote.regulation_active:
+            reel = "asservi"
+        elif self._mode == "sequence":
+            reel = "asservi"
+        else:
+            return
+        if reel != self._mode:
+            self._mode = reel
+            self._update_mode_seg()
+            self._update_controls_enabled()
 
     def _set_mode(self, mode: str) -> None:
         self._mode = mode
         if mode == "manuel":
-            # Capturer les valeurs courantes avant d'arrêter la régulation
             e = self.pilote.etat
-            u_courant = e.get("u_variateur", 0.0)
             pdc_v_courant = e.get("pdc_consigne", 0.0)
             if e.get("regulation"):
                 self.pilote.arreter_regulation()
             self.pilote.mode_manuel_tension(0.0)
-            # Pré-remplir les contrôles avec les valeurs qui étaient actives
-            u_aff = round(max(0.0, min(u_courant, 10.0)), 1)
-            self._slider_u.setValue(round(u_aff * 10))
-            self._inp_vman.setText(f"{u_aff:.1f}")
+            # tension pré-remplie à 0 : c'est celle du variateur à l'entrée
+            # en manuel ; l'ancienne tension de régulation pré-remplie
+            # relançait le ventilateur au premier « Appliquer »
+            self._slider_u.setValue(0)
+            self._inp_vman.setText("0.0")
             # le champ est en % de FERMETURE (0 = ouverte), avec la même
             # échelle que _on_pdc_slider : le pré-remplir avec l'ouverture
             # faisait fermer la vanne au premier « Appliquer »
@@ -3765,13 +3851,39 @@ class Application(QMainWindow):
         self.btn_enregistrer.setEnabled(unlock)
         self.lbl_cfg_statut.setText("")
 
+    def _titre_bascule(self) -> str:
+        """Titre de la carte de bascule : seuil en Re CONDUITE (il porte sur
+        le débit vu par le diaphragme), équivalent veine rappelé."""
+        titre = "Bascule ISO / Miller (Re conduite)"
+        try:
+            banc = Banc(self.cfg)
+            k = banc.qm_vers_re(1.0, 20.0, banc.patm_pa)
+            k = k["re_conduite"] / k["re_veine"]      # 1,870 : géométrie seule
+            sel = self.cfg["selection_diaphragme"]
+            return (titre
+                    + f" — Miller sous {(sel['seuil_re'] - sel.get('hysteresis_re', 0)) / k:.0f}"
+                    f" / ISO au-dessus de {(sel['seuil_re'] + sel.get('hysteresis_re', 0)) / k:.0f} Re veine")
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            return titre
+
+    def _valeur_affichee(self, chemin):
+        try:
+            return _cfg_lire(self.cfg, chemin)
+        except (KeyError, TypeError):
+            return DEFAUTS_CLES_RECENTES.get(chemin, NON_RENSEIGNE)
+
     def _remplir_champs_config(self) -> None:
-        """Champs de l'onglet Configuration <- configuration en mémoire."""
+        """Champs de l'onglet Configuration <- configuration en mémoire,
+        au format de chaque ligne ; valeurs dérivées (S, Dh) et titre de la
+        bascule régénérés (restés sinon sur la valeur du démarrage)."""
         for chemin, (entree, _) in self.champs.items():
-            try:
-                entree.setText(str(_cfg_lire(self.cfg, chemin)))
-            except (KeyError, TypeError):
-                pass
+            texte = _formater_champ(self._formats_champs.get(chemin, "{}"),
+                                    self._valeur_affichee(chemin))
+            entree.setText(texte)
+            self._textes_affiches[chemin] = texte
+        for chemin, (label, val_fmt) in self._champs_lecture.items():
+            label.setText(_formater_champ(val_fmt, self._valeur_affichee(chemin)))
+        self._carte_bascule.titre.setText(self._titre_bascule().upper())
         self.chk_t_manuelle.setChecked(
             self.cfg.get("temperature", {}).get("source") == "manuelle")
 
@@ -3794,7 +3906,20 @@ class Application(QMainWindow):
             return
         valeurs, erreurs = {}, []
         for chemin, (entree, validation) in self.champs.items():
-            brut = entree.text().strip().replace(",", ".")
+            texte = entree.text().strip()
+            if texte == self._textes_affiches.get(chemin):
+                # saisie inchangée : valeur exacte en mémoire (le texte est
+                # arrondi au format d'affichage) ; clé absente sans défaut
+                # (« — ») laissée absente
+                raw = self._valeur_affichee(chemin)
+                if raw == NON_RENSEIGNE:
+                    continue
+                try:
+                    valeurs[chemin] = float(raw)
+                    continue
+                except (TypeError, ValueError):
+                    pass
+            brut = texte.replace(",", ".")
             try:
                 valeurs[chemin] = float(brut)
             except ValueError:
@@ -3905,6 +4030,7 @@ class Application(QMainWindow):
         self._section("mesures", self._tick_left, e)
         self._section("supervision", self._tick_right, e)
         self._section("pied de page", self._tick_footer, e)
+        self._section("mode", self._resynchroniser_mode, e)
         self._section("arrêt de sécurité", self._tick_securite, e)
         self._section("voies", self._tick_entrees, e)
         self._section("apprentissage", self._tick_apprentissage)
@@ -3934,17 +4060,21 @@ class Application(QMainWindow):
         if ref != getattr(self, "_ref_courbe", ref):
             self._hist_re.clear()
             self._hist_cible.clear()
+            self._hist_t.clear()
         self._ref_courbe = ref
+        maintenant = time.monotonic()
         if self._t0_acq is None:
-            self._t0_acq = datetime.now()
+            self._t0_acq = maintenant
         self._hist_re.append(re)
         self._hist_cible.append(cible)
+        self._hist_t.append(maintenant - self._t0_acq)
         self._tracer()
 
-    def _tick_left(self, e: dict) -> None:
+    @staticmethod
+    def _valeurs_voies(e: dict) -> dict:
+        """Valeur de chaque voie affichée, depuis mesures_brutes ou etat."""
         brutes = e.get("mesures_brutes") or {}
-        # Résolution des canaux depuis mesures_brutes ou etat
-        vals = {
+        return {
             "qv":          e.get("qv"),
             "rho":         e.get("rho"),
             "mu":          e.get("mu"),
@@ -3955,6 +4085,10 @@ class Application(QMainWindow):
             "temperature": e.get("temperature") or brutes.get("temperature"),
             "u_variateur": brutes.get("frequence_variateur", e.get("u_variateur")),
         }
+
+    def _tick_left(self, e: dict) -> None:
+        brutes = e.get("mesures_brutes") or {}
+        vals = self._valeurs_voies(e)
         for key, lv, bar, fmt, max_val in self._ch_rows:
             val = vals.get(key)
             # Afficher "—" seulement si vraiment None (pas si 0)
@@ -4204,6 +4338,22 @@ class Application(QMainWindow):
         self._foot_samples.setText(
             f"Échantillons : {e.get('cycles', 0)}{cycle_txt}")
 
+        # fréquence du variateur (recopie AM, à défaut la commande) et durée
+        # de la régulation en cours : figées à « — » et « 0 s » auparavant
+        fmax = self.cfg.get("variateur", {}).get("frequence_max_hz", 50.0)
+        u = (e.get("mesures_brutes") or {}).get("frequence_variateur")
+        if u is None:
+            u = e.get("u_variateur") or 0.0
+        self._foot_freq.setText(f"Fréq : {fmax * u / 10.0:.1f} Hz".replace(".", ","))
+        if e.get("regulation"):
+            if self._t_debut_regulation is None:
+                self._t_debut_regulation = time.monotonic()
+            duree_s = int(time.monotonic() - self._t_debut_regulation)
+            self._foot_elapsed.setText(f"· {duree_s // 60:d} min {duree_s % 60:02d} s")
+        else:
+            self._t_debut_regulation = None
+            self._foot_elapsed.setText("· arrêt")
+
         # reverrouillage vivant : si la regulation demarre alors que les
         # champs sont deverrouilles, on retire la main avant la sauvegarde
         if e.get("regulation") and self.chk_unlock.isChecked():
@@ -4241,9 +4391,21 @@ class Application(QMainWindow):
             self._foot_rec.setVisible(False)
 
     def _tick_entrees(self, e: dict) -> None:
-        # lbl_entrees ne contient plus que les 6 labels "Actif" du tableau Voies
-        # → rien à mettre à jour dynamiquement (tous actifs en permanence)
-        pass
+        """État des voies (onglet Voies) : « Actif » affiché en permanence
+        auparavant, y compris liaison coupée ou voie absente."""
+        vals = self._valeurs_voies(e)
+        com_ok = not e.get("erreur_com")
+        for key, lbl in self.lbl_entrees.items():
+            if not com_ok:
+                txt, col = "● Liaison perdue", COLORS["error"]
+            elif vals.get(key) is None:
+                txt, col = "● Absente", COLORS["warn"]
+            else:
+                txt, col = "● Active", COLORS["ok"]
+            if lbl.text() != txt:
+                lbl.setText(txt)
+                lbl.setStyleSheet(f"font-size:11px; font-weight:600; color:{col};"
+                                  " background:transparent;")
 
     def _tick_sequence(self, e: dict) -> None:
         seq = e.get("sequence")
@@ -4451,11 +4613,14 @@ class Application(QMainWindow):
         cibles  = list(self._hist_cible)
         if len(donnees) < 2:
             return
-        dt     = PERIODE_IHM_MS / 1000.0
-        t_now  = (datetime.now() - self._t0_acq).total_seconds() if self._t0_acq else 0.0
         n      = len(donnees)
-        t0     = t_now - (n - 1) * dt
-        xs     = [t0 + i * dt for i in range(n)]
+        xs     = list(self._hist_t)
+        if len(xs) != n:
+            # historique rempli sans horodatage : pas nominal de l'IHM
+            dt = PERIODE_IHM_MS / 1000.0
+            fin = xs[-1] if xs else 0.0
+            xs = [fin - (n - 1 - i) * dt for i in range(n)]
+        t_now  = xs[-1]
         self._curve_re.setData(xs, donnees)
         self._curve_cible.setData(xs, cibles)
 

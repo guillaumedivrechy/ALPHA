@@ -27,8 +27,8 @@ class GeometrieVeine:
       - périmètre = 2 × (hauteur_m + largeur_m)
       - longueur_caracteristique_m = diamètre hydraulique = 4 × section / périmètre
     """
-    hauteur_m: float                     # hauteur de la veine (H) [m]
-    largeur_m: float                     # largeur de la veine (W) [m]
+    hauteur_m: float | None              # hauteur de la veine (H) [m]
+    largeur_m: float | None              # largeur de la veine (W) [m]
     section_m2: float | None = None      # calculé si None
     longueur_caracteristique_m: float | None = None  # Dh, calculé si None
 
@@ -37,8 +37,13 @@ class GeometrieVeine:
 
         Si section_m2 et longueur_caracteristique_m sont fournis explicitement
         dans la config, ils sont utilisés tels quels (pour préserver la
-        compatibilité binaire exacte avec les tests existants).
+        compatibilité binaire exacte avec les tests existants). H et W ne
+        sont alors pas nécessaires (config.json antérieur à leur ajout).
         """
+        if (self.section_m2 is None or self.longueur_caracteristique_m is None) \
+                and (self.hauteur_m is None or self.largeur_m is None):
+            raise ValueError("veine : hauteur_m et largeur_m requis (ou "
+                             "section_m2 et longueur_caracteristique_m)")
         if self.section_m2 is None:
             self.section_m2 = self.hauteur_m * self.largeur_m
         if self.longueur_caracteristique_m is None:
@@ -63,8 +68,8 @@ class Banc:
 
         v = cfg["veine"]
         self.veine = GeometrieVeine(
-            hauteur_m=v["hauteur_m"],
-            largeur_m=v["largeur_m"],
+            hauteur_m=v.get("hauteur_m"),
+            largeur_m=v.get("largeur_m"),
             section_m2=v.get("section_m2"),  # optionnel, calculé si absent
             longueur_caracteristique_m=v.get("longueur_caracteristique_m"))
 

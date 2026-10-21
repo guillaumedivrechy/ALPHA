@@ -74,3 +74,17 @@ def test_tres_bas_debit_mesure_sous_0_3_pa():
     assert banc.qm_depuis_mesures("miller", 0.04, 24.0, 0.0)["qm"] == 0.0
     cfg["mesure_dp"]["seuil_debit_nul_pa"] = 0.3            # ancien réglage
     assert Banc(cfg).qm_depuis_mesures("miller", 0.241, 24.0, 0.0)["qm"] == 0.0
+
+
+def test_veine_sans_hauteur_largeur_si_section_et_dh_fournis():
+    """config.json antérieur à veine.hauteur_m / largeur_m : le Banc levait
+    KeyError et le logiciel ne démarrait plus. S et Dh suffisent."""
+    import copy
+    cfg = copy.deepcopy(CFG)
+    for cle in ("hauteur_m", "largeur_m"):
+        cfg["veine"].pop(cle, None)
+    banc = Banc(cfg)
+    assert banc.veine.section_m2 == cfg["veine"]["section_m2"]
+    cfg["veine"].pop("section_m2")
+    with pytest.raises(ValueError):
+        Banc(cfg)

@@ -332,3 +332,183 @@ def test_commandes_refusees_pendant_un_apprentissage(ihm):
         assert len(refus) == 4
     finally:
         app.apprentissage.etat["en_cours"] = False
+
+
+# ---- revue, lot C ------------------------------------------------------------
+
+def test_rho_de_la_carte_pt100_a_la_pression_absolue(ihm):
+    """La carte PT100 (Maintenance) prenait p_amont, RELATIF, pour la
+    pression absolue : ρ affiché ~100 fois trop faible."""
+    app = ihm.app
+    app._nav(app.PAGE_MAINTENANCE)
+    ihm.avancer(1.0)
+    rho = float(app._mes_lbl["pt100_rho"].text().split()[0].replace(",", "."))
+    assert rho == pytest.approx(ihm.b.p.etat["rho"], rel=0.02)
+    assert 1.0 < rho < 1.4
+
+
+def _lecture(app, chemin):
+    return app._champs_lecture[chemin][0].text()
+
+
+def test_onglet_configuration_formats_et_valeurs_derivees(ihm):
+    """Tolérance de convergence affichée « 0.01 » sous l'unité %, S et Dh
+    restés sur la valeur du démarrage après un enregistrement de H et W,
+    titre de la bascule figé sur l'ancien seuil."""
+    app = ihm.app
+    assert _lecture(app, ("regulation", "tolerance_convergence_relative")) == "1"
+    app.chk_unlock.setChecked(True)
+    app.champs[("veine", "hauteur_m")][0].setText("0.300")
+    app.champs[("veine", "largeur_m")][0].setText("0.200")
+    app.champs[("selection_diaphragme", "seuil_re")][0].setText("9000")
+    app._enregistrer_configuration()
+    assert _lecture(app, ("veine", "section_m2")) == "0.06000"
+    assert _lecture(app, ("veine", "longueur_caracteristique_m")) == "0.240000"
+    titre = app._carte_bascule.titre.text()
+    assert titre == app._titre_bascule().upper()
+    seuil = 9000, app.cfg["selection_diaphragme"]["hysteresis_re"]
+    k = app._calculer_k()
+    assert f"{(seuil[0] - seuil[1]) / k:.0f}" in titre
+
+
+def test_enregistrer_ne_reecrit_pas_les_valeurs_arrondies(ihm):
+    """Enregistrer réécrivait chaque valeur non touchée au format affiché
+    (μ référence 1,716e-05 -> 1,72e-05, α 1,15e-05 -> 1,1e-05…)."""
+    app = ihm.app
+    app.cfg["fluide"]["sutherland_mu_ref"] = 1.716e-05
+    app._remplir_champs_config()
+    assert app.champs[("fluide", "sutherland_mu_ref")][0].text() == "1.72e-05"
+    app.chk_unlock.setChecked(True)
+    app.champs[("patm_pa",)][0].setText("100000")
+    app._enregistrer_configuration()
+    cfg = json.loads(app.chemin_cfg.read_text(encoding="utf-8"))
+    assert cfg["patm_pa"] == 100000.0
+    assert cfg["fluide"]["sutherland_mu_ref"] == 1.716e-05
+
+
+def test_config_ancienne_sans_hauteur_largeur_enregistrable(monkeypatch,
+                                                            tmp_path):
+    """config.json antérieur à veine.hauteur_m / largeur_m : les champs
+    affichaient « — » et rendaient TOUT enregistrement de l'onglet
+    impossible (« — » invalide). Ils restent absents, S et Dh intacts."""
+    i = IHMSimulee.__new__(IHMSimulee)
+    i.dialogues = []
+    i._intercepter(monkeypatch)
+    i.qa = QApplication.instance() or QApplication([])
+    i.b = BancSimule(monkeypatch, tmp_path, caracterise=True)
+    for cle in ("hauteur_m", "largeur_m"):
+        i.b.cfg["veine"].pop(cle, None)
+    i.b.cfg["fluide"].pop("humidite_relative", None)
+    import gui.app as gapp
+    chemin = tmp_path / "config.json"
+    chemin.write_text(json.dumps(i.b.cfg), encoding="utf-8")
+    app = gapp.Application(i.b.p, "simulation", i.b.cfg, chemin)
+    app._timer.stop()
+    try:
+        assert app.champs[("veine", "hauteur_m")][0].text() == "—"
+        section = i.b.cfg["veine"]["section_m2"]
+        app.chk_unlock.setChecked(True)
+        app.champs[("patm_pa",)][0].setText("100500")
+        app._enregistrer_configuration()
+        assert not [d for d in i.dialogues if d[0] == "critical"], i.dialogues
+        cfg = json.loads(chemin.read_text(encoding="utf-8"))
+        assert cfg["patm_pa"] == 100500.0
+        assert "hauteur_m" not in cfg["veine"]
+        assert cfg["veine"]["section_m2"] == section
+    finally:
+        app.deleteLater()
+
+
+def test_maintenance_ne_borne_pas_les_reglages_appris(ihm):
+    """Les spinbox de Maintenance (tau 0-2 s, ki 0-2…) écrasaient à
+    « Appliquer » un réglage appris hors de leurs bornes ou plus fin que
+    leur pas, même non touché."""
+    app = ihm.app
+    app.cfg["regulation"]["tau_consigne_s"] = 3.5
+    app.cfg["regulation"]["ki"] = 0.6234
+    app._remplir_widgets_regulation()
+    app._mes_reg_widgets["kp"].setValue(0.8)
+    app._mes_reg_appliquer()
+    cfg = json.loads(app.chemin_cfg.read_text(encoding="utf-8"))
+    assert cfg["regulation"]["kp"] == 0.8
+    assert cfg["regulation"]["tau_consigne_s"] == 3.5
+    assert cfg["regulation"]["ki"] == 0.6234
+
+
+def test_mode_affiche_suit_le_pilote(ihm, tmp_path, monkeypatch):
+    """Séquence arrêtée par ARRÊT VARIATEUR : l'IHM restait en « séquence »
+    et refusait toute consigne ; « Séquence » sans profil passait en mode
+    séquence sans rien à suivre ; RUN depuis Maintenance laissait
+    « asservi » affiché."""
+    a = ihm.app
+    a._choisir_mode("sequence")                    # sans profil
+    assert a._mode == "asservi" and a._stack.currentIndex() == 2
+    csv = tmp_path / "profil.csv"
+    csv.write_text("10;3000\n60;6000\n", encoding="utf-8")
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileName",
+                        lambda *x, **k: (str(csv), ""))
+    a._charger_sequence()
+    a._btn_seq_start.click()
+    ihm.avancer(5)
+    assert a._mode == "sequence"
+    a._arreter()                                   # ARRÊT VARIATEUR
+    ihm.avancer(1)
+    assert a._mode == "asservi"
+    _saisir(a.inp_re, "4000")
+    a._btn_apply.click()
+    assert ihm.b.p.regulation_active
+    ihm.b.p.mode_manuel_tension(2.0)               # RUN depuis Maintenance
+    ihm.avancer(1)
+    assert a._mode == "manuel" and a._slider_u.isEnabled()
+
+
+def test_passage_en_manuel_tension_preremplie_a_zero(ihm):
+    """En passant de la régulation au manuel, la tension de régulation
+    était pré-remplie : « Appliquer » relançait le ventilateur alors que le
+    variateur venait d'être mis à 0 V."""
+    a = ihm.app
+    a._mode_btns[1].click()
+    _saisir(a.inp_re, "8000")
+    a._btn_apply.click()
+    ihm.avancer(30)
+    a._mode_btns[0].click()
+    assert a._inp_vman.text() == "0.0"
+    a._btn_apply.click()
+    ihm.avancer(1)
+    assert ihm.b.p.tension_manuelle == 0.0
+
+
+def test_arreter_sequence_sans_sequence_garde_la_saisie(ihm):
+    a = ihm.app
+    a._mode_btns[1].click()
+    _saisir(a.inp_re, "8000")
+    a._btn_apply.click()
+    ihm.avancer(2)
+    _saisir(a.inp_re, "9500")
+    a._arreter_sequence()
+    assert a.inp_re.text() == "9500"
+
+
+def test_voies_et_pied_de_page_vivants(ihm):
+    """Onglet Voies : GAIN « 1,000 » / OFFSET « 0,00 » en dur et « Actif »
+    permanent ; pied de page « Fréq : — » et « 0 s » jamais mis à jour."""
+    a = ihm.app
+    a._mode_btns[1].click()
+    _saisir(a.inp_re, "8000")
+    a._btn_apply.click()
+    ihm.avancer(30)
+    assert all(l.text() == "● Active" for l in a.lbl_entrees.values())
+    assert a._foot_freq.text() != "Fréq : —"
+    assert "min" in a._foot_elapsed.text()
+    ihm.b.sim.lire_mesures = lambda: (_ for _ in ()).throw(OSError("coupé"))
+    ihm.avancer(1)
+    assert all(l.text() == "● Liaison perdue" for l in a.lbl_entrees.values())
+
+
+def test_validateurs_tres_bas_re():
+    import gui.app as gapp
+    assert gapp._tension_ventilateur_pdc(12.0, {})
+    assert gapp._tension_ventilateur_pdc(1.0, {}) is None
+    plancher = {("mesure_dp", "dp_min_mesurable_pa"): 0.15}
+    assert gapp._seuil_debit_nul(0.2, plancher)
+    assert gapp._seuil_debit_nul(0.05, plancher) is None
