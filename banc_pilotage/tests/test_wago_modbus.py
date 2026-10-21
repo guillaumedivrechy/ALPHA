@@ -100,13 +100,17 @@ def test_ecritures_sorties(coupleur):
 
 def test_reponse_d_erreur_modbus(coupleur):
     w = WagoModbus(_cfg_modbus(coupleur))
+    adresse = _voies("sorties")["variateur"]["adresse"]
     coupleur.erreurs_restantes = 1
     with pytest.raises(OSError):
         w.lire_mesures()
     coupleur.erreurs_restantes = 1
     with pytest.raises(OSError):
         w.ecrire_variateur(3.0)
-    w.ecrire_variateur(3.0)                     # refusée -> non mise en cache
+    assert coupleur.hr.get(adresse, 0) != round(0.3 * PE)
+    # refusée -> non mise en cache : la même valeur est bien réémise
+    w.ecrire_variateur(3.0)
+    assert coupleur.hr[adresse] == round(0.3 * PE)
 
 
 def test_coupure_puis_retour_du_coupleur(coupleur):

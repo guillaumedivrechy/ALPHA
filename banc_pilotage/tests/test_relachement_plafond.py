@@ -7,7 +7,6 @@ Corrige le bug : Re=23000 asservissait à 21000 (plafond latché à 5.784V)
 """
 
 import json
-import pytest
 from pathlib import Path
 
 from core.pilote import Pilote
@@ -70,10 +69,10 @@ def test_plafond_se_relache_apres_overshoot():
     # Vérifier que la logique est bien présente (plafond != None signifie qu'elle existe)
     assert pilote._plafond_u_sature is not None
 
-    print(f"\nTest logique relâchement plafond :")
+    print("\nTest logique relâchement plafond :")
     print(f"  Plafond initial simulé : {plafond_initial:.3f}V")
     print(f"  Incrément attendu/10 cycles : {increment_attendu:.3f}V")
     print(f"  Vitesse relâchement : {pilote.recul_saturation / 5.0:.3f} V/s")
-    print(f"  -> Logique de relâchement progressif implémentée !")
+    print("  -> Logique de relâchement progressif implémentée !")
 
     pilote.arreter_regulation()

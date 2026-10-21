@@ -73,7 +73,6 @@ class Apprentissage:
                  "vanne_bypass": self._test_vanne_bypass,
                  "vanne_pdc": self._test_vanne_pdc,
                  "indiciel": self._test_indiciel,
-                 "re_mapping": self._test_re_mapping,
                  "re_mapping_miller": self._test_re_mapping_miller,
                  "re_mapping_iso": self._test_re_mapping_iso,
                  "table_pdc": self._test_table_pdc,
@@ -837,349 +836,7 @@ class Apprentissage:
         self.resultats["verif_cablage"] = rapport
         self.etat["statut"] = "terminé : " + resume
 
-    # ------------------------------------------------- courbe de gain multi-points
-
-    def _mesure_palier(self, u: float, fenetre: int, tol: float,
-                       timeout: float, statut: str) -> float | None:
-        """Applique une tension, attend la stabilisation, renvoie le Re moyen."""
-        self._variateur(u)
-        série = []
-        ok = self._attendre(
-            lambda: (série.append(self._re_conduite())
-                     or self._stable(série, fenetre, tol)),
-            timeout, statut)
-        if ok is None:
-            return None
-        return statistics.fmean(série[-fenetre:])
-
-    def _test_re_mapping(self, u_depart: float = 5.0, pas: float = 1.0,
-                         t_palier_s: float = 12.0) -> None:
-        """Caractérisation complète Re mapping : couvre toute la plage 250-15000 Re.
-
-        OPTIMISÉ : pas 0.2→1.0V (zone normale), 0.05→0.1V (zone PDC ≤1V).
-        Gain temps : ~67% grâce à R² > 99.9% (linéarité validée).
-
-        Phase 1 : Descend la tension par paliers depuis u_depart et détecte le
-        décrochage du ventilateur (Re qui ne baisse plus, devient bruité ou
-        s'effondre). Retient la dernière tension stable + marge.
-
-        Chaque palier dure t_palier_s et n'est mesuré que sur sa fin (hors
-        transitoire) : avec un procédé lent, mesurer trop tôt fait paraître
-        « non monotone » une descente parfaitement saine et déclare un faux
-        décrochage dès le premier palier.
-
-        Préparation : BYPASS OUVERT + vanne PDC OUVERTE (100%) + Miller (bas Re < 5000).
-        CRITIQUE : u_min est utilisé en mode bas-Re avec bypass ouvert. Le mode
-        bas-Re DÉMARRE avec PDC ouverte (Re = seuil), puis la PDC se FERME pour
-        atteindre les très bas Re. Apprendre avec PDC ouverte garantit la cohérence
-        avec le point de départ du mode bas-Re. Méthode validée empiriquement :
-        - Phase 1 (PDC 100%) : variateur descend 5.3V→0.3V → couvre Re 5000-274
-        - Phase 2 (variateur 0.3V) : PDC ferme 100%→50% → couvre Re 274-250"""
-        dt = self.pilote.periode
-        fenetre = max(6, int(4.0 / dt))
-        es = self.pilote.es
-
-        # 0) préparation : BYPASS OUVERT (condition réelle mode bas-Re)
-        # Vanne 3V sur Miller
-        t = self._positionner_diaphragme("miller")
-        if t is None:
-            return
-
-        # Forcer pilote à relire position réelle (sync état logiciel / matériel)
-        self.pilote._position_initiale_lue = False
-
-        # Bypass OUVERT (différence critique vs circuit normal)
-        t = self._chronometrer_vanne(lambda: es.ecrire_vanne_bypass(True),
-                                     "fc_bypass_ouvert", "ouverture bypass")
-        if t is None:
-            return
-
-        # Vanne PdC OUVERTE à 100% (point de départ du mode bas-Re)
-        self.pilote.commander_vanne_perte_charge_pct(100.0)
-        ok = self._attendre_pdc_extreme(10.0, 90.0, "ouverture PDC à 100%")
-        if ok is None:
-            return
-
-        def _palier(u: float, statut: str, duree: float | None = None):
-            """Applique u, attend duree (t_palier_s par défaut), mesure sur
-            la fin du palier. Retourne (re_moyen, bruit_relatif) ou None si
-            annulé."""
-            duree = t_palier_s if duree is None else duree
-            self._variateur(u)
-            série: list[float] = []
-            t0 = time.monotonic()
-            while time.monotonic() - t0 < duree:
-                if self._interrompu():
-                    self._statut_annule()
-                    return None
-                re_actuel = self._re_conduite()
-                série.append(re_actuel)
-                # Publier re_mesure en temps réel pour l'IHM
-                self.etat["re_mesure"] = re_actuel
-                self.etat["statut"] = statut
-                time.sleep(dt)
-            d = série[-fenetre:] if len(série) >= fenetre else série
-            re_moy = statistics.fmean(d)
-            return re_moy, (max(d) - min(d)) / max(re_moy, 1.0)
-
-        # le palier de départ part loin de l'équilibre (ventilateur arrêté) :
-        # sans stabilisation longue, la base est mesurée trop bas et le
-        # premier pas de descente paraît « non monotone » (faux décrochage)
-        r = _palier(u_depart, f"stabilisation à {u_depart:.1f} V",
-                    duree=3.0 * t_palier_s)
-        if r is None:
-            return
-        re_a_derniere = r[0]
-        u = u_depart
-        derniere_stable = u
-        paliers = [(round(u, 2), round(re_a_derniere))]
-        pas_precedent = pas  # Pour calcul marge finale
-
-        # décrochage franchi en pas grossier : on reprend au dernier palier
-        # stable en pas fin, sans quoi u_min (dernier stable + un pas) valait
-        # jusqu'à 1 V de trop (3,0 V pour un décrochage réel à 1,2 V)
-        pas_fin = False
-        while u > 0.05:
-            # Pas adaptatif : 0.1V en dessous de 1V pour zone PDC (optimisé)
-            pas_actuel = 0.1 if (u <= 1.0 or pas_fin) else pas
-            if u - pas_actuel < 0.05:  # Arrêt si prochain pas < 0.05V
-                break
-            u = round(u - pas_actuel, 2)
-            r = _palier(u, f"palier descendant {u:.2f} V")
-            if r is None:
-                return
-            re_moy, bruit = r
-            # baisse attendue ≈ pas/u : en exiger au moins 40 % sépare une
-            # descente saine (régime établi) d'un plateau de décrochage
-            seuil_baisse = 1.0 - 0.4 * pas_actuel / max(u + pas_actuel, pas_actuel)
-            non_monotone = re_moy >= re_a_derniere * seuil_baisse
-            paliers.append((u, round(re_moy)))
-            self.etat["paliers_re_mapping"] = list(paliers)
-            # Critères de décrochage physiques uniquement (bruit ou non-monotonie)
-            # Pas de limite basse arbitraire : descendre jusqu'au vrai décrochage
-            if bruit > 0.12 or non_monotone:
-                paliers.pop()                          # palier décroché : hors table
-                if pas_actuel > 0.1:
-                    u, pas_fin = derniere_stable, True
-                    continue
-                break                                  # décrochage détecté
-            derniere_stable = u
-            re_a_derniere = re_moy
-            pas_precedent = pas_actuel  # Mémoriser pour marge
-
-        self._variateur(0.0)
-        u_min_reco = round(min(derniere_stable + pas_precedent, u_depart), 2)
-
-        # ---- Phase 2 : mesure u_seuil (tension au seuil en mode bas-Re) ----
-        # Trouver quelle tension variateur donne Re = seuil_cible (5000)
-        # en config bas-Re (bypass ouvert, PDC 100%).
-        # Cette tension (u_seuil) est la tension variateur au seuil bas-Re, pour mapper
-        # correctement la plage variateur.
-        self.etat["statut"] = "mesure u_seuil (tension au seuil bas-Re)"
-
-        # Config déjà correcte : bypass ouvert (Phase 1), PDC 100%
-        # Seuil cible (Re de transition mode normal ↔ bas-Re)
-        re_seuil_cible = self.pilote.banc.seuil_re   # bascule ISO / Miller
-        u_seuil = None
-
-        # Recherche u_seuil par paliers montants depuis u_min
-        # (on cherche la tension qui donne Re ≈ seuil_cible)
-        u_test = u_min_reco
-        pas_u = 0.5  # Pas de 0.5V pour recherche rapide
-        re_precedent = re_a_derniere  # Re à u_min (Phase 1)
-
-        # Monter par paliers jusqu'à dépasser le seuil
-        while u_test < 10.0 and re_precedent < re_seuil_cible:
-            u_test = round(u_test + pas_u, 2)
-            self._variateur(u_test)
-            self.etat["statut"] = f"recherche u_seuil : test {u_test:.1f}V"
-            self._pause(8.0)  # Stabilisation
-
-            # Mesurer Re sur 10 échantillons
-            re_mesures = []
-            for _ in range(10):
-                if self._interrompu():
-                    self._statut_annule()
-                    break
-                re_actuel = self._re_conduite()
-                re_mesures.append(re_actuel)
-                time.sleep(dt)
-
-            if self._interrompu():
-                break
-
-            if len(re_mesures) >= 5:
-                re_moy = statistics.fmean(re_mesures)
-
-                # Si on a dépassé le seuil, interpoler entre u_precedent et u_test
-                if re_moy >= re_seuil_cible:
-                    # Interpolation linéaire
-                    u_precedent = u_test - pas_u
-                    u_seuil = u_precedent + (re_seuil_cible - re_precedent) / (re_moy - re_precedent) * pas_u
-                    u_seuil = round(u_seuil, 2)
-                    break
-
-                re_precedent = re_moy
-
-        # Si pas trouvé (u_test a atteint 10V), utiliser la dernière valeur
-        if u_seuil is None:
-            u_seuil = min(u_test, 10.0)
-
-        # ---- Phase 3 : mesure PDC minimale exploitable ----
-        # Déterminer automatiquement la position PDC min pour adaptation au
-        # vieillissement de l'équipement. Méthode : descendre PDC par paliers
-        # avec variateur fixé à u_min, détecter le décrochage.
-        self.etat["statut"] = "mesure PDC minimale exploitable"
-
-        # Revenir en configuration bas-Re (bypass ouvert + variateur à u_min)
-        t = self._chronometrer_vanne(lambda: es.ecrire_vanne_bypass(True),
-                                     "fc_bypass_ouvert", "ouverture bypass")
-        pdc_min_exploitable = None
-        re_min_exploitable = None
-
-        if t is not None:
-            # table PdC apprise à la tension du ventilateur EN MODE PdC
-            # (u_min × marge_ventilateur_pdc), celle où la boucle l'utilise
-            self._variateur(round(self._u_ventilateur_pdc(u_min_reco), 2))
-
-            # PDC ouverte au départ
-            self.pilote.commander_vanne_perte_charge_pct(100.0)
-            ok = self._attendre_pdc_extreme(10.0, 90.0, "ouverture PDC")
-
-            if ok is not None:
-                self._pause(5.0)  # Stabilisation initiale
-
-                # Descendre PDC par paliers adaptatifs : 10% au-dessus de 50%, 2% en dessous
-                pdc_derniere_stable = 100.0
-                re_derniere_stable = None
-                pdc_pct = 100.0
-                pas_pdc_precedent = 10.0
-
-                while pdc_pct > 0:
-                    self.pilote.commander_vanne_perte_charge_pct(pdc_pct)
-                    self.etat["statut"] = f"test PDC {pdc_pct:.0f}% (recherche min)"
-                    self._pause(12.0)  # Stabilisation palier (procédé lent, cohérent avec Phase 1)
-
-                    # Mesurer Re sur 10 échantillons
-                    re_mesures = []
-                    for _ in range(10):
-                        if self._interrompu():
-                            self._statut_annule()
-                            break
-                        re_actuel = self._re_conduite()
-                        re_mesures.append(re_actuel)
-                        time.sleep(dt)
-
-                    if self._interrompu():
-                        break
-
-                    if len(re_mesures) >= 5:
-                        re_moy = statistics.fmean(re_mesures)
-                        bruit = (max(re_mesures) - min(re_mesures)) / max(re_moy, 1.0)
-
-                        # Critères de décrochage :
-                        # - Re sous la plage mesurable du Miller (plancher ΔP)
-                        # - Bruit > 20% (instabilité forte, tests empiriques : 50% OK)
-                        decrochage = (re_moy < self._re_min_mesurable() or bruit > 0.20)
-
-                        if decrochage:
-                            # Décrochage détecté : garder la position précédente
-                            break
-                        else:
-                            # Palier stable : sauvegarder et continuer
-                            pdc_derniere_stable = pdc_pct
-                            re_derniere_stable = re_moy
-                            pas_pdc_precedent = 2.0 if pdc_pct <= 50.0 else 10.0
-
-                    # Calculer prochain palier (pas adaptatif)
-                    pas_pdc = 2.0 if pdc_pct <= 50.0 else 10.0
-                    pdc_pct = round(pdc_pct - pas_pdc, 1)
-                    if pdc_pct < 0:
-                        break
-
-                # PDC min = dernière stable + marge (pas utilisé pour cette position)
-                # aucun palier mesurable : pas de PdC min (et non 100 %, qui
-                # laissait croire à un mode PdC caractérisé)
-                if re_derniere_stable is not None:
-                    pdc_min_exploitable = min(pdc_derniere_stable + pas_pdc_precedent, 100.0)
-                    re_min_exploitable = re_derniere_stable
-
-        # ---- Phase 4 : montée plage haute (Re > 5000, mode normal) ----
-        # Couvrir la plage haute en mode normal : bypass fermé, PDC ouverte, ISO
-        paliers_plage_haute = []
-
-        if u_seuil and u_seuil > 0:
-            self.etat["statut"] = "Phase 4 : montée plage haute (bypass fermé, ISO)"
-
-            # Basculer en mode normal : fermer bypass
-            t = self._chronometrer_vanne(lambda: es.ecrire_vanne_bypass(False),
-                                        "fc_bypass_ferme", "fermeture bypass")
-            if t is not None:
-                # PDC grande ouverte (mode normal)
-                self.pilote.commander_vanne_perte_charge_pct(100.0)
-                ok = self._attendre_pdc_extreme(10.0, 90.0, "ouverture PDC à 100%")
-
-                if ok is not None:
-                    # Basculer sur ISO (diaphragme pour plage haute)
-                    t = self._positionner_diaphragme("iso", "basculement")
-
-                    if t is not None:
-                        # Attendre stabilisation circuit
-                        self._pause(5.0)
-
-                        # Montée à 10 V par paliers de 0,3 V depuis une tension
-                        # visant Re ≈ 4500 EN ISO (u_seuil, mesuré en Miller
-                        # bypass ouvert, y donne déjà ~11000 Re : la table ISO
-                        # commençait trop haut)
-                        pas_montee = 0.3
-                        gain_re_v = self.pilote._gain_re_par_volt or 2000.0
-                        u = round(max(1.5, min(3.0, 4500.0 / gain_re_v)), 2)
-
-                        while u <= 10.0:
-                            r = _palier(u, f"palier montant {u:.2f} V (plage haute)")
-                            if r is None:
-                                break
-                            re_moy, bruit = r
-
-                            # Arrêt si saturation ΔP
-                            if self.pilote.etat.get("dp_sature"):
-                                self.etat["statut"] = f"capteur ΔP saturé à {u:.1f}V"
-                                break
-
-                            paliers_plage_haute.append((u, round(re_moy)))
-                            self.etat["paliers_plage_haute"] = list(paliers_plage_haute)
-
-                            u = round(u + pas_montee, 2)
-                            if u > 10.0:
-                                u = 10.0
-                            # Éviter doublon à 10V (vérifier liste non vide)
-                            if paliers_plage_haute and u == paliers_plage_haute[-1][0]:
-                                break
-
-        # Arrêter variateur
-        self._variateur(0.0)
-
-        if self._interrompu():
-            # résultats partiels : rien d'applicable (« Appliquer » les
-            # écrirait en configuration)
-            self._statut_annule()
-            return
-        self.resultats["re_mapping"] = {
-            "u_min_exploitable_v": u_min_reco,
-            "u_seuil_bas_re_v": u_seuil,
-            "derniere_stable_v": derniere_stable,
-            "re_a_u_min": round(re_a_derniere),
-            "pdc_min_exploitable_pct": round(pdc_min_exploitable, 1) if pdc_min_exploitable else None,
-            "re_min_exploitable": round(re_min_exploitable) if re_min_exploitable else None,
-            "paliers_V_Re": [[v, re] for v, re in paliers],
-            "paliers_plage_haute": [[v, re] for v, re in paliers_plage_haute],
-        }
-
-        msg_u_seuil = f", u_seuil ≈ {u_seuil:.1f}V" if u_seuil else ""
-        msg_pdc_min = f", PDC min ≈ {pdc_min_exploitable:.0f}%" if pdc_min_exploitable else ""
-        msg_re_min = f" (Re min ≈ {re_min_exploitable:.0f})" if re_min_exploitable else ""
-        self.etat["statut"] = (
-            f"terminé : u_min ≈ {u_min_reco}V{msg_u_seuil}{msg_pdc_min}{msg_re_min}, marges incluses")
+    # ------------------------------------------------- Re mapping (tables de gains)
 
     def _test_re_mapping_miller(self, u_depart: float = 5.0, pas: float = 1.0,
                                  t_palier_s: float = 12.0) -> None:
@@ -1831,7 +1488,6 @@ class Apprentissage:
         "vanne_bypass": "Vanne bypass",
         "vanne_pdc": "Vanne perte de charge",
         "verif_cablage": "Contrôle câblage E/S",
-        "re_mapping": "Re mapping",
         "re_mapping_miller": "Re mapping Miller",
         "re_mapping_iso": "Re mapping ISO",
         "table_pdc": "Table PdC (très bas Re)",
@@ -1871,15 +1527,13 @@ class Apprentissage:
                                f"ki {reg.get('ki', '—')} → {r['ki_propose']}, "
                                f"τ consigne {reg.get('tau_consigne_s', '—')} s → "
                                f"{r['tau_s']} s"))
-            elif nom in ("re_mapping", "re_mapping_miller"):
+            elif nom == "re_mapping_miller":
                 txt = (f"u min ventilateur {sbr.get('u_min_ventilateur_v', '—')} V → "
                        f"{r['u_min_exploitable_v']} V")
                 if r.get("paliers_V_Re"):
                     txt += f" ; table Miller ({len(r['paliers_V_Re'])} paliers)"
                 if r.get("paliers_PDC_Re"):
                     txt += f" ; table PdC ({len(r['paliers_PDC_Re'])} paliers)"
-                if r.get("paliers_plage_haute"):
-                    txt += f" ; table ISO ({len(r['paliers_plage_haute'])} paliers)"
                 lignes.append((titre, txt))
             elif nom == "re_mapping_iso":
                 n = len(r.get("paliers_plage_haute") or [])
@@ -2000,42 +1654,6 @@ class Apprentissage:
             self.pilote.tau_consigne = r["tau_s"]
             lignes.append(f"kp={r['kp_propose']}, ki={r['ki_propose']}, "
                           f"tau_consigne={r['tau_s']} s")
-        if "re_mapping" in self.resultats:
-            r = self.resultats["re_mapping"]
-            self.cfg.setdefault("strategie_bas_re", {})["u_min_ventilateur_v"] = \
-                r["u_min_exploitable_v"]
-            self.pilote.u_min_ventilateur = r["u_min_exploitable_v"]
-            lignes.append(f"u_min ventilateur = {r['u_min_exploitable_v']} V")
-            # Sauvegarder u_seuil (tension au seuil bas-Re)
-            if r.get("u_seuil_bas_re_v") is not None:
-                self.cfg["strategie_bas_re"]["u_seuil_bas_re_v"] = r["u_seuil_bas_re_v"]
-                self.pilote.u_seuil_bas_re = r["u_seuil_bas_re_v"]  # Appliquer au pilote en temps réel
-                lignes.append(f"u_seuil bas-Re = {r['u_seuil_bas_re_v']} V (tension au seuil, bypass ouvert)")
-            # Créer table de gains mode bas-Re à partir des paliers mesurés
-            if r.get("paliers_V_Re"):
-                from core.pilote import TableGains
-                self.pilote.table_gains_bas_re = TableGains(r["paliers_V_Re"])
-                lignes.append(f"table gains bas-Re ({len(r['paliers_V_Re'])} points, bypass ouvert"
-                              + _ecartes(self.pilote.table_gains_bas_re) + ")")
-            # Créer table de gains mode NORMAL à partir des paliers plage haute
-            if r.get("paliers_plage_haute"):
-                from core.pilote import TableGains
-                t_haute = TableGains(r["paliers_plage_haute"])
-                if t_haute.valide_ff():
-                    self.pilote.table_gains = t_haute
-                    lignes.append(f"table gains plage haute ({len(r['paliers_plage_haute'])} points, bypass fermé"
-                                  + _ecartes(t_haute) + ")")
-                else:
-                    lignes.append("table gains plage haute ignorée (moins de deux paliers à Re croissant)")
-            # Sauvegarder PDC min et Re min mesurés (si disponibles)
-            if r.get("pdc_min_exploitable_pct") is not None:
-                self.cfg["strategie_bas_re"]["pdc_min_exploitable_pct"] = r["pdc_min_exploitable_pct"]
-                self.pilote.pdc_min_exploitable_pct = r["pdc_min_exploitable_pct"]  # Appliquer au pilote en temps réel
-                lignes.append(f"PDC min exploitable = {r['pdc_min_exploitable_pct']:.1f}%")
-            if r.get("re_min_exploitable") is not None:
-                self.cfg["strategie_bas_re"]["re_min_exploitable"] = r["re_min_exploitable"]
-                self.pilote.re_min_exploitable = r["re_min_exploitable"]
-                lignes.append(f"Re min exploitable = {r['re_min_exploitable']}")
         # Gestion séparée des résultats re_mapping_miller
         if "re_mapping_miller" in self.resultats:
             r = self.resultats["re_mapping_miller"]
@@ -2118,12 +1736,9 @@ class Apprentissage:
             log.info("=" * 70)
 
             # Déterminer quel type d'apprentissage a été fait
-            # le re_mapping combiné produit les deux tables
             apprentissage_miller = ("re_mapping_miller" in self.resultats
-                                    or "re_mapping" in self.resultats
                                     or "table_pdc" in self.resultats)
-            apprentissage_iso = ("re_mapping_iso" in self.resultats
-                                 or "re_mapping" in self.resultats)
+            apprentissage_iso = "re_mapping_iso" in self.resultats
 
             # Récupérer les mesures de conditions ambiantes
             # température UTILISÉE par les calculs (PT100 ou saisie)
@@ -2185,7 +1800,7 @@ class Apprentissage:
                     temperature_c, pression_pa,
                     commentaire="Apprentissage via interface graphique"
                 )
-                log.info(f"  → Sauvegardé dans apprentissages/miller.json")
+                log.info("  → Sauvegardé dans apprentissages/miller.json")
 
             # ========== SAUVEGARDE APPRENTISSAGE ISO ==========
             if apprentissage_iso and self.pilote.table_gains.valide_ff():
@@ -2215,7 +1830,7 @@ class Apprentissage:
                     temperature_c, pression_pa,
                     commentaire="Apprentissage via interface graphique"
                 )
-                log.info(f"  → Sauvegardé dans apprentissages/iso.json")
+                log.info("  → Sauvegardé dans apprentissages/iso.json")
 
             log.info("")
             log.info("=" * 70)

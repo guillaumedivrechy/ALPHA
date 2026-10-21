@@ -13,7 +13,6 @@ Références :
 - Viscosité dynamique : corrélation empirique linéaire (ne dépend que de T)
 """
 
-import math
 
 
 def calculer_proprietes_air_humide(P: float, t: float, HR: float) -> dict:

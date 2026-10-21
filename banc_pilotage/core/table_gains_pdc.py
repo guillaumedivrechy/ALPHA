@@ -72,37 +72,6 @@ class TableGainsPDC:
         else:  # Au-dessus de la table
             return self.points[-1][0]  # Tension maximale
 
-    def re_pour_v(self, v_pdc: float) -> float:
-        """Retourne le Re correspondant à une tension PDC donnée.
-
-        Fonction inverse de v_pour_re(), utile pour vérifier la table.
-
-        Args:
-            v_pdc: Tension PDC en volts (0-10 V)
-
-        Returns:
-            Reynolds calculé (sans dimension). Si table vide, retourne 0.
-        """
-        if not self.points:
-            return 0.0
-
-        # Chercher les deux points encadrant v_pdc
-        for i in range(len(self.points) - 1):
-            v1, re1 = self.points[i]
-            v2, re2 = self.points[i + 1]
-
-            # Interpolation linéaire
-            if v1 <= v_pdc <= v2:
-                if v2 == v1:
-                    return re1
-                return re1 + (v_pdc - v1) / (v2 - v1) * (re2 - re1)
-
-        # Hors bornes
-        if v_pdc < self.points[0][0]:
-            return self.points[0][1]
-        else:
-            return self.points[-1][1]
-
     def vide(self) -> bool:
         """Retourne True si la table est vide (pas de feed-forward disponible)."""
         return len(self.points) == 0

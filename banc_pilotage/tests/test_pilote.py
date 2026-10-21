@@ -216,7 +216,7 @@ def test_cycle_supporte_position_fermee():
     pilote._cycle()                          # position initiale depuis les FC
     pilote.etat["diaphragme"] = "fermee"
     pilote._cycle()                          # ne doit pas lever
-    assert pilote.etat["erreur_com"] is None or True   # pas d'exception
+    assert pilote.etat["cycles"] == 2
 
 
 def test_cycles_simulation_sans_erreur():

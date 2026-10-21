@@ -255,24 +255,6 @@ class TableGains:
 
         return a, b, r2
 
-    def tension_pour_re_regression(self, re: float) -> float | None:
-        """Calcule la tension pour un Re donné via le modèle linéaire U = (Re - b) / a.
-
-        Retourne None si régression non calculée ou invalide.
-        Borne le résultat à [0, 10]V.
-        """
-        # Calculer régression si pas encore fait
-        if self._regression_a is None:
-            if self.calculer_regression() is None:
-                return None
-
-        # U = (Re - b) / a
-        if abs(self._regression_a) < 1e-10:
-            return None  # Pente nulle (impossible d'inverser)
-
-        u = (re - self._regression_b) / self._regression_a
-        return min(max(u, 0.0), 10.0)
-
     # ---- modèle de feed-forward ------------------------------------------
     # L'interpolation entre paliers MESURÉS est exacte aux paliers ; la
     # régression globale s'en écarte de 3 % (ISO) à 15 % (Miller) en bas de

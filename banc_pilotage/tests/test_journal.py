@@ -10,7 +10,6 @@ import json
 import time
 from pathlib import Path
 
-import pytest
 
 from core.banc import Banc
 from core.journal import COLONNES, JournalEssai

@@ -18,7 +18,7 @@ from pathlib import Path
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QTabWidget, QStackedWidget, QScrollArea,
     QVBoxLayout, QHBoxLayout, QGridLayout,
-    QGroupBox, QLabel, QLineEdit, QPushButton,
+    QLabel, QLineEdit, QPushButton,
     QCheckBox, QSlider, QMessageBox, QFileDialog,
     QFrame, QProgressBar, QProgressDialog,
     QSpinBox, QDoubleSpinBox,
@@ -131,31 +131,6 @@ def _formater_champ(val_fmt, raw) -> str:
     if callable(val_fmt):
         return val_fmt(raw, None)
     return val_fmt.format(raw)
-
-PARAMETRES = [
-    ("Diaphragme ISO 5167", [
-        (("diaphragme_iso", "D20_mm"),         "Diamètre conduite D20",  "mm",   _positif),
-        (("diaphragme_iso", "d20_mm"),          "Diamètre orifice d20",   "mm",   _beta_iso),
-        (("diaphragme_iso", "alpha_conduite"),  "Dilatation conduite α",  "1/°C", _alpha),
-        (("diaphragme_iso", "alpha_diaphragme"),"Dilatation diaphragme α","1/°C", _alpha),
-    ]),
-    ("Diaphragme Miller", [
-        (("diaphragme_miller", "D20_mm"),          "Diamètre conduite D20",  "mm",   _positif),
-        (("diaphragme_miller", "d20_mm"),           "Diamètre orifice d20",   "mm",
-         _d_inferieur_D("diaphragme_miller")),
-        (("diaphragme_miller", "alpha_conduite"),  "Dilatation conduite α",  "1/°C", _alpha),
-        (("diaphragme_miller", "alpha_diaphragme"),"Dilatation diaphragme α","1/°C", _alpha),
-    ]),
-    ("Veine d'essai", [
-        (("veine", "section_m2"),                "Section de passage",            "m²", _positif),
-        (("veine", "longueur_caracteristique_m"),"Longueur caractéristique (Re)", "m",  _positif),
-    ]),
-    ("Conditions et sélection", [
-        (("patm_pa",),                              "Pression atmosphérique",   "Pa", _positif),
-        (("selection_diaphragme", "seuil_re"),      "Bascule ISO / Miller",     "Re cond.", _seuil_bascule),
-        (("selection_diaphragme", "hysteresis_re"), "Hystérésis de bascule",    "± Re cond.", _positif_ou_nul),
-    ]),
-]
 
 def _cfg_lire(cfg, chemin):
     """Lit une valeur dans un dict imbriqué via un chemin de clés.
@@ -545,7 +520,6 @@ class Application(QMainWindow):
         self._mode = "asservi"   # "manuel" | "asservi" | "sequence"
         self._ref_re = "veine"      # référence de la consigne Re : conduite | veine (défaut: veine)
         self._echelle_re = 250.0    # échelle slider Re (sera recalculée selon référence)
-        self._recording = False
         self._alertes_actives: set[str] = set()
         self._sections_en_defaut: set[str] = set()
         self._dirty: dict[str, bool] = {
@@ -977,7 +951,7 @@ class Application(QMainWindow):
         lbl_c_count = QLabel(str(len(_CALCULS)))
         lbl_c_count.setStyleSheet(
             "font-size:10px; font-family:'IBM Plex Mono',monospace;"
-            f" color: #14223C; background:transparent;")
+            " color: #14223C; background:transparent;")
         h1.addWidget(lbl_c_count)
         vl.addWidget(hdr1)
 
@@ -1030,7 +1004,7 @@ class Application(QMainWindow):
         lbl_p_count = QLabel(str(len(_PRESSIONS)))
         lbl_p_count.setStyleSheet(
             "font-size:10px; font-family:'IBM Plex Mono',monospace;"
-            f" color: #14223C; background:transparent;")
+            " color: #14223C; background:transparent;")
         h_p.addWidget(lbl_p_count)
         vl.addWidget(hdr_p)
 
@@ -1081,7 +1055,7 @@ class Application(QMainWindow):
         la4 = QLabel("4")
         la4.setStyleSheet(
             "font-size:10px; font-family:'IBM Plex Mono',monospace;"
-            f" color:#6B7E8E; background:transparent;")
+            " color:#6B7E8E; background:transparent;")
         h2.addWidget(la4)
         vl.addWidget(hdr2)
 
@@ -1106,7 +1080,7 @@ class Application(QMainWindow):
             dot = QLabel("●")
             dot.setObjectName("act-dot")
             dot.setFixedWidth(10)
-            dot.setStyleSheet(f"color:#DBE5EA; font-size:10px; background:transparent;")
+            dot.setStyleSheet("color:#DBE5EA; font-size:10px; background:transparent;")
             self._act_dots[act_key] = dot
             thl.addWidget(dot)
             ln = QLabel(act_name)
@@ -1995,7 +1969,7 @@ class Application(QMainWindow):
         """Recharge les paramètres de régulation depuis config.json."""
         try:
             self._remplir_widgets_regulation()
-            self._mes_lbl_reg_status.setText(f"✓ Paramètres rechargés depuis config.json")
+            self._mes_lbl_reg_status.setText("✓ Paramètres rechargés depuis config.json")
             self._mes_lbl_reg_status.setStyleSheet(f"font-size:11px; color:{COLORS['ok']}; background:transparent;")
             self._log("Maintenance : paramètres de régulation rechargés", COLORS["accentText"])
         except Exception as e:
@@ -2317,11 +2291,6 @@ class Application(QMainWindow):
         self._foot_journal.setObjectName("foot-item")
         self._foot_journal.setVisible(False)
         hl.addWidget(self._foot_journal)
-
-        self._foot_rec = QLabel()
-        self._foot_rec.setObjectName("foot-item")
-        self._foot_rec.setVisible(False)
-        hl.addWidget(self._foot_rec)
 
         self.lbl_etat = QLabel("ARRÊT")
         self.lbl_etat.setObjectName("foot-state")
@@ -3103,9 +3072,6 @@ class Application(QMainWindow):
             return card
 
         cfg = self.cfg
-        act = cfg.get("actionneurs", {})
-        reg = cfg.get("regulation", {})
-        mdb = cfg.get("modbus", {})
 
         # ═══════════════════════════════════════════════════════════════
         # SECTION A : CALCUL REYNOLDS (paramètres physiques des formules)
@@ -4380,15 +4346,6 @@ class Application(QMainWindow):
                 "monospace; font-size:11px; background:transparent;")
         else:
             self._foot_journal.setVisible(False)
-
-        if self._recording:
-            self._foot_rec.setVisible(True)
-            self._foot_rec.setText("● REC")
-            self._foot_rec.setStyleSheet(
-                f"color:{COLORS['error']}; font-family:'IBM Plex Mono',"
-                "monospace; font-size:11px; background:transparent;")
-        else:
-            self._foot_rec.setVisible(False)
 
     def _tick_entrees(self, e: dict) -> None:
         """État des voies (onglet Voies) : « Actif » affiché en permanence

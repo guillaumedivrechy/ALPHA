@@ -136,44 +136,6 @@ def test_sequence_refusee_si_le_ventilateur_tourne(tmp_path):
     app._thread.join(timeout=5.0)
 
 
-def test_re_mapping_produit_paliers_plage_haute():
-    """Phase 4 du re_mapping doit créer paliers_plage_haute pour table_gains.
-
-    Vérifie que les résultats contiennent la clé 'paliers_plage_haute' qui
-    alimente la table de gains mode normal (Re > 5000).
-    """
-    cfg = _cfg()
-    pilote = Pilote(Banc(cfg), StubES(), cfg)
-    pilote.periode = 0.02
-
-    # Simuler résultats re_mapping complets avec Phase 4
-    resultats_re_mapping = {
-        "u_min_exploitable_v": 0.5,
-        "u_seuil_bas_re_v": 5.3,
-        "re_a_u_min": 250,
-        "paliers_V_Re": [[0.5, 250], [1.0, 500], [5.0, 4800]],
-        "paliers_plage_haute": [[5.5, 5200], [7.0, 8000], [9.0, 12000]]
-    }
-
-    # Vérifier que la clé paliers_plage_haute existe
-    assert "paliers_plage_haute" in resultats_re_mapping
-    assert isinstance(resultats_re_mapping["paliers_plage_haute"], list)
-    assert len(resultats_re_mapping["paliers_plage_haute"]) > 0
-
-    # Vérifier structure des paliers (voltage, Re)
-    for palier in resultats_re_mapping["paliers_plage_haute"]:
-        assert len(palier) == 2
-        volts, re = palier
-        assert 0 <= volts <= 10.0, "Voltage doit être dans [0, 10V]"
-        assert re > 0, "Re doit être positif"
-
-    # Vérifier que les paliers sont croissants en voltage ET en Re
-    paliers = resultats_re_mapping["paliers_plage_haute"]
-    for i in range(len(paliers) - 1):
-        assert paliers[i][0] < paliers[i + 1][0], "Voltages doivent être croissants"
-        assert paliers[i][1] < paliers[i + 1][1], "Re doivent être croissants"
-
-
 # ---- revue complète : séquences d'apprentissage ----------------------------
 
 def _app_cfg(tmp_path, cfg=None):
@@ -224,23 +186,6 @@ def test_essai_indiciel_sur_le_circuit_iso(tmp_path):
     app._preparer_circuit_normal = lambda d: circuits.append(d) or False
     app._test_indiciel()
     assert circuits == ["iso"]
-
-
-def test_re_mapping_combine_est_sauvegarde(tmp_path):
-    """Les tables du re_mapping combiné n'étaient jamais écrites dans
-    apprentissages/ (test d'une clé « plage_haute » inexistante) : perdues
-    au redémarrage."""
-    app, pilote = _app_cfg(tmp_path)
-    app.resultats["re_mapping"] = {
-        "u_min_exploitable_v": 0.8, "u_seuil_bas_re_v": 5.0,
-        "paliers_V_Re": [[0.8, 600.0], [2.0, 1500.0], [5.0, 3800.0]],
-        "paliers_plage_haute": [[3.0, 9000.0], [6.0, 18000.0]],
-    }
-    app.appliquer()
-    iso = json.loads((tmp_path / "apprentissages" / "iso.json").read_text("utf-8"))
-    miller = json.loads((tmp_path / "apprentissages" / "miller.json").read_text("utf-8"))
-    assert iso["tables"]["table_gains"]
-    assert miller["tables"]["table_gains_bas_re"]
 
 
 def test_appliquer_ne_reapplique_pas_les_resultats_deja_appliques(tmp_path):

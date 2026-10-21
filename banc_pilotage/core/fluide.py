@@ -6,7 +6,6 @@ rho et mu à chaque cycle avec la pression absolue et la PT100, ce qui est
 plus précis qu'une lecture de table figée.
 """
 
-import math
 
 R_AIR = 287.058          # constante spécifique de l'air [J/(kg.K)]
 GAMMA_AIR = 1.40273      # coefficient de détente isentropique (valeur des classeurs)

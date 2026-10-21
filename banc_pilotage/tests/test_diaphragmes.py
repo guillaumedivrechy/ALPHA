@@ -9,7 +9,6 @@ référence (tableau « Validation » du README) :
 recalcule normalement en continu depuis P et T).
 """
 
-import math
 import pytest
 
 from core.diaphragmes import (GeometrieDiaphragme,
