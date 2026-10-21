@@ -84,7 +84,7 @@ class Banc:
             humidite_relative=f.get("humidite_relative", 0.0))
 
         s = cfg["selection_diaphragme"]
-        self.seuil_re = s["seuil_re"]                  # 5000
+        self.seuil_re = s["seuil_re"]                  # Re conduite (8000)
         self.hysteresis_re = s.get("hysteresis_re", 500)
 
         self.patm_pa = cfg.get("patm_pa", 101325.0)

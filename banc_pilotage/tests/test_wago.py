@@ -251,3 +251,15 @@ def test_ecritures_concurrentes_cache_fidele_au_materiel(wago):
     assert wago._ao_cache[adr][0] == materiel[adr]
     wago.ecrire_variateur(0.0)          # cycle suivant, arrêt latché
     assert materiel[adr] == 0
+
+
+def test_consigne_non_finie_ecrit_0_v(wago):
+    """Revue : une consigne inf (calcul en défaut) était bornée à la pleine
+    échelle — ventilateur à 10 V — et NaN levait ValueError."""
+    valeurs = []
+    wago.client.write_register = lambda address, value: (
+        valeurs.append(value) or _FauxResultat())
+    wago.ecrire_variateur(float("inf"))
+    wago.ecrire_variateur(5.0)
+    wago.ecrire_variateur(float("nan"))
+    assert valeurs == [0, 16384, 0]

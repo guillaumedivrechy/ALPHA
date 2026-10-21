@@ -1829,7 +1829,7 @@ class Application(QMainWindow):
         h = QHBoxLayout(); h.setSpacing(18)
         h.addWidget(QLabel("Fenêtre convergence"))
         h.addWidget(spin_double("fenetre_convergence_s", 0.5, 10.0, 1, " s"))
-        h.addWidget(label_info("par défaut : 2.0 s | durée pendant laquelle Re doit rester dans la tolérance ; ↑ = plus stable"))
+        h.addWidget(label_info("par défaut : 5.0 s | durée de moyennage du Re pour juger la convergence ; ↑ = plus stable"))
         h.addStretch()
         cl.addLayout(h)
 
@@ -1847,7 +1847,7 @@ class Application(QMainWindow):
         h = QHBoxLayout(); h.setSpacing(18)
         h.addWidget(QLabel("Facteur gains bas-Re"))
         h.addWidget(spin_double("gain_scale", 0.05, 1.0, 2))
-        h.addWidget(label_info("par défaut : 0.20 | ↓ = régulation plus douce en mode PDC (vanne lente)"))
+        h.addWidget(label_info("par défaut : 0.60 | ↓ = régulation plus douce en mode PDC (vanne lente)"))
         h.addStretch()
         cl.addLayout(h)
 
@@ -1990,12 +1990,12 @@ class Application(QMainWindow):
         self._mes_reg_widgets["rampe_v_par_s"].setValue(reg.get("rampe_v_par_s", 2.0))
         self._mes_reg_widgets["tau_consigne_s"].setValue(reg.get("tau_consigne_s", 0.0))
         self._mes_reg_widgets["tolerance_convergence_relative"].setValue(reg.get("tolerance_convergence_relative", 0.01))
-        self._mes_reg_widgets["fenetre_convergence_s"].setValue(reg.get("fenetre_convergence_s", 2.0))
+        self._mes_reg_widgets["fenetre_convergence_s"].setValue(reg.get("fenetre_convergence_s", 5.0))
         # Note : gain_scheduling n'est plus dans l'IHM (widget retiré)
         # self._mes_reg_gain_scheduling.setChecked(reg.get("gain_scheduling", False))
 
         self._mes_reg_widgets["seuil_re"].setValue(sr.get("seuil_re", 0))
-        self._mes_reg_widgets["gain_scale"].setValue(sr.get("gain_scale", 0.2))
+        self._mes_reg_widgets["gain_scale"].setValue(sr.get("gain_scale", 1.0))
         self._mes_reg_widgets["marge_ventilateur_pdc"].setValue(
             sr.get("marge_ventilateur_pdc", 1.15))
         # valeurs telles qu'affichées (bornées et arrondies par les spinbox) :
@@ -2864,7 +2864,7 @@ class Application(QMainWindow):
             "Stabilise à U1, applique l'échelon U1→U2, dépouille automatiquement "
             "le temps mort, τ, gain K et propose kp/ki (IMC). "
             "Prérequis : tests 7-8 (Re mapping Miller + ISO).<br>"
-            "<i>Configuration : diaphragme Miller (90°), bypass fermé, vanne PDC ouverte.</i>")
+            "<i>Configuration : diaphragme ISO, bypass fermé, vanne PDC ouverte.</i>")
         lbl_i.setWordWrap(True)
         lbl_i.setObjectName("muted")
         gi.addWidget(lbl_i, 0, 0, 1, 3)

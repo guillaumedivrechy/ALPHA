@@ -41,3 +41,14 @@ def test_aller_retour():
     for re in (4000.0, 6000.0, 15000.0):
         assert t.re_pour_tension(t.tension_pour_re(re)) == \
             pytest.approx(re, rel=1e-9)
+
+
+def test_palier_remesure_a_la_meme_tension():
+    """Deux paliers à la même tension (palier remesuré) : le feed-forward
+    divisait par zéro (re_pour_u_ff) et pente_ff levait AttributeError
+    (_gain_re_par_volt n'existe pas sur TableGains)."""
+    t = TableGains([(1.0, 3000.0), (2.0, 6000.0), (2.0, 6500.0), (3.0, 9000.0)])
+    assert t.valide_ff() and t.nb_points_ecartes() == 1
+    assert t.re_pour_u_ff(2.0) == pytest.approx(6000.0)
+    assert t.pente_ff(2.0) == pytest.approx(3000.0)
+    assert 1.0 < t.u_pour_re_ff(7000.0) < 3.0

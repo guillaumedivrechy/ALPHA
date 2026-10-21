@@ -24,6 +24,7 @@ IHM, apprentissage) : chaque transaction est protégée par un verrou.
 
 from __future__ import annotations
 import logging
+import math
 import sys
 import threading
 import time
@@ -218,6 +219,11 @@ class WagoModbus(EntreesSorties):
     # ------------------------------------------------------------- écritures
 
     def _ecrire_ao_volts(self, voie: dict, volts: float) -> None:
+        # valeur non finie (calcul en défaut) : 0 V, jamais la pleine échelle
+        # (inf était bornée à 10 V, NaN levait ValueError à la conversion)
+        if not math.isfinite(volts):
+            logging.error(f"Consigne AO non finie ({volts}) @{voie['adresse']} : 0 V")
+            volts = 0.0
         volts = min(max(volts, 0.0), voie.get("pleine_echelle_v", 10.0))
         brut = int(round(volts / voie.get("pleine_echelle_v", 10.0)
                          * self.PLEINE_ECHELLE))

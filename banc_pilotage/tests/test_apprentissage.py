@@ -454,3 +454,18 @@ def test_simulateur_recopie_pdc_a_l_echelle_configuree():
     es = SimulateurBanc(Banc(cfg), cfg.get("simulation"), cfg.get("modbus"),
                         act)
     assert es.lire_mesures()["pdc_recopie"] == pytest.approx(8.0, abs=0.2)
+
+
+def test_apercu_sans_none_et_tension_pdc_plafonnee(tmp_path):
+    """Aperçu d'Appliquer : « PdC min None → … » quand la valeur en
+    configuration valait None ; tension du ventilateur en mode PdC non
+    bornée à la commande 0-10 V."""
+    app, pilote = _app_cfg(tmp_path)
+    app.cfg.setdefault("strategie_bas_re", {})["pdc_min_exploitable_pct"] = None
+    app.resultats["table_pdc"] = {
+        "u_ventilateur_v": 1.0, "pdc_min_exploitable_pct": 30.0,
+        "re_min_exploitable": 180, "paliers_PDC_Re": [[100.0, 900], [40.0, 300]]}
+    texte = app.apercu_application()[0][1]
+    assert "None" not in texte and "PdC min — → 30.0 %" in texte
+    pilote.u_ventilateur_pdc = 12.0
+    assert app._u_ventilateur_pdc(0.3) == 10.0

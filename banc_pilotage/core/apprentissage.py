@@ -209,7 +209,7 @@ class Apprentissage:
         diaphragme spécifié : le circuit de mesure du régime normal.
 
         Args:
-            diaphragme: "miller" (défaut, bas Re < 5000) ou "iso" (haut Re > 5000)
+            diaphragme: "miller" (défaut, sous le seuil de bascule) ou "iso"
 
         Indispensable avant toute caractérisation — une table de gains ou un
         tau mesurés circuit dérivé ou sur le mauvais diaphragme seraient
@@ -853,8 +853,8 @@ class Apprentissage:
         Phase 3  : Mesure PDC minimale exploitable
 
         Cette séquence peut être lancée indépendamment, puis complétée par
-        re_mapping_iso pour la plage haute. Le chevauchement 5000-6500 Re
-        permet de valider la cohérence avec la table ISO."""
+        re_mapping_iso pour la plage haute. Le chevauchement des deux tables
+        autour du seuil de bascule permet de valider leur cohérence."""
         dt = self.pilote.periode
         fenetre = max(6, int(4.0 / dt))
         es = self.pilote.es
@@ -1067,8 +1067,8 @@ class Apprentissage:
     def _u_ventilateur_pdc(self, u_min: float) -> float:
         """Tension du ventilateur en mode PdC pour ce u_min : même règle que
         Pilote._u_pdc (u_min × marge, ou la tension imposée si plus haute)."""
-        return max(u_min * self.pilote.marge_ventilateur_pdc,
-                   self.pilote.u_ventilateur_pdc or 0.0)
+        return min(max(u_min * self.pilote.marge_ventilateur_pdc,
+                       self.pilote.u_ventilateur_pdc or 0.0), 10.0)
 
     def _mesurer_table_pdc(self, u_ventilateur: float) -> tuple:
         """Phase PdC : Miller, bypass ouvert, ventilateur tenu à
@@ -1193,18 +1193,19 @@ class Apprentissage:
         - 0.5V de 6V à 7V : transition
         - 0.2V au-delà de 7V (~24000 Re) : détection précise saturation ΔP
 
-        Arrêt automatique à ΔP > 495 Pa (99% pleine échelle capteur 500 Pa).
+        Arrêt automatique au seuil de saturation du capteur ISO
+        (regulation.saturation_dp_relative × pleine échelle : 495 Pa).
 
         Phase 4a : Descente depuis une tension de départ visant Re ≈ 4500
                    (estimée par le gain appris) jusqu'à Re ≈ 3000
                    (chevauchement avec Miller)
         Phase 4b : Montée depuis ce point de départ jusqu'à 10V ou saturation ΔP
 
-        u_seuil (tension Miller au seuil Re=5000, paramètre, config ou
+        u_seuil (tension Miller au seuil de bascule, paramètre, config ou
         résultats re_mapping_miller) n'est plus qu'informatif.
 
         Circuit : bypass fermé, PDC 100%, ISO (plage haute).
-        Le chevauchement 4000-5000 Re permet de valider la cohérence avec Miller."""
+        Le chevauchement avec la table Miller permet de valider leur cohérence."""
         dt = self.pilote.periode
         fenetre = max(6, int(4.0 / dt))
         es = self.pilote.es
@@ -1267,15 +1268,15 @@ class Apprentissage:
 
         self._pause(5.0)  # Stabilisation circuit
 
-        # ---- Phase 4a : descente ISO (pour couvrir en dessous du seuil 5000 Re) ----
-        # Objectif : étendre la table ISO jusqu'à ~4000 Re pour créer un
-        # chevauchement avec la table Miller et assurer continuité au seuil 5000 Re.
+        # ---- Phase 4a : descente ISO (sous le seuil de bascule) ----
+        # Objectif : étendre la table ISO vers le bas pour créer un
+        # chevauchement avec la table Miller et assurer la continuité à la bascule.
         # IMPORTANT : Commencer depuis une tension BASSE (2.0V) car en config ISO
         # (bypass fermé), les tensions sont beaucoup plus basses qu'en Miller pour
         # obtenir le même Re. u_seuil est mesuré en config Miller, donc inutilisable ici.
         self.etat["statut"] = "Phase 4a : descente ISO (extension plage basse)"
 
-        # Estimer tension départ pour Re~4000-5000 en config ISO
+        # Estimer la tension de départ (Re ≈ 4500 conduite) en config ISO
         # Utiliser gain global comme estimation grossière
         gain_re_v = self.pilote._gain_re_par_volt or 2000.0
         u_depart_iso = max(1.5, min(3.0, 4500.0 / gain_re_v))  # Cible Re≈4500
@@ -1333,13 +1334,13 @@ class Apprentissage:
                 break
             re_moy, bruit = r
 
-            # Arrêt si ΔP ISO > 495 Pa (99% de 500 Pa, seuil urgence)
-            # On utilise le ΔP brut directement, pas le drapeau dp_sature (qui est à 90%)
-            # pour exploiter toute la plage du capteur ISO.
-            # Seuil relevé de 490→495 Pa pour maximiser la plage explorée.
+            # arrêt au seuil de saturation du capteur ISO (0,99 × 500 =
+            # 495 Pa), sur le ΔP brut du cycle plutôt que le drapeau
+            # dp_sature publié par la boucle
             brutes = self.pilote.etat.get("mesures_brutes", {})
             dp_iso = brutes.get("dp_iso_500", 0.0)
-            if dp_iso > 495.0:
+            if dp_iso > (self.pilote.saturation_dp
+                         * self.pilote._dp_pleine_echelle["dp_iso_500"]):
                 # palier NON retenu : son Re est plafonné par le capteur, pas
                 # par le banc, et fausserait le haut de la table
                 self.etat["statut"] = f"ΔP ISO saturé ({dp_iso:.0f} Pa) à {u:.1f}V, Re≈{re_moy:.0f}"
@@ -1505,6 +1506,11 @@ class Apprentissage:
         cles_course = {"vanne_3voies": "vanne_3voies_temps_s",
                        "vanne_bypass": "vanne_bypass_temps_s",
                        "vanne_pdc": "vanne_perte_charge_course_s"}
+        def val(d, cle):
+            # clé présente à None (« aucun palier ») : « — », pas « None »
+            v = d.get(cle)
+            return "—" if v is None else v
+
         lignes = []
         for nom in self.resultats_a_appliquer():
             r = self.resultats[nom]
@@ -1523,12 +1529,12 @@ class Apprentissage:
                     f"{v} = {o} Pa" for v, o in r.items())))
             elif nom == "indiciel":
                 lignes.append((titre,
-                               f"kp {reg.get('kp', '—')} → {r['kp_propose']}, "
-                               f"ki {reg.get('ki', '—')} → {r['ki_propose']}, "
-                               f"τ consigne {reg.get('tau_consigne_s', '—')} s → "
+                               f"kp {val(reg, 'kp')} → {r['kp_propose']}, "
+                               f"ki {val(reg, 'ki')} → {r['ki_propose']}, "
+                               f"τ consigne {val(reg, 'tau_consigne_s')} s → "
                                f"{r['tau_s']} s"))
             elif nom == "re_mapping_miller":
-                txt = (f"u min ventilateur {sbr.get('u_min_ventilateur_v', '—')} V → "
+                txt = (f"u min ventilateur {val(sbr, 'u_min_ventilateur_v')} V → "
                        f"{r['u_min_exploitable_v']} V")
                 if r.get("paliers_V_Re"):
                     txt += f" ; table Miller ({len(r['paliers_V_Re'])} paliers)"
@@ -1542,9 +1548,9 @@ class Apprentissage:
                 n = len(r.get("paliers_PDC_Re") or [])
                 lignes.append((titre, (
                     f"table PdC ({n} paliers, ventilateur {r['u_ventilateur_v']} V), "
-                    f"PdC min {sbr.get('pdc_min_exploitable_pct', '—')} → "
-                    f"{r['pdc_min_exploitable_pct']} %, Re min "
-                    f"{sbr.get('re_min_exploitable', '—')} → {r['re_min_exploitable']}")
+                    f"PdC min {val(sbr, 'pdc_min_exploitable_pct')} → "
+                    f"{val(r, 'pdc_min_exploitable_pct')} %, Re min "
+                    f"{val(sbr, 're_min_exploitable')} → {val(r, 're_min_exploitable')}")
                     if n else "aucun palier mesurable : mode PdC inactif"))
             elif nom == "verif_cablage":
                 mm = r.get("mapping_mesure") or {}

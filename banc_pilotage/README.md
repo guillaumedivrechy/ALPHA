@@ -210,26 +210,30 @@ corrigent si la plomberie est croisée).
 
 Points que le logiciel ne peut pas trancher seul :
 
-- **Échelle de la consigne de la vanne PdC.** Les commandes en % passent
-  par les butées de la *recopie* (`actionneurs.pdc_recopie_min_v` /
-  `max_v`, environ 2,4 et 9,2 V) : 100 % commande ~9,2 V, 0 % ~2,4 V. Si
-  la carte P6 attend 0-10 V linéaire sur toute la course, « 100 % »
-  n'ouvrirait qu'à ~91 % et « 0 % » laisserait ~24 % d'ouverture (la
-  valeur apprise `pdc_min_exploitable_pct` vaut justement 24 %). Test :
-  commander 9,2 V et vérifier que la fin de course « ouverte » est atteinte.
+- **Échelle de la consigne de la vanne PdC.** Les commandes en % sont
+  converties sur l'échelle 0-10 V de la commande (100 % = 10 V, 0 % =
+  0 V) ; les butées de la *recopie* (`actionneurs.pdc_recopie_min_v` /
+  `max_v`, environ 2,4 et 9,2 V) ne servent qu'à la surveillance de
+  position. Test : commander 10 V puis 0 V et vérifier que les fins de
+  course « ouverte » puis « fermée » sont atteintes.
 - **Repli du variateur sur perte de liaison** (paramétrage 3G3MV), cf.
   avertissement ci-dessus.
 - **Bruit des capteurs ΔP à débit stable.** La détection de signal figé
   arrête le banc si l'écart-type du ΔP reste sous 0,1 Pa pendant 10 s en
-  régulation : un capteur très peu bruité pourrait la déclencher à tort.
+  régulation (en Miller, seulement au-dessus de
+  `mesure_dp.dp_min_detection_fige_pa`, 40 Pa : à très bas débit le ΔP
+  est naturellement stable) : un capteur très peu bruité pourrait la
+  déclencher à tort.
 - **Domaine de validité.** La corrélation RHG (prises d'angle, β = 0,535)
   est normalisée pour ReD ≥ 5000 : la saisie de la bascule impose
   seuil − hystérésis ≥ 5000 (ISO employée au-dessus de 7500 par défaut).
   La corrélation Miller est employée jusqu'à ≈ 8 200 Re conduite (limite
   de son capteur) : sa validité dans cette plage est à confirmer au §8 de
   MISE_EN_SERVICE.md (comparaison à une référence).
-  En Miller, un ΔP sous 0,3 Pa (Re conduite ≈ 210) est lu comme un débit
-  nul.
+  En Miller, un ΔP sous `mesure_dp.seuil_debit_nul_pa` (0,05 Pa) est lu
+  comme un débit nul ; le plancher de mesure `dp_min_mesurable_pa`
+  (0,15 Pa, ≈ 80 Re veine) borne la table PdC, donc la consigne la plus
+  basse.
 - **Viscosité.** Avec `fluide.humidite_relative` > 0, μ suit la
   corrélation linéaire du classeur d'air humide (≈ 0,6 % sous Sutherland à
   20 °C, soit ≈ 0,6 % sur le Re) ; avec 0, Sutherland.

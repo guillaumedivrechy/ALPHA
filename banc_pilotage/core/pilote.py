@@ -42,8 +42,8 @@ log = logging.getLogger(__name__)
 RACINE = Path(__file__).resolve().parent.parent
 
 # Modes de régulation (utilisés comme clés internes)
-MODE_NORMAL_HIGH = "normal_high"  # Re ≥ 5000 : bypass fermé, ISO, PI → tension
-MODE_NORMAL_LOW = "normal_low"    # freq_min ≤ Re < 5000 : bypass ouvert, Miller, PI → tension
+MODE_NORMAL_HIGH = "normal_high"  # au-dessus du seuil de bascule : bypass fermé, ISO
+MODE_NORMAL_LOW = "normal_low"    # sous le seuil : bypass ouvert, Miller
 MODE_PDC_CONTROL = "pdc_control"  # Re < freq_min : bypass ouvert, Miller, tension fixe, PI → PDC
 
 # Constantes pour les fallbacks de régulation
@@ -259,14 +259,14 @@ class TableGains:
     # L'interpolation entre paliers MESURÉS est exacte aux paliers ; la
     # régression globale s'en écarte de 3 % (ISO) à 15 % (Miller) en bas de
     # table. Le feed-forward passe donc par l'interpolation, sur les seuls
-    # paliers exploitables (Re > 0 et strictement croissant : les paliers
-    # sous le décrochage rendraient l'inversion ambiguë, voire une division
-    # par zéro).
+    # paliers exploitables (Re > 0, tension et Re strictement croissants :
+    # les paliers sous le décrochage rendraient l'inversion ambiguë, et deux
+    # paliers à la même tension — palier remesuré — une division par zéro).
 
     def _points_ff(self) -> list:
         pts = []
         for u, re in self.points:
-            if re > 0 and (not pts or re > pts[-1][1]):
+            if re > 0 and (not pts or (u > pts[-1][0] and re > pts[-1][1])):
                 pts.append((u, re))
         return pts
 
@@ -314,15 +314,8 @@ class TableGains:
         """dRe/dU au point [Re/V], lissée sur ±0,5 V : les segments de 0,1 V
         de la table sont bruités (±15 %), et cette pente fixe le gain de
         boucle du PI de correction. Bornée à [0,5 ; 2] × la pente globale."""
-        pts = self._points_ff()
-
-        # Protection division par zéro : table plate (tous les U identiques)
-        denom_global = pts[-1][0] - pts[0][0]
-        if abs(denom_global) < 1e-6:
-            # Table invalide ou plate : retourner pente par défaut
-            return self._gain_re_par_volt if self._gain_re_par_volt else 1000.0
-
-        globale = (pts[-1][1] - pts[0][1]) / denom_global
+        pts = self._points_ff()             # tensions strictement croissantes
+        globale = (pts[-1][1] - pts[0][1]) / (pts[-1][0] - pts[0][0])
         u0 = max(volts - 0.5, pts[0][0])
         u1 = min(volts + 0.5, pts[-1][0])
         if u1 - u0 < 0.2:
@@ -900,7 +893,7 @@ class Pilote:
         self._latcher_arret()
         self.etat.update({"regulation": False, "manuel": False,
                           "u_variateur": 0.0, "convergee": False,
-                          "sequence": None})
+                          "sequence": None, "consigne_limitee": None})
         # heure du PREMIER repli, gardée jusqu'à l'acquittement explicite par
         # l'opérateur (acquitter_arret_securite) : l'IHM l'affiche en bandeau
         if not self.etat.get("arret_securite"):
