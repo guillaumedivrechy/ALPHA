@@ -3731,8 +3731,12 @@ class Application(QMainWindow):
             return
         resume = self.apprentissage.appliquer()
         self._synchroniser_affichage_config()
-        self.lbl_app_statut.setStyleSheet(f"color:{COLORS['ok']};")
+        echec = resume.startswith("ÉCHEC")
+        self.lbl_app_statut.setStyleSheet(
+            f"color:{COLORS['error'] if echec else COLORS['ok']};")
         self.lbl_app_statut.setText(resume)
+        if echec:
+            QMessageBox.critical(self, "Apprentissage", resume)
 
     # ══════════════════════════════════════════════════════════ CONFIGURATION
 

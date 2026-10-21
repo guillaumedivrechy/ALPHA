@@ -1542,3 +1542,40 @@ def test_pdc_pourcent_en_volts_de_commande():
     assert pilote._pdc_pct_vers_v(100.0) == 10.0
     assert pilote._pdc_pct_vers_v(0.0) == 0.0
     assert pilote._pdc_pct_vers_v(30.0) == pytest.approx(3.0)
+
+
+def test_consigne_arrivee_pendant_la_preparation_non_perdue():
+    """Revue : une consigne posée par l'IHM pendant que la boucle préparait
+    la précédente était perdue (préparation validée pour l'ancienne) :
+    régulation restée en Miller sur une consigne ISO, sans alerte. La
+    préparation n'est validée que si aucune consigne n'est arrivée."""
+    pilote, es = _pilote_en_position("fc_3voies_90")
+    pilote.table_gains = TableGains([(1.0, 3000.0), (9.0, 30000.0)])
+    pilote.table_gains_bas_re = TABLE_MILLER
+    es.mesures["dp_diaph_500"] = 50.0
+    pilote.definir_consigne(3100.0, "conduite")
+    pilote.demarrer_regulation()
+    preparer = pilote._preparer_pi
+
+    def preparer_et_consigne_ihm(*a, **k):
+        preparer(*a, **k)
+        if pilote.re_cible == 3100.0:            # l'IHM pendant ce temps
+            pilote.definir_consigne(20000.0, "conduite")
+    pilote._preparer_pi = preparer_et_consigne_ihm
+    for _ in range(3):
+        pilote._cycle()
+    assert pilote._re_cible_conduite == pytest.approx(20000.0)
+    assert pilote._mode_cible_courant(20000.0).value == "normal_high"
+
+
+def test_appliquer_config_en_mode_pdc_garde_la_rampe_de_la_vanne():
+    """Revue : enregistrer des réglages (page Maintenance) en mode PdC
+    remettait la rampe du PI de la vanne à celle du variateur."""
+    pilote, es = _pilote_en_position("fc_3voies_90")
+    pilote._mode_regulation = "pdc_control"
+    pilote._preparer_pi("pdc_control", 300.0)
+    rampe, scale = pilote.pi.rampe, pilote.pi.gain_scale
+    assert rampe < pilote._rampe_nominale
+    pilote.appliquer_config(json.loads(json.dumps(CFG)))
+    assert pilote.pi.rampe == pytest.approx(rampe)
+    assert pilote.pi.gain_scale == pytest.approx(scale)

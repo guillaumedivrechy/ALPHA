@@ -403,3 +403,19 @@ def test_14000_re_veine_a_24_degres(monkeypatch, tmp_path):
     assert not e.get("consigne_limitee") and not e.get("dp_sature")
     assert e["re_moyen"] == pytest.approx(14000.0, rel=0.01)
     assert 470.0 < e["dp"] < 495.0
+
+
+def test_sequence_dans_l_autre_reference_sans_coup(monkeypatch, tmp_path):
+    """Revue : séquence (veine) lancée sur une régulation en conduite : la
+    référence changeait sans recaler le modèle de référence -> +21 %."""
+    b = BancSimule(monkeypatch, tmp_path)
+    b.consigne(15000.0, "conduite")
+    assert b.jusqu_a_convergence(150) is not None
+    b.cycles(10)
+    assert b.p.demarrer_sequence([(0.0, 8000.0)], "veine") is None
+    vus = []
+    for _ in range(int(40.0 / b.p.periode)):
+        b.cycles(b.p.periode)
+        vus.append(b.p.etat["re_conduite"])
+    assert max(vus) < 1.05 * 8000.0 * K_VEINE, max(vus)
+    assert not b.violations, b.violations[:3]

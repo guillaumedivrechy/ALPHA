@@ -80,6 +80,14 @@ class GestionnaireApprentissages:
         # Charger chaque fichier
         donnees = {}
 
+        for nom in ('miller', 'iso'):
+            meta = (self._charger_fichier(nom) or {}).get('metadata')
+            if meta is not None and meta.get('unite_re') != 'conduite':
+                log.warning(
+                    f"apprentissages/{nom}.json sans unité de Re déclarée "
+                    "(antérieur au 2026-10-21) : ses tables doivent être en Re "
+                    "CONDUITE — en cas de doute, refaire le Re mapping")
+
         miller_data = self._charger_fichier('miller')
         if miller_data:
             donnees.update(miller_data.get('tables', {}))
@@ -222,6 +230,9 @@ class GestionnaireApprentissages:
         metadata = {
             'date': datetime.now().isoformat(),
             'version_logiciel': '2.1.0',  # TODO: extraire depuis __version__
+            # unité des Re des tables : explicite depuis qu'une version les a
+            # enregistrées en Re veine (lecture du Re affiché)
+            'unite_re': 'conduite',
         }
 
         if temperature_c is not None:

@@ -416,3 +416,96 @@ def test_controle_cablage_relatif_a_la_configuration(monkeypatch, tmp_path):
     r = app.resultats["verif_cablage"]
     assert r["resume"] == "câblage conforme" and not r["mapping_inverse"]
     assert "rien à écrire" in app.apercu_application()[0][1]
+
+
+# ---- revue, lot B ------------------------------------------------------------
+
+def _app_sans_banc(tmp_path, chemin_cfg=None):
+    """Apprentissage sur StubES, vannes et ventilateur neutralisés : la
+    logique de séquence seule."""
+    app, pilote = _app_cfg(tmp_path)
+    if chemin_cfg is not None:
+        app.chemin_cfg = chemin_cfg
+    app._positionner_diaphragme = lambda d: 0.0
+    app._chronometrer_vanne = lambda *a, **k: 1.0
+    app._variateur = lambda u: None
+    return app, pilote
+
+
+def test_table_pdc_echec_de_vanne_conserve_la_table(tmp_path):
+    """PdC n'atteignant pas sa butée : la phase rendait (None, None, [])
+    comme « aucun palier mesurable », et « Appliquer » effaçait la table PdC
+    existante. Désormais un échec, sans résultat à appliquer."""
+    app, pilote = _app_sans_banc(tmp_path)
+    app._attendre_pdc_extreme = lambda *a, **k: None
+    app._test_table_pdc()
+    assert "table_pdc" not in app.resultats
+    assert "conservée" in app.etat["statut"]
+
+
+def test_echec_d_ecriture_signale_et_non_marque_applique(tmp_path):
+    """Écriture refusée (dossier absent, disque plein, droits) : l'erreur
+    était avalée (apprentissages) ou levée dans l'IHM (config), et le
+    résultat pouvait passer pour enregistré. Désormais « ÉCHEC… », et le
+    résultat reste à appliquer pour une nouvelle tentative."""
+    app, pilote = _app_cfg(tmp_path)
+    app.chemin_cfg = tmp_path / "absent" / "config.json"
+    app.resultats["vanne_bypass"] = {"ouverture_s": 9.0, "fermeture_s": 10.0,
+                                     "max_s": 10.0}
+    message = app.appliquer()
+    assert message.startswith("ÉCHEC D'ENREGISTREMENT")
+    assert app.resultats_a_appliquer() == ["vanne_bypass"]
+
+
+def test_relance_retire_le_resultat_precedent_et_remet_les_vannes_au_repos(
+        tmp_path):
+    """Un test relancé puis en échec laissait le résultat précédent affiché
+    et « à appliquer » ; la séquence finie laissait les vannes dans l'état
+    de sa dernière phase (PdC fermée après un Re mapping Miller)."""
+    app, pilote = _app_cfg(tmp_path)
+    app.resultats["vanne_bypass"] = {"ouverture_s": 9.0, "fermeture_s": 10.0,
+                                     "max_s": 10.0}
+    app.etat["paliers_pdc"] = [(100.0, 900)]
+    repos = []
+    pilote._position_repos = lambda: repos.append(True)
+
+    def echec():
+        app.etat["statut"] = "échec : fin de course jamais atteinte"
+    app._test_vanne_bypass = echec
+    assert app.demarrer("vanne_bypass") is None
+    app._thread.join(5.0)
+    assert "vanne_bypass" not in app.resultats
+    assert "paliers_pdc" not in app.etat
+    assert repos
+
+
+def test_apprentissage_enregistre_l_unite_de_re(tmp_path, caplog):
+    """Les tables sont en Re conduite ; une version les a enregistrées en Re
+    veine. L'unité est désormais déclarée, et un fichier sans unité est
+    signalé au chargement."""
+    import logging
+    from core.gestionnaire_apprentissages import GestionnaireApprentissages
+    g = GestionnaireApprentissages(tmp_path)
+    g.sauvegarder_iso({"table_gains": [[1.0, 3500.0], [2.0, 7000.0]]}, {})
+    iso = json.loads((tmp_path / "apprentissages" / "iso.json")
+                     .read_text("utf-8"))
+    assert iso["metadata"]["unite_re"] == "conduite"
+    del iso["metadata"]["unite_re"]
+    (tmp_path / "apprentissages" / "iso.json").write_text(
+        json.dumps(iso), encoding="utf-8")
+    with caplog.at_level(logging.WARNING):
+        g.charger_tout()
+    assert "sans unité de Re" in caplog.text
+
+
+def test_simulateur_recopie_pdc_a_l_echelle_configuree():
+    """La recopie simulée était à l'échelle de la commande (0-10 V) quelles
+    que soient les bornes pdc_recopie_min_v/max_v : écart avec la recopie
+    attendue, faux défaut PdC en simulation."""
+    from io_banc.simulateur import SimulateurBanc
+    cfg = _cfg()
+    act = dict(cfg.get("actionneurs", {}), pdc_recopie_min_v=2.0,
+               pdc_recopie_max_v=8.0)
+    es = SimulateurBanc(Banc(cfg), cfg.get("simulation"), cfg.get("modbus"),
+                        act)
+    assert es.lire_mesures()["pdc_recopie"] == pytest.approx(8.0, abs=0.2)

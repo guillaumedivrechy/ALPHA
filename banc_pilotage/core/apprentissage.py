@@ -90,6 +90,14 @@ class Apprentissage:
                     "par l'essai indiciel s'appliquent à la correction en "
                     "volts, qui s'appuie sur la pente de la table de gains.")
         self._annule.clear()
+        # le résultat précédent du MÊME test est retiré : relancé puis annulé
+        # ou en échec, il restait affiché en vert et « à appliquer » (ex. un
+        # contrôle câblage « inversé » d'avant réparation) ; idem des paliers
+        # affichés, mêlés sinon à ceux de l'essai en cours
+        self.resultats.pop(test, None)
+        self._appliques.pop(test, None)
+        for cle in ("paliers_re_mapping", "paliers_plage_haute", "paliers_pdc"):
+            self.etat.pop(cle, None)
         self.etat.update({"en_cours": True, "test": test, "statut": "démarrage…"})
         self._thread = threading.Thread(target=self._executer,
                                         args=(cible, params), daemon=True)
@@ -142,12 +150,17 @@ class Apprentissage:
         try:
             cible(**params)
         except Exception as exc:
+            log.exception("Séquence d'apprentissage interrompue par une erreur")
             self.etat["statut"] = f"échec : {exc}"
         finally:
-            # état sûr systématique
+            # état sûr systématique : ventilateur coupé, puis vannes au repos
+            # (Miller, bypass et PdC ouverts). Sans cela, elles restaient dans
+            # l'état de la dernière phase (PdC à 2 % après un Re mapping
+            # Miller) et le mode manuel soufflait contre une PdC fermée.
             try:
                 self.pilote.mode_manuel_tension(0.0)
                 self.pilote.arreter_regulation()
+                self.pilote._position_repos()
             except Exception as e:
                 log.warning(f"Erreur mise en sécurité apprentissage : {e}")
             # les tests de vannes commandent es.* directement et peuvent laisser
@@ -945,8 +958,8 @@ class Apprentissage:
             # Critères de décrochage physiques uniquement (bruit ou non-monotonie)
             # Pas de limite basse arbitraire : descendre jusqu'au vrai décrochage
             if bruit > 0.12 or non_monotone:
+                paliers.pop()                          # palier décroché : hors table
                 if pas_actuel > 0.1:
-                    paliers.pop()                      # palier décroché : hors table
                     u, pas_fin = derniere_stable, True
                     continue
                 break                                  # décrochage détecté
@@ -1259,8 +1272,8 @@ class Apprentissage:
             # Critères de décrochage physiques uniquement (bruit ou non-monotonie)
             # Pas de limite basse arbitraire : descendre jusqu'au vrai décrochage
             if bruit > 0.12 or non_monotone:
+                paliers.pop()                          # palier décroché : hors table
                 if pas_actuel > 0.1:
-                    paliers.pop()                      # palier décroché : hors table
                     u, pas_fin = derniere_stable, True
                     continue
                 break
@@ -1353,8 +1366,18 @@ class Apprentissage:
             u_seuil = min(u_test, 10.0)
 
         # ---- Phase 3 : mesure PDC minimale et table de gains PDC ----
-        pdc_min_exploitable, re_min_exploitable, paliers_pdc = \
-            self._mesurer_table_pdc(self._u_ventilateur_pdc(u_min_reco))
+        mesure_pdc = self._mesurer_table_pdc(self._u_ventilateur_pdc(u_min_reco))
+        if mesure_pdc is None:
+            # échec de vanne (statut déjà renseigné) : aucun résultat, plutôt
+            # qu'une phase PdC « sans palier » qui effacerait la table
+            self._variateur(0.0)
+            if self._interrompu():
+                self._statut_annule()
+            else:
+                self.etat["statut"] = ("échec phase PdC : "
+                                       + self.etat.get("statut", "vanne"))
+            return
+        pdc_min_exploitable, re_min_exploitable, paliers_pdc = mesure_pdc
 
         self._variateur(0.0)
 
@@ -1394,7 +1417,10 @@ class Apprentissage:
         """Phase PdC : Miller, bypass ouvert, ventilateur tenu à
         u_ventilateur ; la PdC se ferme par paliers tant que le Re reste
         mesurable. Retourne (pdc_min_exploitable_pct, re_min_exploitable,
-        paliers [(pdc_pct, Re conduite)]) ; (None, None, []) sans palier."""
+        paliers [(pdc_pct, Re conduite)]) ; (None, None, []) sans palier
+        mesurable ; None si le bypass ou la PdC n'a pas atteint sa butée
+        (échec de vanne : distinct d'« aucun palier », qui faisait effacer la
+        table PdC existante à « Appliquer »)."""
         dt = self.pilote.periode
         es = self.pilote.es
         self.etat["statut"] = "mesure PDC minimale exploitable"
@@ -1410,6 +1436,8 @@ class Apprentissage:
             self._variateur(round(u_ventilateur, 2))
             self.pilote.commander_vanne_perte_charge_pct(100.0)
             ok = self._attendre_pdc_extreme(10.0, 90.0, "ouverture PDC")
+            if ok is None:
+                return None
 
             if ok is not None:
                 self._pause(5.0)
@@ -1460,6 +1488,8 @@ class Apprentissage:
                 if re_derniere_stable is not None:
                     pdc_min_exploitable = min(pdc_derniere_stable + pas_pdc_precedent, 100.0)
                     re_min_exploitable = re_derniere_stable
+        if t is None:
+            return None
         return pdc_min_exploitable, re_min_exploitable, paliers_pdc
 
     def _test_table_pdc(self) -> None:
@@ -1472,11 +1502,16 @@ class Apprentissage:
         if t is None:
             return
         u_vent = self._u_ventilateur_pdc(u_min)
-        pdc_min, re_min, paliers = self._mesurer_table_pdc(u_vent)
+        mesure = self._mesurer_table_pdc(u_vent)
         self._variateur(0.0)
         if self._interrompu():
             self._statut_annule()
             return
+        if mesure is None:
+            self.etat["statut"] = ("échec : " + self.etat.get("statut", "vanne")
+                                   + " — table PdC existante conservée")
+            return
+        pdc_min, re_min, paliers = mesure
         self.resultats["table_pdc"] = {
             "u_ventilateur_v": round(u_vent, 2),
             "pdc_min_exploitable_pct": round(pdc_min, 1) if pdc_min else None,
@@ -1885,6 +1920,11 @@ class Apprentissage:
         self.resultats = en_attente
         try:
             resume = self._appliquer_resultats()
+        except OSError as exc:
+            # appliqué en mémoire (régulation de cette session) mais PAS sur
+            # disque : non marqué appliqué, « Appliquer » pourra réessayer
+            return (f"ÉCHEC D'ENREGISTREMENT ({exc}) — réglages actifs pour "
+                    "cette session seulement ; corriger puis relancer Appliquer")
         finally:
             self.resultats = tous
         self._appliques.update(en_attente)
@@ -1896,6 +1936,7 @@ class Apprentissage:
         act = self.cfg.setdefault("actionneurs", {})
         reg = self.cfg.setdefault("regulation", {})
         lignes = []
+        erreurs: list[str] = []
         if "zero_capteurs" in self.resultats:
             z = dict(self.resultats["zero_capteurs"])
             self.cfg.setdefault("zero_capteurs", {}).update(z)
@@ -2182,7 +2223,17 @@ class Apprentissage:
             log.info("=" * 70)
 
         except OSError as e:
+            # les tables ne vivent QUE dans apprentissages/*.json : une
+            # écriture refusée les perdrait au redémarrage ; signalé, et le
+            # résultat n'est pas marqué appliqué (avant : avalé en silence,
+            # « Appliqué et enregistré » affiché)
             log.error(f"Erreur lors de la sauvegarde: {e}")
-            pass
-        ecrire_json_atomique(self.chemin_cfg, self.cfg)
+            erreurs.append(f"apprentissages : {e}")
+        try:
+            ecrire_json_atomique(self.chemin_cfg, self.cfg)
+        except OSError as e:
+            log.error(f"Écriture de la configuration impossible : {e}")
+            erreurs.append(f"configuration : {e}")
+        if erreurs:
+            raise OSError(" ; ".join(erreurs))
         return "Appliqué et enregistré : " + " ; ".join(lignes)

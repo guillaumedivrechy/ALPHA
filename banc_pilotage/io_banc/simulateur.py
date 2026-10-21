@@ -138,6 +138,11 @@ class SimulateurBanc(EntreesSorties):
         self._pdc_t_course = act_cfg.get("vanne_perte_charge_course_s", 25.0)
         self._pdc_consigne = 10.0  # Démarre grande ouverte (position repos)
         self._pdc_position = 10.0  # Démarre grande ouverte (cohérent avec banc réel)
+        # recopie à l'échelle configurée (bornes de la recopie aux butées,
+        # commande 0-10 V) : à l'échelle de la commande, le pilote voyait un
+        # écart avec ces bornes et signalait un faux défaut PdC en simulation
+        self._recopie_min = act_cfg.get("pdc_recopie_min_v", 0.0)
+        self._recopie_max = act_cfg.get("pdc_recopie_max_v", 10.0)
         self._pdc_t_prec = time.monotonic()
         # fractions de débit atteignant la veine (modèle de la PdC en série et
         # du by-pass). PdC (carte P6, sens usine) : 0 V = fermée (étranglée),
@@ -236,7 +241,9 @@ class SimulateurBanc(EntreesSorties):
             "p_amont_500": self.p_amont_eff * (1 + random.gauss(0, 0.005)),
             "dp_iso_500": dp_iso,        # capteur ISO (adresse Wago 4)
             "temperature": T + random.gauss(0.0, 0.05),
-            "pdc_recopie": self._pdc_position + random.gauss(0.0, 0.02),
+            "pdc_recopie": self._recopie_min + self._pdc_position / 10.0
+                           * (self._recopie_max - self._recopie_min)
+                           + random.gauss(0.0, 0.02),
             "fc_3voies_0": self._v3.fc_0,
             "fc_3voies_90": self._v3.fc_90,
             "fc_3voies_180": self._v3.fc_180,

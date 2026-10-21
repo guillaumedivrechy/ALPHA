@@ -602,6 +602,10 @@ class Pilote:
         # frappe sur un de ces noms doit lever une erreur, pas renvoyer un défaut.
         self._run_actif = None             # None = inconnu -> écriture RUN forcée au 1er cycle
         self._preparation_faite = False
+        # génération de consigne : incrémentée (sous verrou) à chaque
+        # nouvelle consigne ; la boucle ne valide sa préparation que si
+        # aucune consigne n'est arrivée pendant celle-ci
+        self._generation_consigne = 0
         self._position_initiale_lue = False
         self._cycles_incoherence = 0
         self._cycles_dp_sature = 0         # cycles consécutifs ΔP proche de la pleine échelle
@@ -758,22 +762,28 @@ class Pilote:
 
         with self._verrou:
             nouvelle = (re_limite, reference) != (self.re_cible, self.reference)
-            if reference != self.reference:
-                # modèle de référence et mémoire de stabilité sont dans
-                # l'unité de l'ancienne référence : comparés au Re mesuré
-                # dans la nouvelle (×/÷ 1,87), ils provoquaient un coup de
-                # commande (+20 % de Re constaté en simulation)
-                self._consigne_interne = None
-                self._hist_re_court.clear()
+            self._changer_reference(reference)
             self.re_cible = re_limite
-            self.reference = reference
             # nouvelle consigne = nouvelle préparation (choix diaphragme,
             # feed-forward, Re conduite équivalent), même si la régulation
             # tourne : sans ce reset, un appel isolé laisserait le critère
             # bas-Re et le split-range calés sur l'ancienne consigne
             self._preparation_faite = False
+            self._generation_consigne += 1
         if nouvelle:
             self._oublier_convergence()
+
+    def _changer_reference(self, reference: str) -> None:
+        """Référence de la consigne (conduite / veine), sous self._verrou.
+        Changée, le modèle de référence et la mémoire de stabilité, dans
+        l'unité de l'ancienne référence, sont remis à zéro : comparés au Re
+        mesuré dans la nouvelle (×/÷ 1,87), ils provoquaient un coup de
+        commande (+20 % de Re constaté en simulation, par une consigne comme
+        par une séquence)."""
+        if reference != self.reference:
+            self._consigne_interne = None
+            self._hist_re_court.clear()
+        self.reference = reference
 
     def _oublier_convergence(self) -> None:
         """Nouvelle consigne : la moyenne glissante repart de zéro. Elle
@@ -832,6 +842,7 @@ class Pilote:
             self.regulation_active = True
             self._sequence = None          # une consigne fixe annule la séquence
             self._preparation_faite = False
+            self._generation_consigne += 1
         self._echelon_depuis = None
         self.etat["sequence"] = None
         self._historique_re.clear()
@@ -853,7 +864,7 @@ class Pilote:
         with self._verrou:
             self.mode_manuel = False
             self.tension_manuelle = 0.0
-            self.reference = reference
+            self._changer_reference(reference)
             self.re_cible = float(points[0][1])
             self.regulation_active = True
             self._sequence = {
@@ -861,7 +872,8 @@ class Pilote:
                 "t0": time.monotonic(),
                 "index": 0,
             }
-        self._preparation_faite = False
+            self._preparation_faite = False
+            self._generation_consigne += 1
         self._echelon_depuis = None        # 1er échelon : préparation complète
         self._historique_re.clear()
         self._convergee_depuis = None
@@ -1109,6 +1121,15 @@ class Pilote:
             self.zero_capteurs = {k: v for k, v
                                   in cfg.get("zero_capteurs", {}).items()
                                   if not k.startswith("_")}
+
+            # en mode PdC, le PI règle la VANNE : sa rampe (course de la
+            # vanne) et son facteur de gain sont ceux du mode, pas ceux du
+            # variateur relus ci-dessus (la rampe passait de 0,6 à 2 V/s
+            # jusqu'au changement de mode suivant : enroulement de
+            # l'intégrale contre une vanne lente)
+            if self._mode_regulation == MODE_PDC_CONTROL:
+                self.pi.rampe = self._rampe_bas_re()
+                self.pi.gain_scale = self.bas_re_scale
 
     def commander_vanne_perte_charge(self, volts: float) -> None:
         """Consigne 0-10 V de la vanne proportionnelle (carte P6, sens usine) :
@@ -1731,8 +1752,9 @@ class Pilote:
                     # conservera l'état PI au lieu de repartir du feed-forward
                     self._echelon_depuis = self.re_cible
                     self.re_cible = pts[i][1]
-                # rechoix diaphragme + feed-forward sur le nouvel échelon
-                self._preparation_faite = False
+                    # rechoix diaphragme + feed-forward sur le nouvel échelon
+                    self._preparation_faite = False
+                    self._generation_consigne += 1
                 self._oublier_convergence()
             terminee = t_ecoule >= pts[-1][0]
             self.etat["sequence"] = {
@@ -1742,9 +1764,12 @@ class Pilote:
             }
             if terminee:
                 # fin de profil : la consigne finale reste appliquée,
-                # la régulation continue jusqu'à l'arrêt par l'opérateur
+                # la régulation continue jusqu'à l'arrêt par l'opérateur.
+                # Seulement si c'est toujours CETTE séquence : une séquence
+                # relancée par l'IHM entre-temps n'est pas effacée.
                 with self._verrou:
-                    self._sequence = None
+                    if self._sequence is seq:
+                        self._sequence = None
 
         with self._verrou:
             re_cible = self.re_cible
@@ -1752,6 +1777,7 @@ class Pilote:
             regul = self.regulation_active
             manuel = self.mode_manuel
             u_manu = self.tension_manuelle
+            generation = self._generation_consigne
         # publiée dès maintenant : les cycles de manœuvre sortent avant la
         # publication complète, et l'IHM affichait l'ancienne référence
         self.etat["reference"] = reference
@@ -1862,7 +1888,13 @@ class Pilote:
                 pass
             else:
                 self._preparer_pi(mode, re_cond_attendu)
-            self._preparation_faite = True
+            # validée seulement si aucune consigne n'est arrivée pendant la
+            # préparation (thread IHM) : sinon elle était perdue, la boucle
+            # restant préparée pour l'ancienne (régulation bloquée en Miller
+            # sur une consigne ISO, sans alerte — revue)
+            with self._verrou:
+                if self._generation_consigne == generation:
+                    self._preparation_faite = True
 
         # ---- vanne perte de charge : recopie réelle + diagnostic ------------
         maintenant = time.monotonic()
@@ -2207,20 +2239,22 @@ class Pilote:
         # sur une consigne hors plage.
         dp_sature = self._cycles_dp_sature >= max(3, int(1.0 / self.periode))
         pleine_echelle = self._dp_pleine_echelle[cle_dp]
+        # copie locale : l'IHM remet le plafond à None (nouvelle consigne)
+        # depuis son thread ; tester puis incrémenter l'attribut partagé
+        # pouvait lever un TypeError -> arrêt de sécurité « erreur interne »
+        plafond = self._plafond_u_sature
         if regul and not manuel and dp_sature:
             u_prec = self.etat.get("u_variateur", 0.0) or 0.0
-            base = u_prec if self._plafond_u_sature is None \
-                else min(self._plafond_u_sature, u_prec)
-            self._plafond_u_sature = max(
-                0.0, base - self.recul_saturation * self.periode)
-        elif self._plafond_u_sature is not None:
+            base = u_prec if plafond is None else min(plafond, u_prec)
+            plafond = max(0.0, base - self.recul_saturation * self.periode)
+        elif plafond is not None:
             if not regul or manuel:
-                self._plafond_u_sature = None
+                plafond = None
             elif dp_final < (self.saturation_dp - 0.05) * pleine_echelle:
-                self._plafond_u_sature += \
-                    self.recul_saturation / 5.0 * self.periode
-                if self._plafond_u_sature >= 10.0:
-                    self._plafond_u_sature = None
+                plafond += self.recul_saturation / 5.0 * self.periode
+                if plafond >= 10.0:
+                    plafond = None
+        self._plafond_u_sature = plafond
 
         # ---- décision stratégie bas-Re (mode automatique) ------------------
         # Seuil effectif : valeur de config si fixée, sinon dérivé de la
@@ -3062,12 +3096,14 @@ class Pilote:
         if self.tau_consigne <= 0:
             self._consigne_interne = None
             return re_vise
-        if self._consigne_interne is None:
-            self._consigne_interne = max(
-                re_mesure, _RATIO_ANCRAGE_CONSIGNE_INTERNE * re_vise)
+        # copie locale (remise à None par l'IHM depuis son thread)
+        interne = self._consigne_interne
+        if interne is None:
+            interne = max(re_mesure, _RATIO_ANCRAGE_CONSIGNE_INTERNE * re_vise)
         a = self.periode / (self.tau_consigne + self.periode)
-        self._consigne_interne += a * (re_vise - self._consigne_interne)
-        return self._consigne_interne
+        interne += a * (re_vise - interne)
+        self._consigne_interne = interne
+        return interne
 
     def _variateur_en_route(self, mesures: dict, maintenant: float) -> bool:
         """Vrai tant que la recopie AM du 3G3MV n'a pas rejoint la dernière
@@ -3111,8 +3147,8 @@ class Pilote:
         if table is None and not gain:
             # banc non caractérisé : PI à erreur relative (repli)
             consigne_pi = self._reference_filtree(re_vise, re_mesure)
-            self.pi.u_max = 10.0 if self._plafond_u_sature is None \
-                else self._plafond_u_sature
+            plafond = self._plafond_u_sature        # lu une fois (thread IHM)
+            self.pi.u_max = 10.0 if plafond is None else plafond
             u = min(max(self.pi.calculer(consigne_pi, re_mesure), 0.0), 10.0)
             self._diag = {"phase": "PI seul (banc non caractérisé)",
                           "reference": round(consigne_pi, 1)}
@@ -3142,14 +3178,17 @@ class Pilote:
         # 2. modèle de référence (à l'arrivée : la consigne elle-même, pour
         #    que l'intégrale annule l'erreur statique même hors table)
         re_modele = re_vise if ff_rendu else re_pour(self._u_ff_applique)
-        if self._consigne_interne is None:
-            self._consigne_interne = re_mesure
+        # copie locale (remise à None par l'IHM depuis son thread)
+        interne = self._consigne_interne
+        if interne is None:
+            interne = re_mesure
         if self.tau_consigne > 0:
             a = self.periode / (self.tau_consigne + self.periode)
-            self._consigne_interne += a * (re_modele - self._consigne_interne)
+            interne += a * (re_modele - interne)
         else:
-            self._consigne_interne = re_modele
-        reference = self._consigne_interne
+            interne = re_modele
+        self._consigne_interne = interne
+        reference = interne
 
         # 3. correction
         en_route = self._variateur_en_route(mesures, maintenant)
