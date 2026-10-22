@@ -1278,19 +1278,21 @@ class Pilote:
         """Met les vannes en position de repos (sécurité / démarrage) :
         - Vanne 3 voies → Miller (butée donnée par positions_vanne_3voies)
         - Vanne perte de charge → ouverte (10 V, pas de restriction)
-        - Vanne bypass → ouverte (circuit dérivé, pas de mesure)"""
+        - Vanne bypass → ouverte (circuit dérivé, pas de mesure)
+
+        Par les commandes de la boucle, qui déclarent une manœuvre quand la
+        vanne n'est pas déjà en butée : écrits en direct, les ordres
+        laissaient une vanne en course sans manœuvre connue, et une consigne
+        lancée pendant les ~11 s de course (fin d'apprentissage, démarrage)
+        finissait en arrêt de sécurité « position inexploitable »."""
         try:
-            angle_miller = self._angle_par_diaphragme.get("miller", "90")
-            self.es.ecrire_vanne_diaphragme(angle_miller == "0")
-            self.etat["diaphragme"] = "miller"
-            self._diaphragme_commande = angle_miller
+            self.commander_diaphragme("miller")
 
             # Vanne perte de charge ouverte (10 V)
             self.commander_vanne_perte_charge(10.0)
 
             # Bypass ouvert (True)
-            self.es.ecrire_vanne_bypass(True)
-            self._bypass_commande = True
+            self.commander_bypass(True)
         except (IOError, RuntimeError, OSError) as exc:
             # liaison indisponible : signalé, sans bloquer le démarrage ni l'arrêt
             log.warning(f"Position repos non appliquée: {exc}")
@@ -1682,9 +1684,14 @@ class Pilote:
 
         # au premier cycle : position réelle de la vanne 3 voies lue sur les
         # fins de course (ne pas supposer la position au démarrage)
+        # (sauf manœuvre déjà commandée, qui fait foi : la vanne peut être
+        # encore sur sa butée de départ au cycle qui suit l'ordre, et la
+        # relire réaffirmerait l'ancienne position)
         if not self._position_initiale_lue:
             angle = self._angle_vanne_3voies(mesures)
-            if angle in self._diaphragme_par_angle:
+            if "3voies" in self._manoeuvres:
+                pass
+            elif angle in self._diaphragme_par_angle:
                 self.etat["diaphragme"] = self._diaphragme_par_angle[angle]
                 # reprendre l'ordre correspondant : sans lui l'actionneur
                 # resterait hors tension, donc sans anti-condensation

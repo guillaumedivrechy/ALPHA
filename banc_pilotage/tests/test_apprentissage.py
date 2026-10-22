@@ -469,3 +469,42 @@ def test_apercu_sans_none_et_tension_pdc_plafonnee(tmp_path):
     assert "None" not in texte and "PdC min — → 30.0 %" in texte
     pilote.u_ventilateur_pdc = 12.0
     assert app._u_ventilateur_pdc(0.3) == 10.0
+
+
+@pytest.mark.parametrize("croise", [False, True])
+def test_consigne_juste_apres_un_apprentissage_fini_sur_l_iso(
+        monkeypatch, tmp_path, croise):
+    """Test de non-régression complet : la remise au repos de fin
+    d'apprentissage (vanne 3 voies -> Miller, ~11 s) écrivait l'ordre sans
+    déclarer de manœuvre. Une consigne lancée pendant la course voyait une
+    vanne « sans butée » hors manœuvre : arrêt de sécurité. Et la relecture
+    de position initiale pouvait réaffirmer la butée ISO de départ."""
+    import time as _time
+    from banc_simule import BancSimule
+    sur = {"modbus": {"positions_vanne_3voies": {
+        "diaphragme_a_0deg": "miller", "diaphragme_a_90deg": "iso"}}} \
+        if croise else None
+    b = BancSimule(monkeypatch, tmp_path, caracterise=True, cfg_sur=sur)
+    p = b.p
+    monkeypatch.setattr(_time, "sleep",
+                        lambda s: b.cycles(max(s, p.periode), verifier=False))
+    app = Apprentissage(p, b.cfg, tmp_path / "config.json")
+    monkeypatch.setattr(app._annule, "wait", lambda t=None: b.cycles(
+        max(t or 0.0, p.periode), verifier=False) or False)
+    app._arrets_debut = p.arrets
+    app._executer(lambda: app._positionner_diaphragme("iso"), {})
+    assert p._angle_vanne_3voies(p.etat["mesures_brutes"]) \
+        == p._angle_par_diaphragme["iso"]
+    b.cycles(0.2, verifier=False)
+    b.consigne(1500, "veine")                       # Miller : vanne en course
+    if croise:
+        # plomberie du simulateur fixe (0° = ISO) : on ne vérifie que la
+        # manœuvre, la régulation tournerait sur le mauvais capteur
+        b.cycles(30.0, verifier=False)
+        assert not p.etat.get("arret_securite"), p.etat.get("arret_motif")
+        assert p._angle_vanne_3voies(p.etat["mesures_brutes"]) \
+            == p._angle_par_diaphragme["miller"]
+        return
+    assert b.jusqu_a_convergence(120) is not None, p.etat.get("arret_motif")
+    assert not p.etat.get("arret_securite")
+    assert p.etat["diaphragme_lu"] == "miller"
