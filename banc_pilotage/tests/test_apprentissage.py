@@ -508,3 +508,25 @@ def test_consigne_juste_apres_un_apprentissage_fini_sur_l_iso(
     assert b.jusqu_a_convergence(120) is not None, p.etat.get("arret_motif")
     assert not p.etat.get("arret_securite")
     assert p.etat["diaphragme_lu"] == "miller"
+
+
+def test_apprentissages_enchaines_sans_attendre_la_mise_au_repos(
+        monkeypatch, tmp_path):
+    """Test de non-régression (parcours IHM) : la remise au repos de fin de
+    séquence déclare ses manœuvres (bypass vers l'ouverture) ; un
+    apprentissage lancé aussitôt referme le bypass, et le chien de garde de
+    cette manœuvre caduque coupait tout (« bypass non ouvert »)."""
+    import time as _time
+    from banc_simule import BancSimule
+    b = BancSimule(monkeypatch, tmp_path, caracterise=True)
+    p = b.p
+    monkeypatch.setattr(_time, "sleep",
+                        lambda s: b.cycles(max(s, p.periode), verifier=False))
+    app = Apprentissage(p, b.cfg, tmp_path / "config.json")
+    monkeypatch.setattr(app._annule, "wait", lambda t=None: b.cycles(
+        max(t or 0.0, p.periode), verifier=False) or False)
+    for cible in (app._test_vanne_bypass, app._test_indiciel):
+        app._arrets_debut = p.arrets
+        app._executer(cible, {})                  # sans pause entre les deux
+    assert "indiciel" in app.resultats, app.etat["statut"]
+    assert not p.etat.get("arret_securite"), p.etat.get("arret_motif")

@@ -534,3 +534,199 @@ def test_offset_pt100_dans_la_configuration(ihm):
     app._enregistrer_configuration()
     assert ihm.dialogues[-1][1] == "Saisie invalide"
     assert ihm.b.p.offset_pt100 == -0.8
+
+
+# ---- parcours complets (tests de non-régression d'usage) --------------------
+
+class _ThreadSynchrone:
+    """Remplace threading.Thread dans core.apprentissage : la séquence
+    s'exécute dans le clic, sur l'horloge simulée (un seul thread fait
+    avancer le temps : résultats reproductibles)."""
+
+    def __init__(self, target, args=(), kwargs=None, daemon=None, name=None):
+        self._cible, self._args, self._kw = target, args, kwargs or {}
+
+    def start(self):
+        self._cible(*self._args, **self._kw)
+
+    def is_alive(self):
+        return False
+
+    def join(self, timeout=None):
+        pass
+
+
+def _apprentissage_synchrone(ihm, monkeypatch):
+    import time as _time
+    import core.apprentissage as ca
+    b, app = ihm.b, ihm.app
+    monkeypatch.setattr(ca.threading, "Thread", _ThreadSynchrone)
+    monkeypatch.setattr(_time, "sleep",
+                        lambda s: b.cycles(max(s, b.p.periode), verifier=False))
+    monkeypatch.setattr(app.apprentissage._annule, "wait", lambda t=None: b.cycles(
+        max(t or 0.0, b.p.periode), verifier=False) or False)
+
+
+def test_parcours_apprentissage_par_l_ihm_puis_consigne(ihm, monkeypatch):
+    """Boutons d'apprentissage, aperçu, « Appliquer », puis consigne
+    aussitôt : la dernière séquence (Re mapping ISO) laisse la vanne 3
+    voies en retour vers le Miller ; la consigne Miller qui suit ne doit
+    pas finir en arrêt de sécurité (régression trouvée au test complet)."""
+    _apprentissage_synchrone(ihm, monkeypatch)
+    a, p = ihm.app, ihm.b.p
+    a._nav(3)
+    for test in ("calibration_pdc", "vanne_3voies", "vanne_bypass"):
+        a._btns_vanne[test].click()
+        ihm.avancer(0.4)
+        assert test in a.apprentissage.resultats, a.apprentissage.etat["statut"]
+        assert a._lbls_vanne[test][0].text() != "—"
+    a.inp_u1.setText("2.0")
+    a.inp_u2.setText("4.0")
+    a._btn_indiciel.click()
+    a._btn_re_mapping_iso.click()
+    ihm.avancer(0.4)
+    assert {"indiciel", "re_mapping_iso"} <= set(a.apprentissage.resultats), \
+        a.apprentissage.etat["statut"]
+    assert a.btn_appliquer_app.isEnabled()
+    assert a.lbl_app_resultats.text().startswith("À appliquer :")
+    a.btn_appliquer_app.click()
+    assert a.lbl_app_statut.text().startswith("Appliqué"), a.lbl_app_statut.text()
+    assert ihm.dialogues[-1][0] == "question"
+    cfg = json.loads(a.chemin_cfg.read_text(encoding="utf-8"))
+    assert cfg["actionneurs"]["vanne_3voies_temps_s"] == p.t_vanne_3voies
+    assert cfg["regulation"]["kp"] == p.trim.kp
+    ihm.avancer(0.4)
+    assert not a.btn_appliquer_app.isEnabled()
+    # consigne aussitôt, depuis l'écran principal
+    a._nav(0)
+    a._mode_btns[1].click()
+    _saisir(a.inp_re, "1500")
+    a._btn_apply.click()
+    ihm.avancer(60)
+    assert not p.etat.get("arret_securite"), p.etat.get("arret_motif")
+    assert p.etat["convergee"] and p.etat["diaphragme_lu"] == "miller"
+    assert not ihm.sections_en_defaut(), ihm.sections_en_defaut()
+    assert not [d for d in ihm.dialogues if d[0] in ("critical", "warning")], \
+        ihm.dialogues
+
+
+def _boucle_active(ihm):
+    """Le pilote du banc simulé tourne sans thread : on le déclare actif
+    pour l'initialisation (qui sinon s'annule, « pilote non démarré »)."""
+    ihm.b.p._thread = type("BoucleActive", (), {"is_alive": lambda self: True})()
+
+
+def _initialisation(ihm, max_s=60.0):
+    """Initialisation des vannes au démarrage, timer de suivi piloté par le
+    test (un appel par cycle de 0,2 s)."""
+    a = ihm.app
+    _boucle_active(ihm)
+    a._lancer_initialisation_vannes()
+    a._timer_verif_init.stop()
+    for _ in range(int(max_s / 0.2)):
+        ihm.avancer(0.2)
+        if a._dialog_init.isHidden():
+            return
+        a._verifier_vannes_init()
+
+
+def _hors_repos(ihm):
+    p = ihm.b.p
+    p.commander_diaphragme("iso")
+    p.commander_bypass(False)
+    p.commander_vanne_perte_charge_pct(0.0)
+    ihm.avancer(40)
+    br = p.etat["mesures_brutes"]
+    assert p.etat["diaphragme_lu"] == "iso" and br["fc_bypass_ferme"] \
+        and br["fc_pdc_ferme"]
+
+
+def test_initialisation_des_vannes_au_demarrage(ihm):
+    _hors_repos(ihm)
+    _initialisation(ihm)
+    p, br = ihm.b.p, ihm.b.p.etat["mesures_brutes"]
+    assert ihm.app._dialog_init.isHidden()
+    assert ihm.journal[0].startswith("✓ Vannes initialisées"), ihm.journal[:3]
+    assert p.etat["diaphragme_lu"] == "miller"
+    assert br["fc_bypass_ouvert"] and br["fc_pdc_ouvert"]
+    assert not p.etat.get("defaut_vanne") and not p.etat.get("arret_securite")
+
+
+def test_initialisation_vanne_bloquee_signalee(ihm):
+    """PdC qui n'atteint jamais sa butée : la fenêtre se ferme au délai et
+    le journal le dit (pas d'attente sans fin)."""
+    _hors_repos(ihm)
+    sim = ihm.b.sim
+    lire = sim.lire_mesures
+    sim.lire_mesures = lambda: {**lire(), "fc_pdc_ouvert": False}
+    _initialisation(ihm, max_s=90.0)
+    assert ihm.app._dialog_init.isHidden()
+    assert "timeout" in ihm.journal[0], ihm.journal[:3]
+
+
+def test_initialisation_ne_plus_attendre(ihm):
+    """« Ne plus attendre » ferme le suivi ; les vannes finissent leur
+    course."""
+    _hors_repos(ihm)
+    a = ihm.app
+    _boucle_active(ihm)
+    a._lancer_initialisation_vannes()
+    ihm.avancer(1.0)
+    a._dialog_init.canceled.emit()                 # bouton « Ne plus attendre »
+    assert not a._timer_verif_init.isActive()
+    assert "suivi interrompu" in ihm.journal[0]
+    ihm.avancer(40)
+    assert ihm.b.p.etat["diaphragme_lu"] == "miller"
+
+
+def test_fermeture_pendant_la_regulation(ihm):
+    """Fermeture de la fenêtre en pleine régulation : ventilateur coupé
+    (0 V, RUN retiré) AVANT toute manœuvre de vanne, puis vannes au repos ;
+    l'apprentissage éventuel est annulé."""
+    a, p, sim = ihm.app, ihm.b.p, ihm.b.sim
+    a._mode_btns[1].click()
+    _saisir(a.inp_re, "10000")
+    a._btn_apply.click()
+    ihm.avancer(40)
+    assert p.etat["convergee"] and p.etat["diaphragme_lu"] == "iso"
+    ordres = []
+    for nom in ("ecrire_variateur", "ecrire_variateur_run",
+                "ecrire_vanne_diaphragme", "ecrire_vanne_bypass",
+                "ecrire_vanne_perte_charge"):
+        orig = getattr(sim, nom)
+        setattr(sim, nom, lambda v, n=nom, o=orig: (ordres.append((n, v)), o(v))[1])
+    a.close()
+    assert ordres, "aucun ordre à la fermeture"
+    premiere_vanne = next(i for i, (n, _) in enumerate(ordres)
+                          if n.startswith("ecrire_vanne"))
+    avant = ordres[:premiere_vanne]
+    assert ("ecrire_variateur", 0.0) in avant
+    assert ("ecrire_variateur_run", False) in avant
+    angle_miller = p._angle_par_diaphragme["miller"]
+    assert ("ecrire_vanne_diaphragme", angle_miller == "0") in ordres
+    assert ("ecrire_vanne_bypass", True) in ordres
+    assert not p.regulation_active and a.apprentissage._annule.is_set()
+
+
+def test_configuration_relue_au_redemarrage(ihm):
+    """Réglages enregistrés depuis l'onglet Configuration (offset PT100,
+    température saisie, seuil de bascule) : un pilote neuf construit sur le
+    config.json écrit les retrouve."""
+    from banc_simule import SimTrace
+    from core.banc import Banc
+    from core.pilote import Pilote
+    a = ihm.app
+    a.chk_unlock.setChecked(True)
+    a.champs[("temperature", "offset_pt100_c")][0].setText("-0,4")
+    a.champs[("temperature", "valeur_manuelle_c")][0].setText("23,5")
+    a.chk_t_manuelle.setChecked(True)
+    a.champs[("selection_diaphragme", "seuil_re")][0].setText("8500")
+    a._enregistrer_configuration()
+    assert not [d for d in ihm.dialogues if d[0] == "critical"], ihm.dialogues
+    cfg = json.loads(a.chemin_cfg.read_text(encoding="utf-8"))
+    banc = Banc(cfg)
+    neuf = Pilote(banc, SimTrace(banc, cfg["simulation"], cfg["modbus"],
+                                 cfg["actionneurs"]), cfg)
+    assert neuf.offset_pt100 == -0.4
+    assert neuf.t_manuelle == 23.5
+    assert neuf.banc.seuil_re == 8500.0

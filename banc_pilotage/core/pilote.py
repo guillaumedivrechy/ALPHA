@@ -1184,6 +1184,11 @@ class Pilote:
         self._maintien_tor_suspendu = True
         self._diaphragme_commande = None
         self._bypass_commande = None
+        # manœuvres en cours (remise au repos de la séquence précédente…) :
+        # la séquence commande désormais les vannes, leur chien de garde
+        # n'a plus d'objet ; gardé, il déclarait « bypass non ouvert » un
+        # apprentissage enchaîné qui venait de le refermer -> repli sûr
+        self._manoeuvres.clear()
 
     def reprendre_maintien_tor(self) -> None:
         """Rend la main à la boucle. Le maintien de la vanne 3 voies se
