@@ -642,9 +642,11 @@ class Apprentissage:
 
     def _test_zero_capteurs(self, attente_s: float = 8.0,
                             duree_s: float = 10.0) -> None:
-        """Zéro des capteurs ΔP : moyenne à débit nul (ventilateur arrêté).
-        Les offsets sont ensuite soustraits des mesures par la boucle —
-        décisif en bas-Re, où le ΔP utile ne vaut que quelques Pa."""
+        """Zéro des capteurs ΔP ISO, ΔP Miller et P amont : moyenne à débit
+        nul (ventilateur arrêté ; la P amont, relative à l'atmosphère, y vaut
+        0). Les offsets sont ensuite soustraits des mesures par la boucle —
+        décisif en bas-Re, où le ΔP utile ne vaut que quelques Pa. La P amont
+        n'était pas mise à zéro : son offset restait dans ρ et le Re."""
         self._variateur(0.0)
         dt = self.pilote.periode
         t0 = time.monotonic()
@@ -655,11 +657,19 @@ class Apprentissage:
             self.etat["statut"] = ("extinction de l'écoulement "
                                    f"({attente_s - (time.monotonic() - t0):.0f} s)")
             time.sleep(dt)
-        m = self._dp_moyens(duree_s, "mesure du zéro", corriger=False)
-        if m is None:
-            return
-        offsets = {"dp_iso_500": round(m[0], 3),
-                   "dp_diaph_500": round(m[1], 3)}
+        voies = ("dp_iso_500", "dp_diaph_500", "p_amont_500")
+        series: dict[str, list[float]] = {v: [] for v in voies}
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < duree_s:
+            if self._interrompu():
+                self._statut_annule()
+                return
+            brutes = self._brutes()
+            for v in voies:
+                series[v].append(brutes.get(v) or 0.0)
+            self.etat["statut"] = "mesure du zéro"
+            time.sleep(dt)
+        offsets = {v: round(statistics.fmean(series[v]), 3) for v in voies}
         aberrants = {v: o for v, o in offsets.items() if abs(o) > 25.0}
         if aberrants:
             self.etat["statut"] = (
@@ -1483,7 +1493,7 @@ class Apprentissage:
 
     # libellés opérateur des séquences
     NOMS = {
-        "zero_capteurs": "Zéro capteurs ΔP",
+        "zero_capteurs": "Zéro capteurs (ΔP, P amont)",
         "calibration_pdc": "Calibration recopie PdC",
         "vanne_3voies": "Vanne 3 voies",
         "vanne_bypass": "Vanne bypass",

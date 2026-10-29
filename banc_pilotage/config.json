@@ -34,7 +34,7 @@
     "humidite_relative": 50.0
   },
   "zero_capteurs": {
-    "_commentaire": "Offsets de zero des capteurs Delta-P (Pa), mesures a debit nul par l'apprentissage 'zero_capteurs' et soustraits des mesures par la boucle. Decisif en bas-Re (Delta-P utile de quelques Pa).",
+    "_commentaire": "Offsets de zero (Pa) des capteurs Delta-P ISO (dp_iso_500), Delta-P Miller (dp_diaph_500) et de la pression amont relative (p_amont_500), mesures a debit nul par l'apprentissage 'zero_capteurs' et soustraits des mesures par la boucle. Decisif en bas-Re (Delta-P utile de quelques Pa). Voie absente = 0.",
     "dp_diaph_500": 0.01,
     "dp_iso_500": 0.02
   },

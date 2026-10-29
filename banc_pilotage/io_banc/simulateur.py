@@ -115,6 +115,9 @@ class SimulateurBanc(EntreesSorties):
         # erratique (permet de valider l'apprentissage 'freq_min')
         self.u_decrochage = cfg_simu.get("u_decrochage_v", 1.2)
         self.temperature = cfg_simu.get("temperature_c", 20.0)
+        # pression amont relative à plein débit (ventilateur à 10 V) ; elle
+        # suit le carré du débit et vaut 0 ventilateur arrêté, comme sur le
+        # banc (fixe auparavant : le zéro de la P amont y apprenait 25 Pa)
         self.p_amont_eff = cfg_simu.get("p_amont_eff_pa", 25.0)
 
         self._u_variateur = 0.0
@@ -208,10 +211,17 @@ class SimulateurBanc(EntreesSorties):
 
     # ----- côté "capteurs" ----------------------------------------------------
 
+    @property
+    def p_amont(self) -> float:
+        """Pression amont relative [Pa] au débit courant."""
+        qv_max = self.gain_qv * 10.0
+        return self.p_amont_eff * (self._qv / qv_max) ** 2 if qv_max > 0 else 0.0
+
     def lire_mesures(self) -> dict:
         self._avancer()
         T = self.temperature
-        p1_abs = self.banc.patm_pa + self.p_amont_eff
+        p_amont = self.p_amont
+        p1_abs = self.banc.patm_pa + p_amont
         rho = self.banc.fluide.rho(p1_abs, T)
         qm = self._qv * rho
 
@@ -224,7 +234,7 @@ class SimulateurBanc(EntreesSorties):
             diaph = "miller"
         else:
             diaph = "iso"      # en transit : flux indéterminé
-        dp_actif = self.banc.dP_attendu(diaph, qm, T, self.p_amont_eff)
+        dp_actif = self.banc.dP_attendu(diaph, qm, T, p_amont)
         if self._v3.en_course or self._v3.fc_180:
             dp_actif *= max(0.0, 1.0 + random.gauss(0.0, 0.5))  # flux indéterminé
         dp_actif *= 1.0 + random.gauss(0.0, self.bruit_rel)
@@ -238,7 +248,7 @@ class SimulateurBanc(EntreesSorties):
         bp_en_course = self._bypass.en_course
         mesures = {
             "dp_diaph_500": dp_miller,   # capteur Miller (adresse Wago 0)
-            "p_amont_500": self.p_amont_eff * (1 + random.gauss(0, 0.005)),
+            "p_amont_500": p_amont * (1 + random.gauss(0, 0.005)),
             "dp_iso_500": dp_iso,        # capteur ISO (adresse Wago 4)
             "temperature": T + random.gauss(0.0, 0.05),
             "pdc_recopie": self._recopie_min + self._pdc_position / 10.0

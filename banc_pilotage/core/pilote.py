@@ -1721,7 +1721,9 @@ class Pilote:
             if self._bypass_commande is not None:
                 self.es.ecrire_vanne_bypass(self._bypass_commande)
 
-        p_amont = mesures.get("p_amont_500", 0.0)
+        # pression amont relative, corrigée de son zéro appris à débit nul
+        p_amont = mesures.get("p_amont_500", 0.0) \
+            - self.zero_capteurs.get("p_amont_500", 0.0)
 
         # ---- vraisemblance de la pression amont -----------------------------
         # Validation critique : pression amont utilisée pour calcul rho et Re.

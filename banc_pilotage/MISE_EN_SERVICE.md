@@ -80,8 +80,9 @@ arrive en butée quelques secondes plus tard (constaté au premier essai).
 
 ## 4. Capteurs, ventilateur arrêté puis à faible régime
 
-- [ ] Zéro ΔP (apprentissage « Zéro capteurs », soufflerie arrêtée) :
-      offsets de quelques Pa au plus.
+- [ ] Zéro ΔP et P amont (apprentissage « Zéro capteurs », soufflerie
+      arrêtée) : offsets de quelques Pa au plus ; après « Appliquer », la
+      P amont lue ventilateur arrêté (page principale) vaut ≈ 0 Pa.
 - [ ] Bruit ΔP à débit stable (page Voies) : écart-type > 0,1 Pa, sinon la
       détection de signal figé arrêterait le banc à tort.
 - [ ] Capteur ΔP **affiché = butée lue** : en butée ISO le capteur ISO est

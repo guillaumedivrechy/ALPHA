@@ -530,3 +530,40 @@ def test_apprentissages_enchaines_sans_attendre_la_mise_au_repos(
         app._executer(cible, {})                  # sans pause entre les deux
     assert "indiciel" in app.resultats, app.etat["statut"]
     assert not p.etat.get("arret_securite"), p.etat.get("arret_motif")
+
+
+def test_zero_capteurs_inclut_la_p_amont(tmp_path):
+    """Constaté au banc : le zéro de la P amont ne se faisait pas (seuls
+    les deux ΔP étaient mesurés), son offset restait dans ρ et le Re. Il
+    est mesuré à débit nul, appliqué, puis soustrait par la boucle."""
+    app, pilote = _app(tmp_path, {"dp_diaph_500": 0.4, "dp_iso_500": -0.2,
+                                  "p_amont_500": 7.5})
+    app._test_zero_capteurs(attente_s=0.0, duree_s=0.2)
+    z = app.resultats["zero_capteurs"]
+    assert z["p_amont_500"] == pytest.approx(7.5)
+    assert "p_amont_500 = 7.5 Pa" in app.apercu_application()[0][1]
+    app.appliquer()
+    cfg = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    assert cfg["zero_capteurs"]["p_amont_500"] == pytest.approx(7.5)
+    assert pilote.zero_capteurs["p_amont_500"] == pytest.approx(7.5)
+
+
+def test_zero_p_amont_aberrant_refuse(tmp_path):
+    app, _ = _app(tmp_path, {"dp_diaph_500": 0.0, "dp_iso_500": 0.0,
+                             "p_amont_500": 60.0})
+    app._test_zero_capteurs(attente_s=0.0, duree_s=0.2)
+    assert "zero_capteurs" not in app.resultats
+    assert "p_amont_500 = 60.0 Pa" in app.etat["statut"]
+
+
+def test_boucle_soustrait_le_zero_de_la_p_amont(monkeypatch, tmp_path):
+    from banc_simule import BancSimule
+    b = BancSimule(monkeypatch, tmp_path, caracterise=True)
+    p = b.p
+    b.cycles(1.0, verifier=False)
+    brute = p.etat["mesures_brutes"]["p_amont_500"]
+    p.zero_capteurs["p_amont_500"] = 3.0
+    b.cycles(0.2, verifier=False)
+    assert p.etat["p_amont"] == pytest.approx(
+        p.etat["mesures_brutes"]["p_amont_500"] - 3.0)
+    assert abs(p.etat["mesures_brutes"]["p_amont_500"] - brute) < 1.0

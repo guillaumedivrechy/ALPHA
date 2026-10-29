@@ -2645,11 +2645,12 @@ class Application(QMainWindow):
                 "la vanne 3 voies alimente quel diaphragme (le capteur ΔP "
                 "qui répond fait foi) ; un mapping ISO/Miller inversé est "
                 "corrigé par « Appliquer »."),
-            "zero_capteurs": ("Zéro capteurs ΔP",
-                "Ventilateur arrêté, moyenne ~10 s des deux capteurs ΔP : "
-                "les offsets de zéro sont ensuite soustraits des mesures "
-                "par la boucle. Décisif en bas-Re, où le ΔP utile ne vaut "
-                "que quelques pascals."),
+            "zero_capteurs": ("Zéro capteurs (ΔP, P amont)",
+                "Ventilateur arrêté, moyenne ~10 s des deux capteurs ΔP et "
+                "de la P amont (relative : 0 à débit nul) : les offsets de "
+                "zéro sont ensuite soustraits des mesures par la boucle. "
+                "Décisif en bas-Re, où le ΔP utile ne vaut que quelques "
+                "pascals."),
             "calibration_pdc": ("Calibration recopie PdC",
                 "Envoie 0 V puis 10 V à la vanne PdC et mesure la tension brute "
                 "à chaque butée (2 s de mesure). Prérequis pour les tests "
@@ -2686,7 +2687,7 @@ class Application(QMainWindow):
 
         entries = [
             # ORDRE CHRONOLOGIQUE : séquence à suivre pour la mise en service
-            ("▶  1. Zéro capteurs ΔP", "zero_capteurs",
+            ("▶  1. Zéro capteurs (ΔP, P amont)", "zero_capteurs",
              lambda r: "  ".join(f"{v.replace('_500', '')} = {o:.2f} Pa"
                                  for v, o in r.items())),
             None,
