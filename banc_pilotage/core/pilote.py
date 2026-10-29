@@ -32,6 +32,7 @@ from core.gestion_modes import (
 from core.commandes_vannes import calculer_commandes_vannes
 from core.table_gains_pdc import TableGainsPDC
 from core.fichiers import ecrire_json_atomique
+from core.sequence import debuts_paliers
 
 log = logging.getLogger(__name__)
 
@@ -833,16 +834,22 @@ class Pilote:
         if self.journal is not None:
             self.journal.ouvrir(time.monotonic())
 
-    def demarrer_sequence(self, points: list, reference: str) -> str | None:
-        """Suivi d'un profil (t_s, Re cible) : la consigne évolue par
-        échelons aux échéances du profil ; le temps de la dernière ligne
-        marque la fin, sa consigne est ensuite maintenue.
+    def demarrer_sequence(self, paliers: list, reference: str) -> str | None:
+        """Suivi d'un profil de paliers (durée_s, Re cible), enchaînés dans
+        l'ordre, chacun pendant sa durée ; à la fin du dernier, arrêt
+        complet du banc (comme ARRÊT VARIATEUR).
         Retourne un message d'erreur ou None."""
-        if not points:
+        if not paliers:
             return "Séquence vide."
+        if any(not (_nombre(d) and d > 0) or not (_nombre(re) and re >= 0)
+               for d, re in paliers):
+            return ("Séquence invalide : chaque palier doit avoir une durée "
+                    "strictement positive et un Re positif ou nul.")
         refus = self._relance_interdite("démarrage de la séquence")
         if refus:
             return refus
+        debuts, t_fin = debuts_paliers(paliers)
+        points = [(t, float(re)) for t, (_, re) in zip(debuts, paliers)]
         self._acquitter_defauts()
         with self._verrou:
             self.mode_manuel = False
@@ -851,7 +858,8 @@ class Pilote:
             self.re_cible = float(points[0][1])
             self.regulation_active = True
             self._sequence = {
-                "points": [(float(t), float(re)) for t, re in points],
+                "points": points,             # (début du palier, Re cible)
+                "t_fin": t_fin,               # fin du dernier palier
                 "t0": time.monotonic(),
                 "index": 0,
             }
@@ -1758,20 +1766,26 @@ class Pilote:
                     self._preparation_faite = False
                     self._generation_consigne += 1
                 self._oublier_convergence()
-            terminee = t_ecoule >= pts[-1][0]
-            self.etat["sequence"] = {
-                "t": min(t_ecoule, pts[-1][0]), "t_fin": pts[-1][0],
+            t_fin = seq["t_fin"]
+            terminee = t_ecoule >= t_fin
+            etat_seq = {
+                "t": min(t_ecoule, t_fin), "t_fin": t_fin,
                 "etape": i + 1, "n": len(pts),
                 "re_cible": pts[i][1], "terminee": terminee,
             }
             if terminee:
-                # fin de profil : la consigne finale reste appliquée,
-                # la régulation continue jusqu'à l'arrêt par l'opérateur.
-                # Seulement si c'est toujours CETTE séquence : une séquence
-                # relancée par l'IHM entre-temps n'est pas effacée.
+                # fin du dernier palier : arrêt complet (régulation coupée,
+                # ventilateur à 0 V, RUN retiré, journal fermé). Seulement
+                # si c'est toujours CETTE séquence : une séquence relancée
+                # par l'IHM entre-temps n'est pas arrêtée.
                 with self._verrou:
-                    if self._sequence is seq:
-                        self._sequence = None
+                    fin_de_cette_sequence = self._sequence is seq
+                if fin_de_cette_sequence:
+                    log.info("Séquence terminée : arrêt complet du banc")
+                    self.arreter_regulation()
+            # publié après l'arrêt, qui efface etat["sequence"] : l'IHM
+            # affiche « séquence terminée »
+            self.etat["sequence"] = etat_seq
 
         with self._verrou:
             re_cible = self.re_cible

@@ -262,7 +262,7 @@ def test_aucune_relance_avant_acquittement(monkeypatch, tmp_path):
     assert b.p.etat["arret_securite"]
     assert "refusé" in (b.p.mode_manuel_tension(5.0) or "")
     assert "refusé" in (b.p.demarrer_regulation() or "")
-    assert "refusé" in (b.p.demarrer_sequence([(0.0, 8000.0)], "veine") or "")
+    assert "refusé" in (b.p.demarrer_sequence([(60.0, 8000.0)], "veine") or "")
     assert b.p.mode_manuel_tension(0.0) is None          # 0 V toujours permis
     b.cycles(5, verifier=False)
     assert b.sim.u_ecrite == 0.0 and b.sim._run is False

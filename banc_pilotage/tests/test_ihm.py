@@ -159,11 +159,11 @@ def test_arret_de_securite_bandeau_et_acquittement(ihm):
 def test_sequence_chargee_demarree_figee(ihm, tmp_path, monkeypatch):
     a = ihm.app
     csv = tmp_path / "profil.csv"
-    csv.write_text("10;3000\n60;6000\n", encoding="utf-8")
+    csv.write_text("60;3000\n60;6000\n", encoding="utf-8")   # (durée, Re)
     monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileName",
                         lambda *x, **k: (str(csv), ""))
     a._charger_sequence()
-    assert a._seq_points[0] == (0.0, 3000.0)          # profil exécuté dès t=0
+    assert a._seq_points == [(60.0, 3000.0), (60.0, 6000.0)]
     a._btn_seq_start.click()
     ihm.avancer(30)
     a._btn_apply.click()                              # en séquence : expliqué
@@ -730,3 +730,44 @@ def test_configuration_relue_au_redemarrage(ihm):
     assert neuf.offset_pt100 == -0.4
     assert neuf.t_manuelle == 23.5
     assert neuf.banc.seuil_re == 8500.0
+
+
+def test_sequence_dernier_palier_trace_puis_arret(ihm, tmp_path, monkeypatch):
+    """Constaté au banc : le dernier palier du profil ne s'affichait pas
+    (durée nulle) et la séquence ne s'arrêtait jamais. Profil en paliers
+    (durée ; Re) : le dernier est tracé sur toute sa durée, suivi, puis le
+    banc s'arrête et l'IHM revient en asservi."""
+    a, p = ihm.app, ihm.b.p
+    csv = tmp_path / "profil.csv"
+    csv.write_text("duree_s;re_cible\n40;3000\n40;6000\n60;9000\n",
+                   encoding="utf-8")
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileName",
+                        lambda *x, **k: (str(csv), ""))
+    a._charger_sequence()
+    xs, ys = a._curve_seq.getData()
+    assert list(xs)[-2:] == [80.0, 140.0] and list(ys)[-2:] == [9000.0, 9000.0]
+    assert "3 paliers, 140 s" in a._lbl_seq_fichier.text()
+    a._btn_seq_start.click()
+    ihm.avancer(110)                                 # dans le dernier palier
+    assert p.re_cible == 9000.0 and p.regulation_active
+    assert a._lbl_seq_statut.text().startswith("palier 3/3")
+    assert a._mode == "sequence"
+    ihm.avancer(35)                                  # 145 s : fin
+    assert not p.regulation_active
+    assert ihm.b.sim.u_ecrite == 0.0 and ihm.b.sim._run is False
+    assert "banc arrêté" in a._lbl_seq_statut.text()
+    assert a._mode == "asservi"
+    assert not p.etat.get("arret_securite")
+    assert not ihm.sections_en_defaut(), ihm.sections_en_defaut()
+
+
+def test_ancien_profil_refuse_avec_explication(ihm, tmp_path, monkeypatch):
+    a = ihm.app
+    csv = tmp_path / "ancien.csv"
+    csv.write_text("0;3000\n60;6000\n120;9000\n", encoding="utf-8")
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileName",
+                        lambda *x, **k: (str(csv), ""))
+    a._charger_sequence()
+    genre, titre, texte = ihm.dialogues[-1]
+    assert genre == "critical" and "DURÉE" in texte
+    assert a._seq_points is None

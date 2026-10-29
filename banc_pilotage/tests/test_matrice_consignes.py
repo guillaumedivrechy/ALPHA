@@ -126,11 +126,11 @@ def test_frontiere_bas_re_sans_battement(monkeypatch, tmp_path):
 
 
 def test_sequence_traverse_tous_les_modes(monkeypatch, tmp_path):
-    """Profil ISO -> Miller -> PdC -> Miller -> ISO : chaque échelon converge
-    avant le suivant, sans défaut ; « Arrêter » fige ensuite la consigne."""
+    """Profil ISO -> Miller -> PdC -> Miller -> ISO : chaque palier converge
+    avant le suivant, sans défaut ; à la fin du dernier, arrêt complet."""
     b = _banc(monkeypatch, tmp_path, "repos")
-    profil = [(0.0, 12000.0), (60.0, 2000.0), (120.0, 300.0),
-              (180.0, 1500.0), (240.0, 8000.0), (300.0, 8000.0)]
+    profil = [(60.0, 12000.0), (60.0, 2000.0), (60.0, 300.0),
+              (60.0, 1500.0), (60.0, 8000.0)]               # (durée, Re)
     assert b.p.demarrer_sequence(profil, "veine") is None
     modes, convergee_par_etape = [], {}
     t_fin = b.t[0] + 400.0
@@ -146,7 +146,9 @@ def test_sequence_traverse_tous_les_modes(monkeypatch, tmp_path):
                          "normal_low", "normal_high"][:len(modes[:5])]
     assert set(convergee_par_etape) >= {1, 2, 3, 4, 5}
     assert b.p.figer_sequence() is None           # profil terminé
-    assert b.p.regulation_active and b.p.re_cible == 8000.0
+    assert not b.p.regulation_active               # arrêt complet
+    b.cycles(1.0)
+    assert b.sim.u_ecrite == 0.0 and b.sim._run is False
     assert not b.violations, b.violations[:3]
 
 
@@ -412,7 +414,7 @@ def test_sequence_dans_l_autre_reference_sans_coup(monkeypatch, tmp_path):
     b.consigne(15000.0, "conduite")
     assert b.jusqu_a_convergence(150) is not None
     b.cycles(10)
-    assert b.p.demarrer_sequence([(0.0, 8000.0)], "veine") is None
+    assert b.p.demarrer_sequence([(600.0, 8000.0)], "veine") is None
     vus = []
     for _ in range(int(40.0 / b.p.periode)):
         b.cycles(b.p.periode)

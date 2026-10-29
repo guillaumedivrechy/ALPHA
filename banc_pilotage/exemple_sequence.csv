@@ -1,10 +1,9 @@
 # Exemple de profil pour le mode sequence (onglet Sequence de l'IHM)
-# colonne 1 : temps [s] ; colonne 2 : Reynolds cible
-# La derniere ligne marque la fin ; Re = 0 arrete la soufflerie.
-temps_s;re_cible
-0;3000
+# colonne 1 : duree du palier [s] ; colonne 2 : Reynolds cible
+# Les paliers s'enchainent dans l'ordre, le dernier compris ; a la fin du
+# dernier palier, le banc s'arrete (regulation coupee, ventilateur a 0 V).
+duree_s;re_cible
+60;3000
 60;6000
-120;10000
-240;10000
-300;4000
-360;0
+180;10000
+60;4000

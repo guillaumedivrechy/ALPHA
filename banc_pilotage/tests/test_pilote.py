@@ -311,7 +311,7 @@ def test_sequence_petit_echelon_conserve_le_pi():
     pilote, es = _pilote_en_position("fc_3voies_0")    # déjà sur ISO
     pilote.bas_re_actif = False
     appels = _espion_reinit(pilote.pi)
-    pilote.demarrer_sequence([(0.0, 8000.0), (0.05, 8400.0)], "conduite")
+    pilote.demarrer_sequence([(0.05, 8000.0), (60.0, 8400.0)], "conduite")
     pilote._cycle()                       # échelon 1 : préparation complète
     assert len(appels) == 1
     time.sleep(0.06)
@@ -324,7 +324,7 @@ def test_sequence_grand_echelon_reinitialise_le_pi():
     pilote, es = _pilote_en_position("fc_3voies_0")
     pilote.bas_re_actif = False
     appels = _espion_reinit(pilote.pi)
-    pilote.demarrer_sequence([(0.0, 8000.0), (0.05, 16000.0)], "conduite")
+    pilote.demarrer_sequence([(0.05, 8000.0), (60.0, 16000.0)], "conduite")
     pilote._cycle()
     assert len(appels) == 1
     time.sleep(0.06)

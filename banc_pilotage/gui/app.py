@@ -30,7 +30,7 @@ import pyqtgraph as pg
 from core.banc import Banc
 from core.fichiers import ecrire_json_atomique
 from core.pilote import Pilote
-from core.sequence import charger_sequence_csv
+from core.sequence import charger_sequence_csv, debuts_paliers
 from ui.theme import COLORS, BTN_QSS, SEG_OFF_QSS, SEG_ON_QSS
 
 PERIODE_IHM_MS = 250
@@ -2448,7 +2448,7 @@ class Application(QMainWindow):
         return l
 
     def _build_sequence(self) -> QWidget:
-        """Suivi d'un profil CSV (temps [s] ; Re cible) par échelons."""
+        """Suivi d'un profil CSV de paliers (durée [s] ; Re cible)."""
         page = QWidget()
         vl = QVBoxLayout(page)
         vl.setContentsMargins(16, 16, 16, 16)
@@ -2494,15 +2494,16 @@ class Application(QMainWindow):
             f"QPushButton:hover {{ background:#E68A00; }}")
         bh.clicked.connect(lambda: QMessageBox.information(
             self, "Mode séquence",
-            "Fichier CSV à 2 colonnes : temps [s] ; Reynolds cible.\n"
+            "Fichier CSV à 2 colonnes : durée du palier [s] ; Reynolds "
+            "cible. Exemple : « 60 ; 3000 » = 3000 pendant 60 s.\n"
             "Séparateur « ; », « , » ou tabulation ; virgule décimale "
             "acceptée ; ligne d'en-tête optionnelle ; lignes vides ou "
             "commençant par # ignorées.\n\n"
-            "La consigne évolue par échelons aux échéances du profil "
-            "(référence Conduite/Veine du panneau Pilotage). Le temps de "
-            "la dernière ligne marque la fin de la séquence : sa consigne "
-            "est ensuite maintenue — mettre Re = 0 en dernière ligne pour "
-            "arrêter la soufflerie en fin d'essai."))
+            "Les paliers s'enchaînent dans l'ordre du fichier, chacun "
+            "pendant sa durée, le dernier compris (référence "
+            "Conduite/Veine du panneau Pilotage). À la fin du dernier "
+            "palier, le banc s'arrête : régulation coupée, ventilateur à "
+            "0 V, comme ARRÊT VARIATEUR."))
         bhl.addWidget(bh)
         bhl.addStretch()
         self._lbl_seq_fichier = QLabel("aucun fichier chargé")
@@ -2543,36 +2544,29 @@ class Application(QMainWindow):
         if not chemin:
             return
         try:
-            points = charger_sequence_csv(chemin)
+            paliers = charger_sequence_csv(chemin)
         except (OSError, ValueError) as exc:
             QMessageBox.critical(self, "Séquence",
                                  f"Fichier invalide :\n{exc}")
             return
-        if points[0][0] > 0:
-            # la 1re consigne s'applique dès le démarrage : le profil exécuté
-            # (et donc tracé) commence à t = 0 avec cette valeur
-            points = [(0.0, points[0][1])] + points
-            self._log(f"Séquence : 1re consigne ({points[0][1]:.0f}) appliquée "
-                      "dès t = 0 s", COLORS["warn"])
-        self._seq_points = points
-        # tracé en échelons : chaque consigne tient jusqu'à l'échéance suivante
+        self._seq_points = paliers
+        # tracé en paliers : chaque consigne tient toute sa durée, le
+        # dernier palier compris (il était auparavant de durée nulle)
+        debuts, t_fin = debuts_paliers(paliers)
         xs, ys = [], []
-        for i, (t, re) in enumerate(points):
-            if i:
-                xs.append(t)
-                ys.append(points[i - 1][1])
-            xs.append(t)
-            ys.append(re)
+        for t, (duree, re) in zip(debuts, paliers):
+            xs += [t, t + duree]
+            ys += [re, re]
         self._curve_seq.setData(xs, ys)
         self._line_seq_t.setVisible(False)
         self._lbl_seq_fichier.setText(
-            f"{Path(chemin).name} — {len(points)} étapes, "
-            f"{points[-1][0]:.0f} s")
+            f"{Path(chemin).name} — {len(paliers)} paliers, {t_fin:.0f} s")
         self._lbl_seq_statut.setText(
             f"profil chargé — consignes lues en Re {self._ref_re} — "
             "prêt à démarrer")
         self._btn_seq_start.setEnabled(True)
-        self._log(f"Séquence chargée ({len(points)} étapes)", COLORS["accent"])
+        self._log(f"Séquence chargée ({len(paliers)} paliers, {t_fin:.0f} s)",
+                  COLORS["accent"])
 
     def _demarrer_sequence(self) -> None:
         if not self._seq_points:
@@ -2588,8 +2582,9 @@ class Application(QMainWindow):
             QMessageBox.warning(self, "Séquence", err)
             return
         self._set_mode("sequence")
-        self._log(f"Séquence démarrée ({len(self._seq_points)} étapes, "
-                  f"{self._seq_points[-1][0]:.0f} s)", COLORS["accent"])
+        self._log(f"Séquence démarrée ({len(self._seq_points)} paliers, "
+                  f"{debuts_paliers(self._seq_points)[1]:.0f} s)",
+                  COLORS["accent"])
 
     def _arreter_sequence(self) -> None:
         """Fige la consigne de l'étape en cours (le ventilateur continue) :
@@ -4382,12 +4377,12 @@ class Application(QMainWindow):
             return
         if seq.get("terminee"):
             self._lbl_seq_statut.setText(
-                f"séquence terminée — consigne finale "
-                f"Re = {seq['re_cible']:.0f} maintenue")
+                f"séquence terminée ({seq['n']} paliers, {seq['t_fin']:.0f} s)"
+                " — banc arrêté, ventilateur coupé")
             self._line_seq_t.setValue(seq["t_fin"])
         else:
             self._lbl_seq_statut.setText(
-                f"étape {seq['etape']}/{seq['n']} — "
+                f"palier {seq['etape']}/{seq['n']} — "
                 f"t = {seq['t']:.0f}/{seq['t_fin']:.0f} s — "
                 f"Re cible {seq['re_cible']:.0f}")
             self._line_seq_t.setValue(seq["t"])

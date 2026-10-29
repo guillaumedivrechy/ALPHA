@@ -142,7 +142,7 @@ Temps mesurés sur le banc simulé, à titre de repère.
 | 300 depuis 2 000 | mode PdC, ventilateur fixe, sans creux sous la consigne | ≤ 40 s | |
 | 600 depuis le repos | mode PdC : PdC positionnée, PUIS ventilateur, dépassement < 10 % | ≤ 40 s | |
 | 15 000 | limitée ≈ 13 700 (« consigne limitée ») | ≤ 30 s | |
-| `exemple_sequence.csv` | chaque échelon converge, « Arrêter » fige | — | |
+| `exemple_sequence.csv` | chaque palier converge et dure le temps prévu, le dernier compris (tracé complet) ; à la fin, banc arrêté (0 V) ; « Arrêter » en cours de profil fige la consigne | — | |
 
 - [ ] « RÉGULÉ ✓ » ne s'allume que Re stabilisé (jamais pendant une
       transition) et ne clignote pas en régime établi.
