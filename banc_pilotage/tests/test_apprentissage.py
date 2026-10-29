@@ -567,3 +567,56 @@ def test_boucle_soustrait_le_zero_de_la_p_amont(monkeypatch, tmp_path):
     assert p.etat["p_amont"] == pytest.approx(
         p.etat["mesures_brutes"]["p_amont_500"] - 3.0)
     assert abs(p.etat["mesures_brutes"]["p_amont_500"] - brute) < 1.0
+
+
+def _apprentissage_3voies(monkeypatch, tmp_path):
+    import time as _time
+    from banc_simule import BancSimule
+    b = BancSimule(monkeypatch, tmp_path, caracterise=True)
+    p = b.p
+    monkeypatch.setattr(_time, "sleep",
+                        lambda s: b.cycles(max(s, p.periode), verifier=False))
+    app = Apprentissage(p, b.cfg, tmp_path / "config.json")
+    monkeypatch.setattr(app._annule, "wait", lambda t=None: b.cycles(
+        max(t or 0.0, p.periode), verifier=False) or False)
+    app._arrets_debut = p.arrets
+    app._executer(app._test_vanne_3voies, {})
+    return app, b
+
+
+def test_vanne_3voies_chronologie_des_fins_de_course(monkeypatch, tmp_path):
+    """Constaté au banc : course mesurée ~3 s, ~8 s au chronomètre.
+    L'apprentissage relève l'état des trois fins de course (DI) pendant
+    chaque course, et observe encore après l'arrivée déclarée."""
+    app, b = _apprentissage_3voies(monkeypatch, tmp_path)
+    r = app.resultats["vanne_3voies"]
+    course = 90.0 / b.sim._v3._vitesse
+    assert r["T1_0_vers_90_s"] == pytest.approx(course, abs=0.4)
+    # T1 : 0° (DI5) -> aucune butée -> 90° (DI7) ; [t, fc0, fc90, fc180]
+    assert [e[1:] for e in r["chronologie_T1"]] == [[1, 0, 0], [0, 0, 0],
+                                                    [0, 1, 0]]
+    assert r["chronologie_T1"][1][0] < 0.5                 # départ
+    assert r["chronologie_T1"][2][0] == pytest.approx(course, abs=0.4)
+    assert [e[1:] for e in r["chronologie_T2"]] == [[0, 1, 0], [0, 0, 0],
+                                                    [1, 0, 0]]
+    texte = r["chronologie_texte"]
+    assert "DI5=1  DI7=0  DI6=0  (butée 0°)" in texte
+    assert "(butée 90°)  ← arrivée déclarée" in texte
+    assert "⚠" not in texte
+    assert texte in app.etat["statut"]
+
+
+def test_vanne_3voies_bascule_avant_la_butee_signalee(monkeypatch, tmp_path):
+    """Came réglée trop tôt : le contact 90° se ferme brièvement vers 30°,
+    se rouvre, puis se referme en butée. L'arrivée est déclarée trop tôt
+    (course sous-estimée, ce qui ressemble au constat du banc) ; la
+    bascule tardive est relevée et signalée."""
+    from io_banc.simulateur import _Vanne3Voies
+    monkeypatch.setattr(_Vanne3Voies, "fc_90", property(
+        lambda self: 30.0 < self._angle < 40.0 or abs(self._angle - 90.0) < 1.0))
+    app, b = _apprentissage_3voies(monkeypatch, tmp_path)
+    r = app.resultats["vanne_3voies"]
+    course = 90.0 / b.sim._v3._vitesse
+    assert r["T1_0_vers_90_s"] < 0.5 * course
+    assert r["chronologie_T1"][-1][0] == pytest.approx(course, abs=0.4)
+    assert "⚠ une fin de course a encore basculé APRÈS" in r["chronologie_texte"]

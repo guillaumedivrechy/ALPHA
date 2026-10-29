@@ -127,6 +127,11 @@ DEFAUTS_CLES_RECENTES = {
 NON_RENSEIGNE = "—"
 
 
+# statut des apprentissages : chasse fixe (colonnes de la chronologie des
+# fins de course alignées)
+_POLICE_STATUT = "font-family:'IBM Plex Mono',monospace;"
+
+
 def _formater_champ(val_fmt, raw) -> str:
     """Texte affiché d'un champ de l'onglet Configuration : format de la
     ligne (chaîne ou fonction (valeur, valeurs)) appliqué aux nombres."""
@@ -2921,6 +2926,11 @@ class Application(QMainWindow):
 
         self.lbl_app_statut = QLabel("")
         self.lbl_app_statut.setObjectName("info")
+        # sélectionnable : la chronologie des fins de course (vanne 3 voies)
+        # se copie pour diagnostic ; chasse fixe pour aligner ses colonnes
+        self.lbl_app_statut.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.lbl_app_statut.setStyleSheet(_POLICE_STATUT)
         vl.addWidget(self.lbl_app_statut)
         self.lbl_app_resultats = QLabel("")
         self.lbl_app_resultats.setObjectName("mono")
@@ -3789,7 +3799,7 @@ class Application(QMainWindow):
         self._synchroniser_affichage_config()
         echec = resume.startswith("ÉCHEC")
         self.lbl_app_statut.setStyleSheet(
-            f"color:{COLORS['error'] if echec else COLORS['ok']};")
+            _POLICE_STATUT + f"color:{COLORS['error'] if echec else COLORS['ok']};")
         self.lbl_app_statut.setText(resume)
         if echec:
             QMessageBox.critical(self, "Apprentissage", resume)
@@ -4393,12 +4403,13 @@ class Application(QMainWindow):
         a = self.apprentissage
         if a.etat["en_cours"]:
             self.lbl_app_statut.setStyleSheet(
-                f"color:{COLORS['accent']};")
+                _POLICE_STATUT + f"color:{COLORS['accent']};")
             self.lbl_app_statut.setText(
                 f"[{a.etat['test']}]  {a.etat['statut']}")
         elif a.etat["statut"] and not \
                 self.lbl_app_statut.text().startswith("Appliqué"):
-            self.lbl_app_statut.setStyleSheet(f"color:{COLORS['ok']};")
+            self.lbl_app_statut.setStyleSheet(
+                _POLICE_STATUT + f"color:{COLORS['ok']};")
             self.lbl_app_statut.setText(a.etat["statut"])
 
         # ce qu'« Appliquer » va écrire (ancienne → nouvelle valeur), puis

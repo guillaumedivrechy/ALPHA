@@ -335,11 +335,30 @@ class Apprentissage:
                            timeout, f"course {sens}")
         return t
 
+    # fins de course de la vanne 3 voies, dans l'ordre d'affichage
+    FC_3VOIES = ("fc_3voies_0", "fc_3voies_90", "fc_3voies_180")
+    # observation après l'arrivée déclarée : au moins OBSERVATION_MIN_S, puis
+    # jusqu'à OBSERVATION_STABLE_S sans bascule, au plus OBSERVATION_MAX_S
+    # (une came qui bascule avant la butée se trahit par une bascule
+    # tardive, ou par une course plus courte que le chronomètre)
+    OBSERVATION_MIN_S = 10.0
+    OBSERVATION_STABLE_S = 5.0
+    OBSERVATION_MAX_S = 20.0
+
+    def _etat_fc_3voies(self) -> tuple:
+        b = self._brutes()
+        return tuple(bool(b.get(v)) for v in self.FC_3VOIES)
+
     def _avancer_vanne_3voies(self, vers_0deg: bool, label: str,
-                              timeout: float = 60.0) -> float | None:
+                              timeout: float = 60.0,
+                              chronologie: list | None = None) -> float | None:
         """Conduit la vanne 3 voies vers une butée et chronomètre. La carte GF3
         rejoint directement la position demandée, sans impulsion de relance :
-        l'ordre F mène à 0°, l'ordre I à 90°. Retourne la durée, ou None."""
+        l'ordre F mène à 0°, l'ordre I à 90°. Retourne la durée, ou None.
+
+        Avec `chronologie` (liste), y consigne chaque changement d'état des
+        trois fins de course [(t depuis l'ordre, (fc0, fc90, fc180)), ...],
+        puis continue d'observer après l'arrivée déclarée (bascule tardive)."""
         angle = "0" if vers_0deg else "90"
         if self._interrompu():
             self._statut_annule()
@@ -347,11 +366,58 @@ class Apprentissage:
         if self.pilote._angle_vanne_3voies(self._brutes()) == angle:
             return 0.0
         t0 = time.monotonic()
+        precedent = [self._etat_fc_3voies()]
+        if chronologie is not None:
+            chronologie.append((0.0, precedent[0]))
+
+        def noter() -> None:
+            etat = self._etat_fc_3voies()
+            if chronologie is not None and etat != precedent[0]:
+                chronologie.append((round(time.monotonic() - t0, 2), etat))
+                precedent[0] = etat
+
         self.pilote.es.ecrire_vanne_diaphragme(vers_0deg)
         ok = self._attendre(
-            lambda: self.pilote._angle_vanne_3voies(self._brutes()) == angle,
+            lambda: noter() or
+            self.pilote._angle_vanne_3voies(self._brutes()) == angle,
             timeout, label)
-        return None if ok is None else time.monotonic() - t0
+        if ok is None:
+            return None
+        duree = time.monotonic() - t0
+        if chronologie is not None:
+            t_arrivee = time.monotonic()
+            while not self._interrompu():
+                noter()
+                maintenant = time.monotonic()
+                derniere = t0 + chronologie[-1][0]
+                if ((maintenant - t_arrivee >= self.OBSERVATION_MIN_S
+                     and maintenant - derniere >= self.OBSERVATION_STABLE_S)
+                        or maintenant - t_arrivee >= self.OBSERVATION_MAX_S):
+                    break
+                self.etat["statut"] = f"{label} : observation des fins de course"
+                time.sleep(self.pilote.periode / 2)
+        return duree
+
+    def _texte_chronologie(self, sens: str, chronologie: list,
+                           arrivee_s: float) -> tuple[str, bool]:
+        """Chronologie lisible (« DI5=1 DI7=0 DI6=0 ») et alerte si une fin
+        de course a encore basculé après l'arrivée déclarée."""
+        entrees = self.cfg.get("modbus", {}).get("entrees_tor", {})
+        di = [f"DI{entrees.get(v, {}).get('adresse', i) + 1}"
+              for i, v in enumerate(self.FC_3VOIES)]
+        # l'arrivée a été déclarée sur le dernier changement d'état qui la
+        # précède (détection au cycle suivant la bascule)
+        i_arrivee = max((i for i, (t, _) in enumerate(chronologie)
+                         if t <= arrivee_s + 1e-6), default=None)
+        lignes = []
+        for i, (t, etat) in enumerate(chronologie):
+            angle = self.pilote._angle_vanne_3voies(dict(zip(self.FC_3VOIES, etat)))
+            pos = f"butée {angle}°" if angle else "aucune butée franche"
+            marque = "  ← arrivée déclarée" if i == i_arrivee and i else ""
+            lignes.append(f"  {t:5.2f} s  " + "  ".join(
+                f"{d}={int(e)}" for d, e in zip(di, etat)) + f"  ({pos}){marque}")
+        tardive = any(t > arrivee_s + 0.25 for t, _ in chronologie)
+        return f"{sens} :\n" + "\n".join(lignes), tardive
 
     def _positionner_diaphragme(self, diaphragme: str,
                                 verbe: str = "positionnement") -> float | None:
@@ -381,25 +447,48 @@ class Apprentissage:
             return
         self._pause(0.5)
 
-        t = self._avancer_vanne_3voies(False, "T1 : 0° → 90°")
+        # chronologie des fins de course (DI) pendant chaque course : une
+        # arrivée déclarée avant la butée réelle (came réglée trop tôt,
+        # contact lu dans le mauvais sens) s'y voit directement
+        chrono_t1: list = []
+        t = self._avancer_vanne_3voies(False, "T1 : 0° → 90°",
+                                       chronologie=chrono_t1)
         if t is None:
             return
         res["T1_0_vers_90_s"] = round(t, 2)
         self._pause(0.5)
 
-        t = self._avancer_vanne_3voies(True, "T2 : 90° → 0°")
+        chrono_t2: list = []
+        t = self._avancer_vanne_3voies(True, "T2 : 90° → 0°",
+                                       chronologie=chrono_t2)
         if t is None:
             return
         res["T2_90_vers_0_s"] = round(t, 2)
 
-        res["max_s"] = max(res.values())
+        res["max_s"] = max(res["T1_0_vers_90_s"], res["T2_90_vers_0_s"])
+        res["chronologie_T1"] = [[tt, *map(int, e)] for tt, e in chrono_t1]
+        res["chronologie_T2"] = [[tt, *map(int, e)] for tt, e in chrono_t2]
         self.pilote.etat["diaphragme"] = \
             self.pilote._diaphragme_par_angle["0"]
+
+        texte_t1, tardif_t1 = self._texte_chronologie(
+            "T1 0° → 90°", chrono_t1, res["T1_0_vers_90_s"])
+        texte_t2, tardif_t2 = self._texte_chronologie(
+            "T2 90° → 0°", chrono_t2, res["T2_90_vers_0_s"])
+        alerte = ""
+        if tardif_t1 or tardif_t2:
+            alerte = ("\n⚠ une fin de course a encore basculé APRÈS l'arrivée "
+                      "déclarée : le contact lu comme butée n'est pas en "
+                      "butée (came, sens de lecture ou affectation de l'entrée "
+                      "à vérifier) — course mesurée non fiable")
+        res["chronologie_texte"] = texte_t1 + "\n" + texte_t2 + alerte
+        log.info("Vanne 3 voies, chronologie des fins de course :\n%s",
+                 res["chronologie_texte"])
 
         self.resultats["vanne_3voies"] = res
         self.etat["statut"] = (
             f"terminé : T1={res['T1_0_vers_90_s']} s  "
-            f"T2={res['T2_90_vers_0_s']} s")
+            f"T2={res['T2_90_vers_0_s']} s\n" + res["chronologie_texte"])
 
     def _test_vanne_bypass(self) -> None:
         es = self.pilote.es
