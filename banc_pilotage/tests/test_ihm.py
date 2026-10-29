@@ -771,3 +771,21 @@ def test_ancien_profil_refuse_avec_explication(ihm, tmp_path, monkeypatch):
     genre, titre, texte = ihm.dialogues[-1]
     assert genre == "critical" and "DURÉE" in texte
     assert a._seq_points is None
+
+
+def test_pressions_affichees_corrigees_du_zero(ihm):
+    """Constaté au banc : P amont « figée » à 0,12 Pa à l'écran principal
+    après le zéro. L'écran affichait la valeur BRUTE (zéro non ôté), alors
+    que les calculs utilisent la valeur corrigée."""
+    a, p = ihm.app, ihm.b.p
+    p.zero_capteurs.update({"p_amont_500": 0.12, "dp_iso_500": 0.3,
+                            "dp_diaph_500": 0.2})
+    ihm.avancer(1.0)                                   # ventilateur arrêté
+    br = p.etat["mesures_brutes"]
+    v = a._valeurs_voies(p.etat)
+    assert v["p_amont"] == pytest.approx(br["p_amont_500"] - 0.12)
+    assert v["p_amont"] == pytest.approx(p.etat["p_amont"])
+    assert v["dp_iso"] == pytest.approx(br["dp_iso_500"] - 0.3)
+    assert v["dp_miller"] == pytest.approx(br["dp_diaph_500"] - 0.2)
+    lv = next(lv for cle, lv, *_ in a._ch_rows if cle == "p_amont")
+    assert lv.text().replace(",", ".") == f"{v['p_amont']:.2f}"

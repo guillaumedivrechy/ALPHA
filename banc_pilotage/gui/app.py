@@ -4055,18 +4055,29 @@ class Application(QMainWindow):
         self._hist_t.append(maintenant - self._t0_acq)
         self._tracer()
 
-    @staticmethod
-    def _valeurs_voies(e: dict) -> dict:
-        """Valeur de chaque voie affichée, depuis mesures_brutes ou etat."""
+    def _valeurs_voies(self, e: dict) -> dict:
+        """Valeur de chaque voie affichée, depuis mesures_brutes ou etat.
+        Pressions corrigées du zéro appris (« Zéro capteurs ») : les valeurs
+        brutes affichées auparavant gardaient l'offset (P amont « figée » à
+        0,12 Pa après le zéro), alors que les calculs l'ôtent. Les valeurs
+        brutes restent affichées dans l'onglet Maintenance."""
         brutes = e.get("mesures_brutes") or {}
+        zero = self.pilote.zero_capteurs
+
+        def corrigee(cle):
+            v = brutes.get(cle)
+            return None if v is None else v - zero.get(cle, 0.0)
+
+        p_amont = e.get("p_amont")              # corrigée par la boucle
         return {
             "qv":          e.get("qv"),
             "rho":         e.get("rho"),
             "mu":          e.get("mu"),
             "nu":          e.get("nu"),
-            "p_amont":     brutes.get("p_amont_500",    e.get("p_amont")),
-            "dp_iso":      brutes.get("dp_iso_500"),
-            "dp_miller":   brutes.get("dp_diaph_500"),  # addr 0 = Miller
+            "p_amont":     p_amont if p_amont is not None
+                           else corrigee("p_amont_500"),
+            "dp_iso":      corrigee("dp_iso_500"),
+            "dp_miller":   corrigee("dp_diaph_500"),  # addr 0 = Miller
             "temperature": e.get("temperature") or brutes.get("temperature"),
             "u_variateur": brutes.get("frequence_variateur", e.get("u_variateur")),
         }
