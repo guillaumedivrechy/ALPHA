@@ -398,6 +398,26 @@ class Apprentissage:
                 time.sleep(self.pilote.periode / 2)
         return duree
 
+    def _course_complete_estimee(self, chrono_t1: list,
+                                 chrono_t2: list) -> float | None:
+        """Course complète 0° <-> 90° [s] d'après la chronologie des deux
+        sens. Une fin de course fermée sur une plage bascule à la même
+        position à l'aller et au retour : l'instant de sa libération dans un
+        sens plus celui de sa fermeture dans l'autre vaut la course complète,
+        quelle que soit la largeur de la plage (vitesse constante). Retient
+        la plus grande des estimations (DI 0° et DI 90°) ; None si la
+        chronologie ne le permet pas."""
+        def premier(chrono, i, valeur):
+            return next((t for t, e in chrono[1:] if e[i] == valeur), None)
+        estimations = []
+        for i, (quitte, rejoint) in ((0, (chrono_t1, chrono_t2)),
+                                     (1, (chrono_t2, chrono_t1))):
+            t_off = premier(quitte, i, False)       # quitte sa plage
+            t_on = premier(rejoint, i, True)        # la retrouve au retour
+            if t_off is not None and t_on is not None:
+                estimations.append(t_off + t_on)
+        return round(max(estimations), 2) if estimations else None
+
     def _texte_chronologie(self, sens: str, chronologie: list,
                            arrivee_s: float) -> tuple[str, bool]:
         """Chronologie lisible (« DI5=1 DI7=0 DI6=0 ») et alerte si une fin
@@ -426,8 +446,14 @@ class Apprentissage:
         Miller est à 0°. Les séquences qui raisonnent en diaphragme passent
         par ici ; seuls les tests de la vanne elle-même parlent en angle."""
         angle = self.pilote._angle_par_diaphragme[diaphragme]
-        return self._avancer_vanne_3voies(
+        t = self._avancer_vanne_3voies(
             angle == "0", f"{verbe} {diaphragme.upper()} ({angle}°)")
+        if t and self.pilote.v3_course_complete:
+            # fins de course sur plages : la butée n'est atteinte qu'au bout
+            # de la course complète (sinon mesure sur une vanne à mi-course)
+            if self._pause(max(0.0, self.pilote.t_vanne_3voies - t)):
+                return None
+        return t
 
     def _test_vanne_3voies(self) -> None:
         """Chrono des deux courses utiles de la vanne 3 voies. La position 180°
@@ -441,11 +467,14 @@ class Apprentissage:
         """
         res = {}
 
-        # Pré-positionnement sur la butée 0°
+        # Pré-positionnement sur la butée 0°, course complète comprise (fin
+        # de course 0° fermée avant la butée sur cette vanne)
         t = self._avancer_vanne_3voies(True, "pré-pos butée 0°")
         if t is None:
             return
-        self._pause(0.5)
+        attente = 0.5 + (max(0.0, self.pilote.t_vanne_3voies - t) if t else 0.0)
+        if self._pause(attente):
+            return
 
         # chronologie des fins de course (DI) pendant chaque course : une
         # arrivée déclarée avant la butée réelle (came réglée trop tôt,
@@ -465,9 +494,14 @@ class Apprentissage:
             return
         res["T2_90_vers_0_s"] = round(t, 2)
 
-        res["max_s"] = max(res["T1_0_vers_90_s"], res["T2_90_vers_0_s"])
         res["chronologie_T1"] = [[tt, *map(int, e)] for tt, e in chrono_t1]
         res["chronologie_T2"] = [[tt, *map(int, e)] for tt, e in chrono_t2]
+        # course complète estimée d'après la chronologie (fins de course sur
+        # plages : l'arrivée est déclarée avant la butée)
+        course = self._course_complete_estimee(chrono_t1, chrono_t2)
+        res["course_complete_estimee_s"] = course
+        res["max_s"] = max(res["T1_0_vers_90_s"], res["T2_90_vers_0_s"],
+                           course or 0.0)
         self.pilote.etat["diaphragme"] = \
             self.pilote._diaphragme_par_angle["0"]
 
@@ -476,6 +510,11 @@ class Apprentissage:
         texte_t2, tardif_t2 = self._texte_chronologie(
             "T2 90° → 0°", chrono_t2, res["T2_90_vers_0_s"])
         alerte = ""
+        if course and course > 1.15 * max(res["T1_0_vers_90_s"],
+                                          res["T2_90_vers_0_s"]):
+            alerte += (f"\nCourse complète estimée ≈ {course:.1f} s (fins de "
+                       "course fermées avant les butées) : retenue pour le "
+                       "chien de garde et pour l'attente de fin de manœuvre")
         if tardif_t1 or tardif_t2:
             alerte = ("\n⚠ une fin de course a encore basculé APRÈS l'arrivée "
                       "déclarée : le contact lu comme butée n'est pas en "

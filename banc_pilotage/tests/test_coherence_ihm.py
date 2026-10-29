@@ -28,7 +28,7 @@ SRC_APPR = (RACINE / "core" / "apprentissage.py").read_text(encoding="utf-8")
 CLES_PRODUITES = {
     "vanne_3voies":    {"T1_0_vers_90_s", "T2_90_vers_0_s", "max_s",
                         "chronologie_T1", "chronologie_T2",
-                        "chronologie_texte"},
+                        "chronologie_texte", "course_complete_estimee_s"},
     "vanne_bypass":    {"ouverture_s", "fermeture_s", "max_s"},
     "vanne_pdc":       {"ouverture_s", "fermeture_s", "max_s"},
     "calibration_pdc": {"v_min_recopie", "v_max_recopie", "plage_v"},

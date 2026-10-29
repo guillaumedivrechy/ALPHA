@@ -620,3 +620,107 @@ def test_vanne_3voies_bascule_avant_la_butee_signalee(monkeypatch, tmp_path):
     assert r["T1_0_vers_90_s"] < 0.5 * course
     assert r["chronologie_T1"][-1][0] == pytest.approx(course, abs=0.4)
     assert "⚠ une fin de course a encore basculé APRÈS" in r["chronologie_texte"]
+
+
+# ---- vanne 3 voies à fins de course sur plages (constaté au banc) ---------
+
+def _cames_sur_plages(monkeypatch):
+    """Banc réel (chronologie du 29/10) : 0° lu sous ~15°, 90° lu au-delà
+    de ~24°, course complète ~11 s."""
+    from io_banc.simulateur import _Vanne3Voies
+    monkeypatch.setattr(_Vanne3Voies, "fc_0",
+                        property(lambda self: self._angle < 15.0))
+    monkeypatch.setattr(_Vanne3Voies, "fc_90",
+                        property(lambda self: 24.0 < self._angle < 179.0))
+
+
+def _banc_11s(monkeypatch, tmp_path):
+    import time as _time
+    from banc_simule import BancSimule
+    b = BancSimule(monkeypatch, tmp_path, caracterise=True, cfg_sur={
+        "actionneurs": {"vanne_3voies_temps_s": 11.0}})
+    p = b.p
+    monkeypatch.setattr(_time, "sleep",
+                        lambda s: b.cycles(max(s, p.periode), verifier=False))
+    app = Apprentissage(p, b.cfg, tmp_path / "config.json")
+    monkeypatch.setattr(app._annule, "wait", lambda t=None: b.cycles(
+        max(t or 0.0, p.periode), verifier=False) or False)
+    return b, app
+
+
+def test_course_complete_estimee_malgre_les_cames_sur_plages(monkeypatch,
+                                                            tmp_path):
+    """L'arrivée est déclarée trop tôt (T1 ≈ 3 s, T2 ≈ 9 s pour 11 s) ;
+    la course complète est retrouvée d'après la chronologie et c'est elle
+    qu'« Appliquer » retient pour le chien de garde."""
+    _cames_sur_plages(monkeypatch)
+    b, app = _banc_11s(monkeypatch, tmp_path)
+    app._arrets_debut = b.p.arrets
+    app._executer(app._test_vanne_3voies, {})
+    r = app.resultats["vanne_3voies"]
+    assert r["T1_0_vers_90_s"] == pytest.approx(24 / 90 * 11.0, abs=0.4)
+    assert r["T2_90_vers_0_s"] == pytest.approx(75 / 90 * 11.0, abs=0.4)
+    assert r["course_complete_estimee_s"] == pytest.approx(11.0, abs=0.5)
+    assert r["max_s"] == r["course_complete_estimee_s"]
+    assert "Course complète estimée ≈ 11" in app.etat["statut"]
+    app.appliquer()
+    assert b.p.t_vanne_3voies == pytest.approx(1.1 * r["max_s"], abs=0.1)
+
+
+def test_course_complete_sur_fins_de_course_franches(monkeypatch, tmp_path):
+    """Fins de course réglées en butée : l'estimation retombe sur la course
+    mesurée (à un cycle près), sans message."""
+    b, app = _banc_11s(monkeypatch, tmp_path)
+    app._arrets_debut = b.p.arrets
+    app._executer(app._test_vanne_3voies, {})
+    r = app.resultats["vanne_3voies"]
+    assert r["course_complete_estimee_s"] == pytest.approx(11.0, abs=0.5)
+    assert r["T1_0_vers_90_s"] == pytest.approx(11.0, abs=0.4)
+    assert "Course complète estimée" not in app.etat["statut"]
+
+
+def test_positionnement_attend_la_course_complete(monkeypatch, tmp_path):
+    """Les séquences qui positionnent un diaphragme mesuraient sur une
+    vanne encore à mi-course (90° lu dès ~24°)."""
+    _cames_sur_plages(monkeypatch)
+    b, app = _banc_11s(monkeypatch, tmp_path)
+    p = b.p
+    p.suspendre_maintien_tor()
+    app._arrets_debut = p.arrets
+    assert app._positionner_diaphragme("iso") is not None
+    assert b.sim._v3._angle == pytest.approx(0.0, abs=1.0)
+    assert app._positionner_diaphragme("miller") is not None
+    assert b.sim._v3._angle == pytest.approx(90.0, abs=1.0)
+
+
+@pytest.mark.parametrize("compensation", [True, False])
+def test_regulation_attend_la_butee_reelle(monkeypatch, tmp_path,
+                                           compensation):
+    """Bascule ISO -> Miller en régulation : avec la compensation, la
+    manœuvre ne se termine qu'au bout de la course complète (11 s), le
+    ventilateur restant à 0 V ; sans elle, la boucle reprenait vers 5 s,
+    vanne à mi-course."""
+    _cames_sur_plages(monkeypatch)
+    b, _ = _banc_11s(monkeypatch, tmp_path)
+    p = b.p
+    p.v3_course_complete = compensation
+    b.consigne(9000, "veine")                       # ISO
+    assert b.jusqu_a_convergence(200) is not None
+    b.consigne(1500, "veine")                       # -> Miller
+    t0, fin = b.t[0], None
+    while b.t[0] - t0 < 60.0:
+        b.cycles(p.periode, verifier=False)
+        # manœuvre de la vanne 3 voies seule (le bypass s'ouvre en même
+        # temps, avec sa propre course)
+        if "3voies" not in p._manoeuvres and fin is None \
+                and b.t[0] - t0 > 1.0:
+            fin = b.t[0] - t0
+            angle_a_la_fin = b.sim._v3._angle
+            break
+    assert fin is not None
+    if compensation:
+        assert fin >= 11.0 and angle_a_la_fin == pytest.approx(90.0, abs=1.0)
+        assert b.jusqu_a_convergence(150) is not None
+        assert not p.etat.get("arret_securite"), p.etat.get("arret_motif")
+    else:
+        assert fin < 8.0 and angle_a_la_fin < 80.0      # ancien comportement

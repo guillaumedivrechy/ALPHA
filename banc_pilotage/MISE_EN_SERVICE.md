@@ -98,6 +98,11 @@ Après « Appliquer » d'un Re mapping, le message indique les paliers écartés
 - [ ] Zéro capteurs → Appliquer.
 - [ ] Calibration recopie PdC → Appliquer (fermée ≈ 0 V, ouverte ≈ 10 V).
 - [ ] Vanne 3 voies, bypass, vanne PdC → Appliquer (chiens de garde).
+      Vanne 3 voies : lire la chronologie des fins de course affichée. Si
+      « Course complète estimée » apparaît (fins de course fermées avant les
+      butées, constaté sur ce banc), vérifier qu'elle est proche du
+      chronomètre ; la régulation attend alors cette course complète après
+      chaque manœuvre (`actionneurs.vanne_3voies_course_complete`).
 - [ ] Contrôle câblage E/S : « câblage conforme » (ou mapping ISO/Miller
       corrigé par Appliquer).
 - [ ] Re mapping Miller → Appliquer. Relever u_min : ______ V. **La valeur

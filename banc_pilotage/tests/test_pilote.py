@@ -186,8 +186,26 @@ def test_commander_diaphragme_reaffirme_en_position(pilote_stub):
     un relais retombé le priverait de sa résistance anti-condensation."""
     pilote, es = pilote_stub
     pilote.etat["mesures_brutes"] = {"fc_3voies_0": True}
+    pilote._diaphragme_commande = "0"            # ordre déjà en vigueur
     pilote.commander_diaphragme("iso")
     assert es.coil_diaphragme == [True]          # True = butée 0°
+    assert pilote._manoeuvre is None
+
+
+def test_commander_diaphragme_fin_de_course_sur_plage(pilote_stub):
+    """Fins de course sur plages (banc : 0° lu dès ~15°) : lue sur la cible
+    mais ordre CHANGÉ (ou inconnu), la vanne peut n'être qu'à mi-course ->
+    manœuvre, terminée seulement au bout de la course complète. Sans
+    l'option, ancien comportement (fin de course seule)."""
+    pilote, es = pilote_stub
+    pilote.etat["mesures_brutes"] = {"fc_3voies_0": True}
+    pilote._diaphragme_commande = "90"
+    pilote.commander_diaphragme("iso")
+    assert pilote._manoeuvre is not None
+    pilote._manoeuvres.clear()
+    pilote.v3_course_complete = False
+    pilote._diaphragme_commande = "90"
+    pilote.commander_diaphragme("iso")
     assert pilote._manoeuvre is None
 
 

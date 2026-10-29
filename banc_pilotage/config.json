@@ -56,12 +56,13 @@
     "hysteresis_re": 500.0
   },
   "actionneurs": {
-    "_commentaire": "Temps de course des vannes motorisees ER20, mesures par les apprentissages vanne_3voies / vanne_bypass / vanne_pdc (avec marge) et utilises comme chien de garde : defaut vanne si la fin de course n'arrive pas dans facteur_chien_garde x ce temps. Le delai global d'attente des vannes avant regulation en est derive. Ordres de grandeur constructeur : ER20 standard 11 s pour 90 deg, ER20 POSI (vanne perte de charge) 25 s. Valeurs livrees = valeurs constructeur (une course sous-estimee declenche un faux defaut vanne) ; les remplacer par les apprentissages vanne_3voies / vanne_bypass / vanne_pdc du banc. pdc_recopie_min_v / max_v : recopie de la PdC aux butees fermee / ouverte (apprentissage calibration_pdc).",
+    "_commentaire": "Temps de course des vannes motorisees ER20, mesures par les apprentissages vanne_3voies / vanne_bypass / vanne_pdc (avec marge) et utilises comme chien de garde : defaut vanne si la fin de course n'arrive pas dans facteur_chien_garde x ce temps. Le delai global d'attente des vannes avant regulation en est derive. Ordres de grandeur constructeur : ER20 standard 11 s pour 90 deg, ER20 POSI (vanne perte de charge) 25 s. Valeurs livrees = valeurs constructeur (une course sous-estimee declenche un faux defaut vanne) ; les remplacer par les apprentissages vanne_3voies / vanne_bypass / vanne_pdc du banc. pdc_recopie_min_v / max_v : recopie de la PdC aux butees fermee / ouverte (apprentissage calibration_pdc). vanne_3voies_course_complete : la vanne 3 voies n'est consideree en position qu'une fois sa fin de course lue ET sa course complete (vanne_3voies_temps_s) ecoulee depuis l'ordre ; ses fins de course sont fermees sur des plages (constate au banc : 90 deg lu des ~24 deg, 0 deg des ~15 deg), et la regulation reprenait sinon sur une vanne a mi-course. La course complete est estimee par l'apprentissage vanne_3voies a partir de la chronologie des fins de course. false = fin de course seule (contacts regles en butee).",
     "vanne_3voies_temps_s": 11.0,
     "vanne_bypass_temps_s": 11.0,
     "vanne_perte_charge_course_s": 25.0,
     "marge_apres_manoeuvre_s": 2.0,
     "facteur_chien_garde": 1.5,
+    "vanne_3voies_course_complete": true,
     "pdc_recopie_min_v": 2.389,
     "pdc_recopie_max_v": 9.153
   },

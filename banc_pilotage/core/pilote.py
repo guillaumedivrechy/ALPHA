@@ -467,6 +467,12 @@ class Pilote:
         self.t_vanne_pdc_course = act.get("vanne_perte_charge_course_s", 25.0)
         self.marge_manoeuvre = act.get("marge_apres_manoeuvre_s", 2.0)
         self.facteur_chien_garde = act.get("facteur_chien_garde", 1.5)
+        # vanne 3 voies en position seulement fin de course atteinte ET
+        # course complète écoulée depuis l'ordre : ses fins de course sont
+        # fermées sur des plages (constaté au banc : 90° lu dès ~24°, 0° dès
+        # ~15°), la boucle reprenait sinon sur une vanne à mi-course
+        self.v3_course_complete = bool(
+            act.get("vanne_3voies_course_complete", True))
 
         # quel diaphragme est alimenté à chaque butée de la vanne 3 voies.
         # La position 180° n'est pas commandée : le constructeur ne la définit
@@ -1083,6 +1089,8 @@ class Pilote:
                                            self.marge_manoeuvre)
             self.facteur_chien_garde = act.get("facteur_chien_garde",
                                                self.facteur_chien_garde)
+            self.v3_course_complete = bool(act.get(
+                "vanne_3voies_course_complete", self.v3_course_complete))
             self.pdc_recopie_min = act.get("pdc_recopie_min_v",
                                            self.pdc_recopie_min)
             self.pdc_recopie_max = act.get("pdc_recopie_max_v",
@@ -1216,12 +1224,17 @@ class Pilote:
         angle = self._angle_par_diaphragme.get(position)
         if angle is None:
             raise ValueError(f"position de vanne 3 voies inconnue : {position}")
+        deja_commandee = self._diaphragme_commande == angle
         self._diaphragme_commande = angle
         self.es.ecrire_vanne_diaphragme(angle == "0")
         self.etat["diaphragme"] = position
         mesures = self.etat.get("mesures_brutes") or {}
-        if self._angle_vanne_3voies(mesures) == angle:
-            return                              # déjà en position
+        # déjà en position : fin de course lue sur la cible, et (fins de
+        # course sur plages) ordre inchangé — sinon la vanne peut n'être qu'à
+        # mi-course, sa fin de course déjà fermée
+        if self._angle_vanne_3voies(mesures) == angle and (
+                deja_commandee or not self.v3_course_complete):
+            return
         self._demarrer_manoeuvre(
             motif=f"vanne 3 voies → {position}",
             t_course=self.t_vanne_3voies, angle_attendu=angle)
@@ -2003,6 +2016,10 @@ class Pilote:
             if m["angle_attendu"] is not None:
                 atteinte = (self._angle_vanne_3voies(mesures)
                             == m["angle_attendu"])
+                if atteinte and self.v3_course_complete:
+                    # fin de course sur plage : la butée n'est sûre qu'au
+                    # bout de la course complète depuis l'ordre
+                    atteinte = maintenant - m["t_debut"] >= m["t_course"]
             else:
                 atteinte = bool(mesures.get(m["fc_attendue"], False))
             if atteinte:

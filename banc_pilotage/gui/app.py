@@ -802,7 +802,10 @@ class Application(QMainWindow):
         # positions_vanne_3voies (la butée Miller n'est pas toujours 90°)
         etat = self.pilote.etat
         brutes = etat.get("mesures_brutes") or {}
-        miller_ok = etat.get("diaphragme_lu") == "miller"
+        # fins de course sur plages : la butée n'est sûre qu'à la fin de la
+        # manœuvre (course complète), pas dès la fin de course lue
+        miller_ok = (etat.get("diaphragme_lu") == "miller"
+                     and "3voies" not in self.pilote._manoeuvres)
         bypass_ok = bool(brutes.get("fc_bypass_ouvert"))
         pdc_ok = bool(brutes.get("fc_pdc_ouvert"))
 
@@ -2702,7 +2705,9 @@ class Application(QMainWindow):
             None,
             ("▶  3. Vanne 3 voies", "vanne_3voies",
              lambda r: (f"T1={r['T1_0_vers_90_s']} s  "
-                        f"T2={r['T2_90_vers_0_s']} s")),
+                        f"T2={r['T2_90_vers_0_s']} s"
+                        + (f"  course ≈ {r['course_complete_estimee_s']} s"
+                           if r.get('course_complete_estimee_s') else ""))),
             ("▶  4. Vanne bypass", "vanne_bypass",
              lambda r: f"T1={r['ouverture_s']} s  T2={r['fermeture_s']} s"),
             ("▶  5. Vanne perte de charge", "vanne_pdc",
