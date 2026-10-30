@@ -179,3 +179,53 @@ Un message suivi de « — rétabli » signifie que le problème a disparu.
   Configuration, par le responsable du banc.
 - **Avant de mesurer**, attendre **RÉGULÉ ✓** : c'est la garantie que le Re
   est stable autour de la consigne.
+
+---
+
+## 10. L'onglet Configuration
+
+Il regroupe les paramètres du calcul et du pilotage (enregistrés dans
+`config.json`). **Les valeurs sont verrouillées par défaut**, pour éviter
+une modification par erreur.
+
+### Modifier une valeur
+
+1. **Arrêter la régulation** (ARRÊT VARIATEUR) : on ne peut pas modifier les
+   paramètres pendant qu'elle tourne.
+2. Cocher **« Déverrouiller les paramètres »** : les champs deviennent
+   modifiables.
+3. Changer la ou les valeurs (virgule ou point décimal acceptés).
+4. Cliquer sur **💾 Enregistrer**, puis confirmer.
+   - Une valeur incohérente est refusée avec un message qui explique
+     pourquoi ; rien n'est enregistré.
+   - Sinon : « ✓ configuration enregistrée et appliquée ». La modification
+     agit **tout de suite**, sans redémarrer le logiciel, et l'onglet se
+     reverrouille.
+5. **↺ Annuler** remet les valeurs affichées avant modification.
+
+Les valeurs en texte simple (non modifiables), comme la section S et le
+diamètre hydraulique Dh, sont calculées automatiquement.
+
+### Ce que l'opérateur peut régler
+
+| Carte | Réglage | Quand y toucher |
+|---|---|---|
+| **Fluide** | Pression atmosphérique [Pa] | en début de journée d'essais : saisir la pression **absolue du local** lue au baromètre (pas la pression « ramenée au niveau de la mer » des bulletins météo). 10 hPa d'écart ≈ 0,5 % d'erreur sur le Re. |
+| **Fluide** | Humidité relative [%] | si l'on veut tenir compte de l'humidité de l'air (0 = air sec) |
+| **Température de l'air** | Offset PT100 (+ ou −) | si la sonde PT100 s'écarte d'un thermomètre de référence : saisir la correction (ex. −0,4 °C). 0 par défaut. |
+| **Température de l'air** | Température saisie + case « Utiliser la température saisie » | si la sonde est absente ou douteuse : cocher la case et saisir la température. Décochée = sonde en temps réel. |
+| **Bascule ISO / Miller** | Seuil et hystérésis (en Re conduite) | pour déplacer le passage entre les deux diaphragmes. Le titre de la carte rappelle les équivalents en Re veine. |
+
+La carte **Caractéristiques de l'air (temps réel)** affiche, sans rien
+modifier, la température utilisée et les propriétés de l'air qui en
+découlent (ρ, μ, ν).
+
+### Ce qui est réservé au responsable du banc
+
+Géométries (veine, diaphragmes ISO et Miller), coefficients de viscosité,
+réglages de régulation, de surveillance, du très bas Re et des temps de
+course des vannes. Ces valeurs viennent de la mise en service et des
+apprentissages : **une mauvaise valeur fausse le Re ou la régulation**.
+Une valeur marquée « à ajuster » est une valeur d'usine jamais mesurée sur
+le banc. La communication Modbus (adresse IP, port) se modifie dans
+`config.json`, puis en redémarrant le logiciel.
