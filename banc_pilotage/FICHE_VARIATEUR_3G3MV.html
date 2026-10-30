@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Variateur 3G3MV — commande manuelle / coffret Wago</title>
+<style>
+  @page { size: A4; margin: 9mm 11mm; }
+  * { box-sizing: border-box; }
+  body { font-family: "Segoe UI", Arial, sans-serif; font-size: 9pt;
+         color: #14223C; line-height: 1.27; margin: 0; }
+  h1 { font-size: 15pt; margin: 0 0 1mm 0; color: #0E1A2C; }
+  .sous { color: #5B6B7A; margin: 0 0 3mm 0; font-size: 9pt; }
+  h2 { font-size: 10.3pt; margin: 2.6mm 0 1.2mm 0; padding: 1mm 2mm;
+       background: #E3F4FB; border-left: 3mm solid #00B8DE; }
+  table { width: 100%; border-collapse: collapse; margin: 0.6mm 0; }
+  th, td { border: 0.25mm solid #C9D6DE; padding: 0.7mm 1.5mm; vertical-align: top; }
+  th { background: #F2F6F8; text-align: left; font-weight: 600; }
+  td.p { font-family: Consolas, monospace; font-weight: 700; white-space: nowrap; }
+  ol, ul { margin: 0.6mm 0 0.6mm 5mm; padding: 0; }
+  li { margin: 0.4mm 0; }
+  .alerte { border: 0.5mm solid #DC3535; background: #FDECEC; padding: 1.6mm 2.4mm;
+            margin: 2mm 0; }
+  .note { color: #5B6B7A; font-size: 8.2pt; margin-top: 2mm; }
+  .deux { display: flex; gap: 3mm; }
+  .deux > div { flex: 1; border: 0.25mm solid #C9D6DE; padding: 1.4mm 2.2mm; }
+  .deux h3 { margin: 0 0 1mm 0; font-size: 9.8pt; }
+  b.lo { color: #B85C00; } b.re { color: #1F8F5B; }
+  kbd { font-family: Consolas, monospace; border: 0.25mm solid #8A99A6;
+        border-radius: 1mm; padding: 0 1mm; background: #F7F9FA; font-size: 8.6pt; }
+</style>
+</head>
+<body>
+
+<h1>Variateur Omron 3G3MV — passer de la commande manuelle à la commande par le coffret Wago</h1>
+<p class="sous">Banc aéraulique — ventilateur piloté par le logiciel via le coupleur Wago 750-362.
+Fiche à afficher près du variateur.</p>
+
+<div class="deux">
+  <div>
+    <h3><b class="lo">LOCAL (« Lo »)</b> — commande manuelle autonome</h3>
+    Marche/arrêt par les touches <kbd>RUN</kbd> / <kbd>STOP</kbd> du variateur ;
+    vitesse par le potentiomètre <b>FREQ</b> du variateur.<br>
+    <b>Le logiciel ne commande plus rien</b> (ni marche, ni vitesse, ni ARRÊT).
+  </div>
+  <div>
+    <h3><b class="re">DISTANT (« rE »)</b> — commande par le coffret Wago</h3>
+    Marche/arrêt par le relais du coffret sur la borne <b>S1</b> ;
+    vitesse par la tension 0-10 V du coffret sur la borne <b>FR</b>.<br>
+    C'est le mode <b>obligatoire pour utiliser le logiciel</b>.
+  </div>
+</div>
+
+<div class="alerte">⚠ <b>Toujours changer de mode ventilateur ARRÊTÉ</b> : bouton
+« ✕ ARRÊT VARIATEUR » du logiciel, ou <kbd>STOP</kbd> du variateur, puis attendre
+l'arrêt complet du moteur. En mode LOCAL, l'arrêt d'urgence du logiciel est
+<b>sans effet</b> : arrêter au clavier du variateur.</div>
+
+<h2>1. Réglages à faire une seule fois (mise en service)</h2>
+<table>
+  <tr><th style="width:13%">Paramètre</th><th style="width:15%">Valeur</th><th>Rôle</th></tr>
+  <tr><td class="p">n003</td><td class="p">1</td><td>Ordre de marche en mode distant par les <b>bornes</b> (S1). 0 = touches du variateur.</td></tr>
+  <tr><td class="p">n004</td><td class="p">2</td><td>Consigne de vitesse en mode distant par la <b>borne FR, 0-10 V</b>. 0 = potentiomètre FREQ.</td></tr>
+  <tr><td class="p">n011</td><td class="p">50,0 Hz</td><td>Fréquence maximale = fréquence atteinte à 10 V (moteur 50 Hz ; réglage usine 60,0).</td></tr>
+  <tr><td class="p">n060 / n061</td><td class="p">100 % / 0 %</td><td>Gain / décalage de l'entrée FR (valeurs usine) : 5 V = 25 Hz.</td></tr>
+  <tr><td class="p">n065 / n066</td><td class="p">0 / 0</td><td>Sortie AM = image 0-10 V de la fréquence de sortie (lue par le coffret).</td></tr>
+  <tr><td class="p">n019 / n020</td><td class="p">≈ 10 s</td><td>Temps d'accélération / de décélération 1 (rampes du moteur).</td></tr>
+  <tr><td class="p">SW1</td><td class="p">NPN</td><td>Commutateur de logique des entrées (S1 commandée par contact sec du coffret, S1-SC).</td></tr>
+</table>
+Si un paramètre refuse la modification : vérifier sa protection en écriture (paramètre <b>n001</b>, voir la notice).
+
+<h2>2. Passer en commande par le coffret Wago (mode DISTANT)</h2>
+<ol>
+  <li>Ventilateur arrêté (<kbd>STOP</kbd>), moteur immobile.</li>
+  <li>Faire défiler les voyants de fonction du variateur (touche de mode) jusqu'au voyant <b>LO/RE</b>.</li>
+  <li>Choisir <b class="re">rE</b> avec <kbd>▲</kbd> / <kbd>▼</kbd>, puis valider (touche <kbd>ENTER</kbd>).</li>
+  <li>Revenir à l'affichage de la fréquence (voyant <b>FOUT</b>).</li>
+  <li>Dans le logiciel : mode <b>Manuel</b>, tension <b>2 V</b>, <b>APPLIQUER</b> → le moteur démarre et
+      monte à ≈ <b>10 Hz</b> (2 V × 50 Hz / 10 V). Puis <b>ARRÊT VARIATEUR</b> → le moteur s'arrête.</li>
+</ol>
+
+<h2>3. Revenir en commande manuelle autonome (mode LOCAL)</h2>
+<ol>
+  <li>Dans le logiciel : <b>ARRÊT VARIATEUR</b> (ou fermer le logiciel avec <b>QUITTER</b>).</li>
+  <li>Variateur : voyant <b>LO/RE</b> → choisir <b class="lo">Lo</b> → valider.</li>
+  <li>Régler la vitesse au potentiomètre <b>FREQ</b>, démarrer par <kbd>RUN</kbd>, arrêter par <kbd>STOP</kbd>.</li>
+</ol>
+
+<h2>4. Si ça ne marche pas</h2>
+<table>
+  <tr><th style="width:36%">Constat</th><th>Cause probable → action</th></tr>
+  <tr><td>Le logiciel commande, le moteur ne démarre pas</td><td>Variateur resté en <b class="lo">Lo</b> → passer en <b class="re">rE</b>. Sinon vérifier n003 = 1, le fil S1-SC, SW1.</td></tr>
+  <tr><td>Le moteur démarre mais ne suit pas la consigne</td><td>n004 ≠ 2 (vitesse prise au potentiomètre) → n004 = 2. Vérifier le fil FR-FC.</td></tr>
+  <tr><td>Vitesse plus élevée que prévu (2 V → 12 Hz)</td><td>n011 resté à 60 Hz → n011 = 50,0.</td></tr>
+  <tr><td>Code de défaut affiché, bandeau rouge dans le logiciel</td><td>Lire le code (notice), supprimer la cause, <kbd>STOP/RESET</kbd> du variateur, puis « Acquitter » dans le logiciel.</td></tr>
+</table>
+
+<p class="note">Intitulés des touches et options exactes : notice Omron 3G3MV (I527). Câblage du coffret :
+S1-SC = relais RUN (coil 3), FR-FC = sortie analogique AO 2, AM-AC = entrée AI 5, MA/MB/MC = report de défaut (DI 8).</p>
+
+</body>
+</html>

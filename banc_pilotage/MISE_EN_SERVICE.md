@@ -18,10 +18,16 @@ n'est pas entièrement cochée. Noter les valeurs relevées dans la marge.
 
 - [ ] Arrêt d'urgence physique : coupe bien le moteur, indépendamment du PC.
 - [ ] Variateur 3G3MV : référence de fréquence par la borne FR (n004 = 2),
-      marche par S1 (n003 = 1), fréquence max 50,0 Hz (n011).
-- [ ] Temps d'accélération / décélération du 3G3MV (n016 / n017) : 10 s
-      (réglage usine) au plus. Plus lent, la régulation dépasse la
-      consigne (≈ 9 % en simulation avec 20 s). Valeur relevée : ______ s.
+      marche par S1 (n003 = 1), fréquence max 50,0 Hz (n011), et mode
+      DISTANT (« rE ») sélectionné au clavier. Procédure pas à pas :
+      `FICHE_VARIATEUR_3G3MV.pdf`.
+- [ ] Temps d'accélération / décélération 1 du 3G3MV (n019 / n020, à
+      confirmer sur la notice I527) : 10 s (réglage usine) au plus. Plus
+      lent, la régulation dépasse la consigne (≈ 9 % en simulation avec
+      20 s). Valeur relevée : ______ s. ⚠ Cette ligne indiquait auparavant
+      n016 / n017 : sur le 3G3MV ce sont a priori la fréquence et la tension
+      minimales du profil V/f ; s'ils ont été mis à 10, les remettre aux
+      valeurs usine.
 - [ ] **Watchdog Modbus du coupleur 750-362 activé** (doc WAGO du coupleur) :
       sur perte de liaison, les sorties doivent retomber (référence 0 V, RUN
       ouvert). Indispensable : le logiciel ne peut plus rien écrire quand la
