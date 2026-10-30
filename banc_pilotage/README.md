@@ -4,6 +4,10 @@ Pilotage automatique du variateur de la soufflerie pour atteindre un nombre
 de Reynolds cible, à partir des capteurs du banc (FCO432, PT100), via un
 coupleur **Wago 750-362 (Modbus TCP)**.
 
+> **Opérateurs** : la notice d'utilisation simplifiée est dans
+> [`NOTICE_UTILISATION.md`](NOTICE_UTILISATION.md). La mise en service et
+> les apprentissages sont décrits dans `MISE_EN_SERVICE.md`.
+
 Remplace l'usage manuel des deux classeurs Excel :
 - `Calcul_diaphragme_ISO_V12` (NFX 10-102 / ISO 5167-1, Re > 5000)
 - `Calcul_diaphragme_Miller_V1-13` (corrélation Miller, Re < 5000)
