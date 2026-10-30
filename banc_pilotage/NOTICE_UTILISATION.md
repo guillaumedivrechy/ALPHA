@@ -215,6 +215,17 @@ diamètre hydraulique Dh, sont calculées automatiquement.
 | **Température de l'air** | Offset PT100 (+ ou −) | si la sonde PT100 s'écarte d'un thermomètre de référence : saisir la correction (ex. −0,4 °C). 0 par défaut. |
 | **Température de l'air** | Température saisie + case « Utiliser la température saisie » | si la sonde est absente ou douteuse : cocher la case et saisir la température. Décochée = sonde en temps réel. |
 | **Bascule ISO / Miller** | Seuil et hystérésis (en Re conduite) | pour déplacer le passage entre les deux diaphragmes. Le titre de la carte rappelle les équivalents en Re veine. |
+| ⚠ **Géométrie veine d'essai** | Hauteur H et largeur W [m] (la section S et le diamètre hydraulique Dh en sont déduits) | après une mesure de la veine (ou un changement de veine). Le Re veine ne dépend que du périmètre 2 × (H + W) : 1 % d'erreur sur H + W = 1 % d'erreur sur le Re veine. Sans effet sur le Re conduite. |
+| ⚠ **Diaphragme ISO 5167** et **Diaphragme Miller** | d orifice [mm] | uniquement d'après la cote mesurée ou le certificat du diaphragme. Paramètre le plus sensible : 1 % d'erreur sur d ≈ 2 % d'erreur sur le débit et le Re. |
+| ⚠ **Diaphragme ISO 5167** et **Diaphragme Miller** | D conduite [mm] | d'après la cote mesurée de la conduite. Intervient dans le rapport d/D et dans le Re conduite (1 % sur D ≈ 1 % sur le Re conduite). |
+| ⚠ **Diaphragme ISO 5167** et **Diaphragme Miller** | α conduite, α diaphragme [1/°C] | selon le matériau (acier, inox, alu…). Effet très faible : corrige seulement la dilatation des diamètres quand la température s'écarte de 20 °C. |
+| ⚠ **Viscosité dynamique (Sutherland)** | μ référence, T référence, constante S | ne pas modifier sans référence bibliographique : ce sont les constantes de l'air. Le Re est inversement proportionnel à μ : 1 % sur μ = 1 % sur le Re. Ignorés si l'humidité relative est supérieure à 0 (formules de l'air humide). |
+| ⚠ **Fluide** | γ (rapport Cp/Cv) | constante de l'air (≈ 1,40) : ne pas modifier. Effet très faible (correction de détente dans le diaphragme). |
+
+Les lignes marquées ⚠ agissent **directement sur le résultat** (débit,
+Reynolds) : toute erreur se reporte sur tous les essais suivants. Ne les
+modifier que sur la base d'une mesure ou d'un certificat, et noter la date
+et la raison du changement (par exemple dans le cahier d'essais).
 
 La carte **Caractéristiques de l'air (temps réel)** affiche, sans rien
 modifier, la température utilisée et les propriétés de l'air qui en
@@ -222,10 +233,9 @@ découlent (ρ, μ, ν).
 
 ### Ce qui est réservé au responsable du banc
 
-Géométries (veine, diaphragmes ISO et Miller), coefficients de viscosité,
-réglages de régulation, de surveillance, du très bas Re et des temps de
+Réglages de régulation, de surveillance, du très bas Re et des temps de
 course des vannes. Ces valeurs viennent de la mise en service et des
-apprentissages : **une mauvaise valeur fausse le Re ou la régulation**.
-Une valeur marquée « à ajuster » est une valeur d'usine jamais mesurée sur
-le banc. La communication Modbus (adresse IP, port) se modifie dans
-`config.json`, puis en redémarrant le logiciel.
+apprentissages : **une mauvaise valeur dégrade la régulation ou déclenche
+de faux défauts**. Une valeur marquée « à ajuster » est une valeur d'usine
+jamais mesurée sur le banc. La communication Modbus (adresse IP, port) se
+modifie dans `config.json`, puis en redémarrant le logiciel.
