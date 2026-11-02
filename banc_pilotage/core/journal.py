@@ -149,10 +149,13 @@ class JournalEssai:
 
     def enregistrer(self, etat: dict, t_monotonic: float,
                     zero_capteurs: dict | None = None,
-                    humidite_relative: float | None = None) -> None:
+                    humidite_relative: float | None = None,
+                    recopie_pdc: tuple[float, float] | None = None) -> None:
         """Écrit une ligne si la période est écoulée. Silencieux sinon.
         zero_capteurs : zéros appris, ôtés des ΔP bruts des deux capteurs ;
-        humidite_relative : humidité de la configuration [%]."""
+        humidite_relative : humidité de la configuration [%] ;
+        recopie_pdc : tensions de recopie de la vanne PdC fermée / ouverte
+        (apprentissage « calibration PdC »)."""
         if self._f is None:
             return
         # tolérance de 10 % : la boucle tourne à la même période que le
@@ -175,12 +178,18 @@ class JournalEssai:
                           ("dp_miller", "dp_diaph_500")):
             v = brutes.get(voie)
             valeurs[cle] = None if v is None else v - zero.get(voie, 0.0)
-        # vanne de perte de charge : commande 0-10 V (0 = fermée) et
-        # fermeture correspondante, comme le champ de l'IHM
-        pdc = etat.get("pdc_consigne")
+        # vanne de perte de charge : tension de RECOPIE (position réelle),
+        # sur l'échelle apprise par la calibration (fermée -> ouverte), et
+        # fermeture entre ces deux bornes. Sans recopie lue, la commande
+        # 0-10 V est reportée sur cette même échelle.
+        v_ferme, v_ouvert = recopie_pdc or (0.0, 10.0)
+        plage = v_ouvert - v_ferme
+        pdc = brutes.get("pdc_recopie")
+        if pdc is None and etat.get("pdc_consigne") is not None:
+            pdc = v_ferme + etat["pdc_consigne"] / 10.0 * plage
         valeurs["pdc_v"] = pdc
-        valeurs["pdc_fermeture_pct"] = None if pdc is None \
-            else round(100.0 - 10.0 * pdc, 1)
+        valeurs["pdc_fermeture_pct"] = None if pdc is None or plage <= 0 \
+            else round(min(max((v_ouvert - pdc) / plage * 100.0, 0.0), 100.0), 1)
         # vanne 3 voies : 1 sur la butée lue de ce diaphragme ; 0 et 0 en
         # course
         lu = etat.get("diaphragme_lu")

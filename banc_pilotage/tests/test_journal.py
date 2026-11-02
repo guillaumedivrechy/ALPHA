@@ -75,16 +75,19 @@ def test_format_demande_par_l_exploitation(tmp_path):
         "T [degC]", "source T", "H [%HR]", "Defaut"]
     j = JournalEssai(tmp_path, periode_s=0.0)
     j.ouvrir(100.0)
-    j.enregistrer(_etat(pdc_consigne=7.5), 100.4,
+    brutes = {"dp_iso_500": 204.45, "dp_diaph_500": 0.12, "pdc_recopie": 7.462}
+    j.enregistrer(_etat(mesures_brutes=brutes, pdc_consigne=7.5), 100.4,
                   zero_capteurs={"dp_iso_500": 0.3, "dp_diaph_500": 0.1},
-                  humidite_relative=50.0)
+                  humidite_relative=50.0, recopie_pdc=(2.389, 9.153))
     j.fermer()
     entete, ligne = (l.split(";") for l in
                      j.chemin.read_text(encoding="utf-8-sig").splitlines())
     c = dict(zip(entete, ligne))
     assert c["dP ISO [Pa]"] == "204,15"          # 204,45 − 0,3
     assert c["dP Miller [Pa]"] == "0,02"         # 0,12 − 0,1
-    assert c["Vanne PDC [V]"] == "7,5"
+    # recopie mesurée, sur l'échelle apprise (2,389 V fermée, 9,153 V
+    # ouverte) : (9,153 − 7,462) / 6,764 = 25 % de fermeture
+    assert c["Vanne PDC [V]"] == "7,462"
     assert c["Vanne PDC [% ferm]"] == "25"
     assert c["H [%HR]"] == "50"
     assert c["t [s]"] == "0,4"
@@ -303,3 +306,19 @@ def test_mesures_vides_pendant_la_course_de_la_vanne_3_voies(tmp_path):
     assert c["Vanne ISO"] == "0" and c["Vanne Miller"] == "0"
     assert c["Re consigne"] == "6000"
     assert a["Re calculé"] == "5987" and a["Vanne Miller"] == "1"
+
+
+def test_vanne_pdc_sans_recopie_sur_l_echelle_apprise(tmp_path):
+    """Recopie non lue : la commande 0-10 V est reportée sur l'échelle de
+    la calibration, pas écrite telle quelle (0 et 10 V)."""
+    j = JournalEssai(tmp_path, periode_s=0.0)
+    j.ouvrir(0.0)
+    for commande in (10.0, 0.0):
+        j.enregistrer(_etat(pdc_consigne=commande), 0.0,
+                      recopie_pdc=(2.389, 9.153))
+    j.fermer()
+    entete, ouverte, fermee = (l.split(";") for l in
+                               j.chemin.read_text(encoding="utf-8-sig").splitlines())
+    o, f = dict(zip(entete, ouverte)), dict(zip(entete, fermee))
+    assert o["Vanne PDC [V]"] == "9,153" and o["Vanne PDC [% ferm]"] == "0"
+    assert f["Vanne PDC [V]"] == "2,389" and f["Vanne PDC [% ferm]"] == "100"

@@ -174,7 +174,7 @@ Un message suivi de « — rétabli » signifie que le problème a disparu.
   fichier CSV du dossier `journaux` (un fichier par session, nom affiché
   dans le bandeau du bas). Colonnes : horodatage ; t [s] ; Re consigne ;
   Re calculé ; Convergence (1 = RÉGULÉ ✓) ; phase regulation ; Qv ; ρ ; µ ;
-  ν ; dP ISO ; dP Miller ; P Amont ; Vanne PDC [V] et [% ferm] ; Vanne ISO /
+  ν ; dP ISO ; dP Miller ; P Amont ; Vanne PDC [V] (tension de recopie, position réelle, sur l'échelle de la calibration) et [% ferm] ; Vanne ISO /
   Vanne Miller (1 = en butée, 0 et 0 = en course) ; T ; source T ; H [%HR] ;
   Defaut. Les Reynolds sont dans la référence choisie (Veine ou Conduite).
   Il s'ouvre directement dans Excel.

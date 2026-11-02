@@ -1505,7 +1505,9 @@ class Pilote:
                         self.journal.enregistrer(
                             self.etat, time.monotonic(),
                             zero_capteurs=self.zero_capteurs,
-                            humidite_relative=self.banc.fluide.humidite_relative)
+                            humidite_relative=self.banc.fluide.humidite_relative,
+                            recopie_pdc=(self.pdc_recopie_min,
+                                         self.pdc_recopie_max))
                     except Exception:  # noqa: BLE001
                         # Erreur d'écriture journal : jamais au détriment de
                         # la boucle (hors du try du cycle, une exception ici
