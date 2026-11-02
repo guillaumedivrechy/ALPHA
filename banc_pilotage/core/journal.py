@@ -19,39 +19,35 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-# colonne interne -> en-tête CSV. L'ordre fixe l'ordre des colonnes.
+# colonne interne -> en-tête CSV. L'ordre fixe l'ordre des colonnes
+# (format demandé par l'exploitation, 2026-11-02).
 COLONNES = [
     ("horodatage", "horodatage"),
     ("t_s", "t [s]"),
     ("re_cible", "Re consigne"),
     ("re_mesure", "Re calculé"),
-    ("re_vise", "Re consigne visée (bornée)"),
-    ("re_conduite", "Re conduite"),
-    ("re_moyen", "Re moyen"),
-    ("re_ecart_type", "Re ecart-type"),
-    ("convergee", "convergee"),
-    ("dp", "dP [Pa]"),
+    ("convergee", "Convergence"),
+    ("phase_regulation", "phase regulation"),
+    ("qv", "Qv [m3/s]"),
+    ("rho", "ρ [kg/m3]"),
+    ("mu", "µ [Pa.s]"),
+    ("nu", "ν [m2/s]"),
+    ("dp_iso", "dP ISO [Pa]"),
+    ("dp_miller", "dP Miller [Pa]"),
+    ("p_amont", "P Amont [Pa]"),
+    ("pdc_v", "Vanne PDC [V]"),
+    ("pdc_fermeture_pct", "Vanne PDC [% ferm]"),
+    ("vanne_iso", "Vanne ISO"),
+    ("vanne_miller", "Vanne Miller"),
     ("temperature", "T [degC]"),
     ("temperature_source", "source T"),
-    ("p_amont", "P amont [Pa]"),
-    ("rho", "rho [kg/m3]"),
-    ("qm", "qm [kg/s]"),
-    ("u_variateur", "U variateur [V]"),
-    ("u_recopie_am", "U recopie AM variateur [V]"),
-    ("phase_regulation", "phase regulation"),
-    ("u_ff", "U feed-forward table [V]"),
-    ("integrale_v", "correction integrale [V]"),
-    ("pdc_position", "vanne PdC [V]"),
-    ("diaphragme", "diaphragme"),
-    ("reference", "reference"),
-    ("mode_bas_re", "bas-Re"),
-    ("dp_sature", "dP sature"),
-    ("defauts", "defauts"),
+    ("humidite_relative", "H [%HR]"),
+    ("defauts", "Defaut"),
 ]
 
-# grandeurs déduites du ΔP : sans objet pendant la course de la vanne 3 voies
-_MESURES_DEBIT = ("re_mesure", "re_conduite", "re_moyen", "re_ecart_type",
-                  "dp", "qm")
+# grandeurs déduites du débit : sans objet pendant la course de la vanne
+# 3 voies (le débit passe par les deux voies, aucun capteur ne le mesure)
+_MESURES_DEBIT = ("re_mesure", "qv")
 
 # drapeaux de défaut recopiés dans la colonne « defauts »
 _DEFAUTS = ("erreur_com", "defaut_capteur", "defaut_vanne",
@@ -63,10 +59,7 @@ _DEFAUTS = ("erreur_com", "defaut_capteur", "defaut_vanne",
 # dépouillement. L'écart-type en fait partie, il s'exprime dans la même unité.
 # L'arrondi est une pure mise en forme : l'état du pilote et la boucle
 # continuent de travailler en flottant.
-COLONNES_ENTIERES = frozenset((
-    "re_cible", "re_mesure", "re_vise", "re_conduite", "re_moyen",
-    "re_ecart_type",
-))
+COLONNES_ENTIERES = frozenset(("re_cible", "re_mesure"))
 
 
 def _fmt(valeur, entier: bool = False) -> str:
@@ -154,12 +147,19 @@ class JournalEssai:
 
     # ----- écriture -------------------------------------------------------
 
-    def enregistrer(self, etat: dict, t_monotonic: float) -> None:
-        """Écrit une ligne si la période est écoulée. Silencieux sinon."""
+    def enregistrer(self, etat: dict, t_monotonic: float,
+                    zero_capteurs: dict | None = None,
+                    humidite_relative: float | None = None) -> None:
+        """Écrit une ligne si la période est écoulée. Silencieux sinon.
+        zero_capteurs : zéros appris, ôtés des ΔP bruts des deux capteurs ;
+        humidite_relative : humidité de la configuration [%]."""
         if self._f is None:
             return
+        # tolérance de 10 % : la boucle tourne à la même période que le
+        # journal (0,2 s) ; un cycle arrivé à 0,199 s aurait sinon été sauté,
+        # une ligne sur deux
         if self._t_derniere is not None \
-                and t_monotonic - self._t_derniere < self.periode:
+                and t_monotonic - self._t_derniere < 0.9 * self.periode:
             return
         self._t_derniere = t_monotonic
 
@@ -167,22 +167,35 @@ class JournalEssai:
             str(etat[c]) if isinstance(etat.get(c), str) else c
             for c in _DEFAUTS if etat.get(c))
         valeurs = dict(etat)
-        # recopie AM du 3G3MV : montre si le variateur suit la commande
-        # (rampe interne d'accélération), cf. phase « suivi variateur »
-        valeurs["u_recopie_am"] = (etat.get("mesures_brutes") or {}).get(
-            "frequence_variateur")
-        # diaphragme dont le capteur ΔP est exploité (butée lue)
-        valeurs["diaphragme"] = etat.get("diaphragme_mesure",
-                                         etat.get("diaphragme"))
-        if etat.get("diaphragme_lu") == "en_transit":
-            # vanne 3 voies en course : le débit passe par les deux voies,
-            # aucun capteur ne le mesure — pas de valeur plutôt qu'une fausse
+        brutes = etat.get("mesures_brutes") or {}
+        zero = zero_capteurs or {}
+        # les deux capteurs ΔP, corrigés de leur zéro (celui du diaphragme
+        # hors ligne lit ~0)
+        for cle, voie in (("dp_iso", "dp_iso_500"),
+                          ("dp_miller", "dp_diaph_500")):
+            v = brutes.get(voie)
+            valeurs[cle] = None if v is None else v - zero.get(voie, 0.0)
+        # vanne de perte de charge : commande 0-10 V (0 = fermée) et
+        # fermeture correspondante, comme le champ de l'IHM
+        pdc = etat.get("pdc_consigne")
+        valeurs["pdc_v"] = pdc
+        valeurs["pdc_fermeture_pct"] = None if pdc is None \
+            else round(100.0 - 10.0 * pdc, 1)
+        # vanne 3 voies : 1 sur la butée lue de ce diaphragme ; 0 et 0 en
+        # course
+        lu = etat.get("diaphragme_lu")
+        valeurs["vanne_iso"] = lu == "iso"
+        valeurs["vanne_miller"] = lu == "miller"
+        valeurs["humidite_relative"] = humidite_relative
+        if lu == "en_transit":
+            # vanne 3 voies en course : pas de valeur plutôt qu'une fausse
             # (l'IHM affiche « en cours »)
             for cle in _MESURES_DEBIT:
                 valeurs[cle] = None
-            valeurs["diaphragme"] = "en cours"
-        valeurs["horodatage"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        valeurs["t_s"] = round(t_monotonic - (self._t0 or t_monotonic), 1)
+        maintenant = datetime.now()
+        valeurs["horodatage"] = maintenant.strftime("%Y-%m-%d %H:%M:%S.") \
+            + f"{maintenant.microsecond // 1000:03d}"
+        valeurs["t_s"] = round(t_monotonic - (self._t0 or t_monotonic), 2)
         valeurs["defauts"] = defauts
         try:
             self._f.write(

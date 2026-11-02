@@ -169,9 +169,15 @@ Un message suivi de « — rétabli » signifie que le problème a disparu.
 
 ## 9. Bon à savoir
 
-- **Journal des essais** : pendant chaque régulation, les conditions
-  (Re, ΔP, température, pression…) sont enregistrées chaque seconde dans un
-  fichier CSV du dossier `journaux`. Son nom s'affiche dans le bandeau du bas.
+- **Journal des essais** : pendant chaque régulation (modes Asservi et
+  Séquence), les conditions sont enregistrées **toutes les 0,2 s** dans un
+  fichier CSV du dossier `journaux` (un fichier par session, nom affiché
+  dans le bandeau du bas). Colonnes : horodatage ; t [s] ; Re consigne ;
+  Re calculé ; Convergence (1 = RÉGULÉ ✓) ; phase regulation ; Qv ; ρ ; µ ;
+  ν ; dP ISO ; dP Miller ; P Amont ; Vanne PDC [V] et [% ferm] ; Vanne ISO /
+  Vanne Miller (1 = en butée, 0 et 0 = en course) ; T ; source T ; H [%HR] ;
+  Defaut. Les Reynolds sont dans la référence choisie (Veine ou Conduite).
+  Il s'ouvre directement dans Excel.
 - **Onglet Voies** : chaque capteur doit être « ● Active ». « Absente » ou
   « Liaison perdue » = problème de câblage ou de liaison.
 - **Température de l'air** : par défaut celle de la sonde PT100, en temps

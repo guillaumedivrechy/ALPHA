@@ -1502,7 +1502,10 @@ class Pilote:
             if self.journal is not None:
                 if self.journal.ouvert:
                     try:
-                        self.journal.enregistrer(self.etat, time.monotonic())
+                        self.journal.enregistrer(
+                            self.etat, time.monotonic(),
+                            zero_capteurs=self.zero_capteurs,
+                            humidite_relative=self.banc.fluide.humidite_relative)
                     except Exception:  # noqa: BLE001
                         # Erreur d'écriture journal : jamais au détriment de
                         # la boucle (hors du try du cycle, une exception ici

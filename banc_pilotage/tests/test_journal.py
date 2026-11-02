@@ -22,10 +22,13 @@ CFG = json.loads((Path(__file__).resolve().parent.parent / "config.json")
 def _etat(**kw) -> dict:
     base = {"re_cible": 6000.0, "re_mesure": 5987.3, "re_moyen": 5998.1,
             "re_ecart_type": 28.4, "convergee": True, "dp": 204.15,
-            "temperature": 21.7, "p_amont": 25.0, "rho": 1.1982,
-            "qm": 0.0218, "u_variateur": 5.16, "pdc_position": 10.0,
-            "diaphragme": "iso", "reference": "veine", "mode_bas_re": False,
-            "dp_sature": False}
+            "temperature": 21.7, "temperature_source": "pt100",
+            "p_amont": 25.0, "rho": 1.1982, "mu": 1.81e-05, "nu": 1.51e-05,
+            "qm": 0.0218, "qv": 0.0182, "u_variateur": 5.16,
+            "pdc_consigne": 10.0, "diaphragme_lu": "iso",
+            "phase_regulation": "suivi consigne",
+            "mesures_brutes": {"dp_iso_500": 204.45, "dp_diaph_500": 0.12},
+            "reference": "veine", "mode_bas_re": False, "dp_sature": False}
     base.update(kw)
     return base
 
@@ -44,20 +47,61 @@ def test_entete_et_ligne(tmp_path):
     # virgule décimale et séparateur « ; » : lecture directe dans Excel FR,
     # même convention qu'en lecture de séquence (core/sequence.py)
     assert champs["T [degC]"] == "21,7"
-    assert champs["convergee"] == "1"
+    assert champs["Convergence"] == "1"
     # Reynolds arrondis a l'unite : les decimales d'un nombre sans dimension
     # de quelques milliers n'ont pas de sens physique. Le pilote, lui, garde
     # ses flottants.
     assert champs["Re consigne"] == "6000"
     assert champs["Re calculé"] == "5987"        # 5987,3
-    assert champs["Re moyen"] == "5998"         # 5998,1
-    assert champs["Re ecart-type"] == "28"      # 28,4
-    for col in ("Re consigne", "Re calculé", "Re moyen", "Re ecart-type"):
-        assert "," not in champs[col], col
     # les autres colonnes gardent leurs decimales
-    assert champs["dP [Pa]"] == "204,15"
-    assert champs["diaphragme"] == "iso"
-    assert champs["defauts"] == ""
+    assert champs["Qv [m3/s]"] == "0,0182"
+    assert champs["ρ [kg/m3]"] == "1,1982"
+    assert champs["µ [Pa.s]"] == "1,81e-05"
+    assert champs["phase regulation"] == "suivi consigne"
+    assert champs["source T"] == "pt100"
+    assert champs["Vanne ISO"] == "1" and champs["Vanne Miller"] == "0"
+    assert champs["Defaut"] == ""
+
+
+def test_format_demande_par_l_exploitation(tmp_path):
+    """Colonnes et ordre demandés (2026-11-02), ΔP des deux capteurs
+    corrigés de leur zéro, vanne PdC en V et % de fermeture, humidité de la
+    configuration, horodatage à la milliseconde."""
+    assert [e for _, e in COLONNES] == [
+        "horodatage", "t [s]", "Re consigne", "Re calculé", "Convergence",
+        "phase regulation", "Qv [m3/s]", "ρ [kg/m3]", "µ [Pa.s]",
+        "ν [m2/s]", "dP ISO [Pa]", "dP Miller [Pa]", "P Amont [Pa]",
+        "Vanne PDC [V]", "Vanne PDC [% ferm]", "Vanne ISO", "Vanne Miller",
+        "T [degC]", "source T", "H [%HR]", "Defaut"]
+    j = JournalEssai(tmp_path, periode_s=0.0)
+    j.ouvrir(100.0)
+    j.enregistrer(_etat(pdc_consigne=7.5), 100.4,
+                  zero_capteurs={"dp_iso_500": 0.3, "dp_diaph_500": 0.1},
+                  humidite_relative=50.0)
+    j.fermer()
+    entete, ligne = (l.split(";") for l in
+                     j.chemin.read_text(encoding="utf-8-sig").splitlines())
+    c = dict(zip(entete, ligne))
+    assert c["dP ISO [Pa]"] == "204,15"          # 204,45 − 0,3
+    assert c["dP Miller [Pa]"] == "0,02"         # 0,12 − 0,1
+    assert c["Vanne PDC [V]"] == "7,5"
+    assert c["Vanne PDC [% ferm]"] == "25"
+    assert c["H [%HR]"] == "50"
+    assert c["t [s]"] == "0,4"
+    assert len(c["horodatage"].split(".")[-1]) == 3   # millisecondes
+
+
+def test_une_ligne_par_cycle_a_200_ms(tmp_path):
+    """Période du journal égale à celle de la boucle (0,2 s) : un cycle
+    arrivé à 0,199 s n'est pas sauté (avant : une ligne sur deux)."""
+    j = JournalEssai(tmp_path, periode_s=0.2)
+    j.ouvrir(0.0)
+    t = 0.0
+    for dt in (0.0, 0.199, 0.201, 0.199, 0.2, 0.198):
+        t += dt
+        j.enregistrer(_etat(), t)
+    assert j.lignes == 6
+    j.fermer()
 
 
 def test_periode_respectee(tmp_path):
@@ -219,7 +263,7 @@ def test_journal_enregistre_pendant_manoeuvre_et_sur_defaut(tmp_path):
         chemin = Path(pilote.etat["journal"])
         lignes = chemin.read_text(encoding="utf-8-sig").splitlines()
         colonnes = lignes[0].split(";")
-        i_def = colonnes.index("defauts")
+        i_def = colonnes.index("Defaut")
         motifs = [l.split(";")[i_def] for l in lignes[1:]
                   if l.split(";")[i_def]]
         assert motifs, "la colonne « defauts » n'est jamais renseignée"
@@ -254,7 +298,8 @@ def test_mesures_vides_pendant_la_course_de_la_vanne_3_voies(tmp_path):
     entete, en_course, arrivee = (l.split(";") for l in
                                   j.chemin.read_text(encoding="utf-8-sig").splitlines())
     c, a = dict(zip(entete, en_course)), dict(zip(entete, arrivee))
-    for col in ("Re calculé", "Re moyen", "Re ecart-type", "dP [Pa]", "qm [kg/s]"):
+    for col in ("Re calculé", "Qv [m3/s]"):
         assert c[col] == "", col
-    assert c["diaphragme"] == "en cours" and c["Re consigne"] == "6000"
-    assert a["Re calculé"] == "5987" and a["diaphragme"] == "miller"
+    assert c["Vanne ISO"] == "0" and c["Vanne Miller"] == "0"
+    assert c["Re consigne"] == "6000"
+    assert a["Re calculé"] == "5987" and a["Vanne Miller"] == "1"
