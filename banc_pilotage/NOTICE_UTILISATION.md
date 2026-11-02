@@ -176,7 +176,9 @@ Un message suivi de « — rétabli » signifie que le problème a disparu.
   Re calculé ; Convergence (1 = RÉGULÉ ✓) ; phase regulation ; Qv ; ρ ; µ ;
   ν ; dP ISO ; dP Miller ; P Amont ; Vanne PDC [V] (tension de recopie, position réelle, sur l'échelle de la calibration) et [% ferm] ; Vanne ISO /
   Vanne Miller (1 = en butée, 0 et 0 = en course) ; T ; source T ; H [%HR] ;
-  Defaut. Les Reynolds sont dans la référence choisie (Veine ou Conduite).
+  Defaut ; puis l'état des 7 fins de course (1 = contact actif) : FC 3 voies
+  0° (ISO), 90° (Miller), 180°, FC Bypass ouvert / fermé, FC PdC ouverte /
+  fermée. Les Reynolds sont dans la référence choisie (Veine ou Conduite).
   Il s'ouvre directement dans Excel.
 - **Onglet Voies** : chaque capteur doit être « ● Active ». « Absente » ou
   « Liaison perdue » = problème de câblage ou de liaison.

@@ -838,6 +838,7 @@ class Pilote:
         self._historique_re.clear()
         self._convergee_depuis = None
         if self.journal is not None:
+            self.journal.diaphragme_par_angle = self._diaphragme_par_angle
             self.journal.ouvrir(time.monotonic())
 
     def demarrer_sequence(self, paliers: list, reference: str) -> str | None:
@@ -875,6 +876,7 @@ class Pilote:
         self._historique_re.clear()
         self._convergee_depuis = None
         if self.journal is not None:
+            self.journal.diaphragme_par_angle = self._diaphragme_par_angle
             self.journal.ouvrir(time.monotonic())
         return None
 

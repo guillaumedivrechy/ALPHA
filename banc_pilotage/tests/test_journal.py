@@ -12,7 +12,7 @@ from pathlib import Path
 
 
 from core.banc import Banc
-from core.journal import COLONNES, JournalEssai
+from core.journal import COLONNES, JournalEssai, entetes
 from core.pilote import Pilote
 
 CFG = json.loads((Path(__file__).resolve().parent.parent / "config.json")
@@ -72,7 +72,10 @@ def test_format_demande_par_l_exploitation(tmp_path):
         "phase regulation", "Qv [m3/s]", "ρ [kg/m3]", "µ [Pa.s]",
         "ν [m2/s]", "dP ISO [Pa]", "dP Miller [Pa]", "P Amont [Pa]",
         "Vanne PDC [V]", "Vanne PDC [% ferm]", "Vanne ISO", "Vanne Miller",
-        "T [degC]", "source T", "H [%HR]", "Defaut"]
+        "T [degC]", "source T", "H [%HR]", "Defaut",
+        "FC 3 voies 0°", "FC 3 voies 90°", "FC 3 voies 180°",
+        "FC Bypass ouvert", "FC Bypass fermé", "FC PdC ouverte",
+        "FC PdC fermée"]
     j = JournalEssai(tmp_path, periode_s=0.0)
     j.ouvrir(100.0)
     brutes = {"dp_iso_500": 204.45, "dp_diaph_500": 0.12, "pdc_recopie": 7.462}
@@ -123,9 +126,9 @@ def test_defauts_recopies(tmp_path):
     j.ouvrir(0.0)
     j.enregistrer(_etat(defaut_capteur="PT100 coupée", dp_sature=True), 0.0)
     j.fermer()
-    ligne = j.chemin.read_text(encoding="utf-8-sig").splitlines()[1]
+    entete, ligne = j.chemin.read_text(encoding="utf-8-sig").splitlines()
     assert "PT100 coupée" in ligne
-    assert ligne.split(";")[-1] != ""
+    assert dict(zip(entete.split(";"), ligne.split(";")))["Defaut"] != ""
 
 
 def test_une_session_un_fichier(tmp_path):
@@ -322,3 +325,27 @@ def test_vanne_pdc_sans_recopie_sur_l_echelle_apprise(tmp_path):
     o, f = dict(zip(entete, ouverte)), dict(zip(entete, fermee))
     assert o["Vanne PDC [V]"] == "9,153" and o["Vanne PDC [% ferm]"] == "0"
     assert f["Vanne PDC [V]"] == "2,389" and f["Vanne PDC [% ferm]"] == "100"
+
+
+def test_fins_de_course_en_dernieres_colonnes(tmp_path):
+    """Les 7 fins de course, 1 = contact actif ; les butées de la vanne 3
+    voies nomment le diaphragme qu'elles mettent en ligne, d'après la
+    configuration (plomberie croisée comprise)."""
+    j = JournalEssai(tmp_path, periode_s=0.0,
+                     diaphragme_par_angle={"0": "miller", "90": "iso"})
+    j.ouvrir(0.0)
+    brutes = {"fc_3voies_0": True, "fc_3voies_90": False,
+              "fc_3voies_180": False, "fc_bypass_ouvert": True,
+              "fc_bypass_ferme": False, "fc_pdc_ouvert": False,
+              "fc_pdc_ferme": True}
+    j.enregistrer(_etat(mesures_brutes=brutes), 0.0)
+    j.fermer()
+    entete, ligne = (l.split(";") for l in
+                     j.chemin.read_text(encoding="utf-8-sig").splitlines())
+    assert entete[-7:] == ["FC 3 voies 0° (Miller)", "FC 3 voies 90° (ISO)",
+                           "FC 3 voies 180°", "FC Bypass ouvert",
+                           "FC Bypass fermé", "FC PdC ouverte",
+                           "FC PdC fermée"]
+    assert ligne[-7:] == ["1", "0", "0", "1", "0", "0", "1"]
+    assert entetes({"0": "iso", "90": "miller"})[-7:-5] == [
+        "FC 3 voies 0° (ISO)", "FC 3 voies 90° (Miller)"]

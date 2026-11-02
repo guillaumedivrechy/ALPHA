@@ -43,7 +43,33 @@ COLONNES = [
     ("temperature_source", "source T"),
     ("humidite_relative", "H [%HR]"),
     ("defauts", "Defaut"),
+    # fins de course, en dernières colonnes : 1 = contact actif, 0 = non
+    # (vanne 3 voies : diaphragme de chaque butée ajouté à l'ouverture du
+    # fichier, d'après modbus.positions_vanne_3voies)
+    ("fc_3voies_0", "FC 3 voies 0°"),
+    ("fc_3voies_90", "FC 3 voies 90°"),
+    ("fc_3voies_180", "FC 3 voies 180°"),
+    ("fc_bypass_ouvert", "FC Bypass ouvert"),
+    ("fc_bypass_ferme", "FC Bypass fermé"),
+    ("fc_pdc_ouvert", "FC PdC ouverte"),
+    ("fc_pdc_ferme", "FC PdC fermée"),
 ]
+
+# fins de course recopiées telles que lues (après inversion des contacts NF)
+_FINS_DE_COURSE = tuple(cle for cle, _ in COLONNES if cle.startswith("fc_"))
+
+
+def entetes(diaphragme_par_angle: dict | None = None) -> list[str]:
+    """En-têtes du fichier ; les butées 0° et 90° de la vanne 3 voies
+    portent le diaphragme qu'elles mettent en ligne (« FC 3 voies 0° (ISO) »)."""
+    noms = {"iso": "ISO", "miller": "Miller"}
+    angles = diaphragme_par_angle or {}
+    resultat = []
+    for cle, entete in COLONNES:
+        diaph = angles.get(cle.rsplit("_", 1)[-1]) \
+            if cle.startswith("fc_3voies_") else None
+        resultat.append(f"{entete} ({noms.get(diaph, diaph)})" if diaph else entete)
+    return resultat
 
 # grandeurs déduites du débit : sans objet pendant la course de la vanne
 # 3 voies (le débit passe par les deux voies, aucun capteur ne le mesure)
@@ -79,8 +105,11 @@ class JournalEssai:
     """Journal d'une session. Ouvert au démarrage de la régulation, fermé à
     l'arrêt. Réouvrir crée un nouveau fichier : une session = un fichier."""
 
-    def __init__(self, dossier, periode_s: float = 1.0):
+    def __init__(self, dossier, periode_s: float = 1.0,
+                 diaphragme_par_angle: dict | None = None):
         self.dossier = Path(dossier)
+        # butée -> diaphragme (en-têtes des fins de course 3 voies)
+        self.diaphragme_par_angle = diaphragme_par_angle
         self.periode = max(periode_s, 0.0)
         self.chemin: Path | None = None
         self.erreur: str | None = None
@@ -110,7 +139,7 @@ class JournalEssai:
             f = None
             try:
                 f = chemin.open("w", encoding="utf-8-sig", newline="")
-                f.write(";".join(entete for _, entete in COLONNES) + "\n")
+                f.write(";".join(entetes(self.diaphragme_par_angle)) + "\n")
                 f.flush()
                 self._f = f
                 self.chemin = chemin
@@ -196,6 +225,9 @@ class JournalEssai:
         valeurs["vanne_iso"] = lu == "iso"
         valeurs["vanne_miller"] = lu == "miller"
         valeurs["humidite_relative"] = humidite_relative
+        for cle in _FINS_DE_COURSE:
+            v = brutes.get(cle)
+            valeurs[cle] = None if v is None else bool(v)
         if lu == "en_transit":
             # vanne 3 voies en course : pas de valeur plutôt qu'une fausse
             # (l'IHM affiche « en cours »)
