@@ -1211,6 +1211,20 @@ class Pilote:
         # apprentissage enchaîné qui venait de le refermer -> repli sûr
         self._manoeuvres.clear()
 
+    def butee_3voies_sure(self) -> str | None:
+        """Butée ("0" / "90") où la vanne 3 voies est tenue pour arrivée :
+        ordre maintenu par la boucle, aucune manœuvre en cours (donc course
+        complète écoulée) et fin de course lue sur cette butée. None sinon :
+        avec des fins de course sur plages, la seule lecture ne prouve pas
+        la butée (vanne qui vient d'en partir ou pas encore arrivée)."""
+        if self._maintien_tor_suspendu or "3voies" in self._manoeuvres:
+            return None
+        angle = self._diaphragme_commande
+        if angle is not None and self._angle_vanne_3voies(
+                self.etat.get("mesures_brutes") or {}) == angle:
+            return angle
+        return None
+
     def reprendre_maintien_tor(self) -> None:
         """Rend la main à la boucle. Le maintien de la vanne 3 voies se
         rétablit au cycle suivant la relecture de position, que

@@ -41,6 +41,9 @@ class Apprentissage:
         self._annule = threading.Event()
         self._arrets_debut = pilote.arrets
         self._thread: threading.Thread | None = None
+        # butée 3 voies où la vanne est sûrement arrivée (course complète
+        # écoulée), ou None ; cf. _attendre_butee_3voies
+        self._butee_3voies_sure: str | None = None
 
     # ------------------------------------------------------------- pilotage
 
@@ -143,6 +146,10 @@ class Apprentissage:
 
     def _executer(self, cible, params) -> None:
         self._arrets_debut = self.pilote.arrets
+        # butée 3 voies garantie par la boucle (relevée AVANT la suspension,
+        # qui efface ordres et manœuvres) : seule une vanne au repos sur sa
+        # butée dispense d'attendre la course complète au 1er positionnement
+        self._butee_3voies_sure = self.pilote.butee_3voies_sure()
         # les séquences manœuvrent les vannes en direct (es.*) pour mesurer
         # leurs temps de course : la boucle ne doit pas réaffirmer ses ordres
         self.pilote.suspendre_maintien_tor()
@@ -363,7 +370,14 @@ class Apprentissage:
         if self._interrompu():
             self._statut_annule()
             return None
+        if self._butee_3voies_sure != angle:
+            self._butee_3voies_sure = None
         if self.pilote._angle_vanne_3voies(self._brutes()) == angle:
+            # ordre écrit malgré tout : fins de course sur plages, la vanne
+            # peut lire cette butée en venant d'en partir (remise au repos de
+            # la séquence précédente vers l'autre butée) et continuer sa
+            # course si on ne la rappelle pas
+            self.pilote.es.ecrire_vanne_diaphragme(vers_0deg)
             return 0.0
         t0 = time.monotonic()
         precedent = self._etat_fc_3voies()
@@ -451,12 +465,25 @@ class Apprentissage:
         angle = self.pilote._angle_par_diaphragme[diaphragme]
         t = self._avancer_vanne_3voies(
             angle == "0", f"{verbe} {diaphragme.upper()} ({angle}°)")
-        if t and self.pilote.v3_course_complete:
-            # fins de course sur plages : la butée n'est atteinte qu'au bout
-            # de la course complète (sinon mesure sur une vanne à mi-course)
-            if self._pause(max(0.0, self.pilote.t_vanne_3voies - t)):
-                return None
+        if t is None or self._attendre_butee_3voies(t, angle):
+            return None
         return t
+
+    def _attendre_butee_3voies(self, t: float, angle: str) -> bool:
+        """Après une arrivée déclarée en t s sur la butée ANGLE : attend la
+        fin de la course complète (fins de course sur plages, sinon mesure
+        sur une vanne à mi-course). Aussi quand la vanne lisait déjà cette
+        butée (t = 0) : elle pouvait en partir, ou y arriver, et seule une
+        butée garantie (repos de la boucle, attente déjà faite) en dispense.
+        Retourne True si la séquence a été annulée pendant l'attente."""
+        if (self.pilote.v3_course_complete
+                and self._butee_3voies_sure != angle):
+            self.etat["statut"] = "vanne 3 voies : attente de la butée"
+            if self._pause(max(0.0, self.pilote.t_vanne_3voies - t)):
+                self._statut_annule()
+                return True
+        self._butee_3voies_sure = angle
+        return False
 
     def _test_vanne_3voies(self) -> None:
         """Chrono des deux courses utiles de la vanne 3 voies. La position 180°
@@ -473,10 +500,10 @@ class Apprentissage:
         # Pré-positionnement sur la butée 0°, course complète comprise (fin
         # de course 0° fermée avant la butée sur cette vanne)
         t = self._avancer_vanne_3voies(True, "pré-pos butée 0°")
-        if t is None:
+        if t is None or self._attendre_butee_3voies(t, "0"):
             return
-        attente = 0.5 + (max(0.0, self.pilote.t_vanne_3voies - t) if t else 0.0)
-        if self._pause(attente):
+        if self._pause(0.5):
+            self._statut_annule()
             return
 
         # chronologie des fins de course (DI) pendant chaque course : une

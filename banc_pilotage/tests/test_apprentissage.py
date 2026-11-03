@@ -743,3 +743,67 @@ def test_vanne_3voies_course_estimee_et_bascule_tardive_cumulees(monkeypatch,
     texte = app.resultats["vanne_3voies"]["chronologie_texte"]
     assert "Course complète estimée" in texte
     assert "⚠ une fin de course a encore basculé APRÈS" in texte
+
+
+def test_positionnement_rappelle_une_vanne_qui_quitte_sa_butee(monkeypatch,
+                                                               tmp_path):
+    """Apprentissage lancé juste après la remise au repos du précédent :
+    la vanne quitte l'ISO vers le Miller mais lit encore l'ISO (came sur
+    plage). L'ordre ISO n'était pas réécrit : la vanne finissait au Miller
+    et la séquence mesurait sur le mauvais diaphragme."""
+    _cames_sur_plages(monkeypatch)
+    b, app = _banc_11s(monkeypatch, tmp_path)
+    p = b.p
+    p.commander_diaphragme("iso")
+    b.cycles(15.0, verifier=False)
+    assert b.sim._v3._angle == pytest.approx(0.0, abs=1.0)
+    p._position_repos()                    # fin de la séquence précédente
+    b.cycles(1.0, verifier=False)
+    assert 0.0 < b.sim._v3._angle < 15.0   # en route, lit encore l'ISO
+    vu = {}
+
+    def sequence():
+        vu["t"] = app._positionner_diaphragme("iso")
+        vu["angle"] = b.sim._v3._angle
+
+    app._executer(sequence, {})
+    assert vu["t"] is not None
+    assert vu["angle"] == pytest.approx(0.0, abs=1.0)
+
+
+def test_pre_positionnement_attend_une_vanne_arrivant_en_butee(monkeypatch,
+                                                               tmp_path):
+    """Vanne encore en course vers 0° mais lisant déjà 0° (came sur plage)
+    au lancement du test : le T1 partait de mi-course, trop court."""
+    _cames_sur_plages(monkeypatch)
+    b, app = _banc_11s(monkeypatch, tmp_path)
+    p = b.p
+    p.commander_diaphragme(p._diaphragme_par_angle["90"])
+    b.cycles(15.0, verifier=False)
+    p.commander_diaphragme(p._diaphragme_par_angle["0"])
+    b.cycles(9.5, verifier=False)          # ~12° : 0° déjà lu
+    assert 1.0 < b.sim._v3._angle < 15.0
+    app._executer(app._test_vanne_3voies, {})
+    r = app.resultats["vanne_3voies"]
+    assert r["T1_0_vers_90_s"] == pytest.approx(24 / 90 * 11.0, abs=0.4)
+
+
+def test_positionnement_sans_attente_sur_une_butee_sure(monkeypatch,
+                                                       tmp_path):
+    """Vanne au repos sur sa butée (manœuvre de la boucle terminée) : pas
+    d'attente d'une course complète inutile."""
+    _cames_sur_plages(monkeypatch)
+    b, app = _banc_11s(monkeypatch, tmp_path)
+    p = b.p
+    p.commander_diaphragme("miller")
+    b.cycles(20.0, verifier=False)
+    assert p.butee_3voies_sure() == p._angle_par_diaphragme["miller"]
+    vu = {}
+
+    def sequence():
+        t0 = b.t[0]
+        vu["t"] = app._positionner_diaphragme("miller")
+        vu["duree"] = b.t[0] - t0
+
+    app._executer(sequence, {})
+    assert vu["t"] == 0.0 and vu["duree"] < 1.0

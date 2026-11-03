@@ -47,6 +47,9 @@ def _executer(app, nom):
 
 
 def _reguler(b, pilote, re_veine, max_s=400.0):
+    """Régule jusqu'à la convergence ; à comparer ensuite à etat["re_moyen"]
+    (moyenne de la fenêtre de convergence) : en mode PdC, le Re instantané
+    bruite de ~2,5 % autour d'une moyenne juste."""
     pilote.definir_consigne(re_veine, "veine")
     if not pilote.regulation_active:
         pilote.demarrer_regulation()
@@ -117,7 +120,7 @@ def test_regulation_sur_toute_la_plage_apres_apprentissage(banc_appris):
     for re_v in CONSIGNES_VEINE:
         t = _reguler(b, p, re_v)
         assert t is not None, (re_v, p.etat.get("consigne_limitee"))
-        assert p.etat["re_mesure"] == pytest.approx(re_v, rel=0.02)
+        assert p.etat["re_moyen"] == pytest.approx(re_v, rel=0.02)
         modes.add(p._mode_regulation)
     assert modes == {"pdc_control", "normal_low", "normal_high"}
     assert not b.violations, b.violations[:5]
@@ -148,7 +151,7 @@ def test_redemarrage_relit_les_apprentissages(banc_appris, monkeypatch):
     neuf._position_repos()
     for re_v in (500, 8000):
         assert _reguler(b, neuf, re_v) is not None, re_v
-        assert neuf.etat["re_mesure"] == pytest.approx(re_v, rel=0.02)
+        assert neuf.etat["re_moyen"] == pytest.approx(re_v, rel=0.02)
 
 
 @pytest.mark.parametrize("depart", ["iso", "miller"])
