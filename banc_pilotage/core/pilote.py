@@ -1317,6 +1317,13 @@ class Pilote:
         lancée pendant les ~11 s de course (fin d'apprentissage, démarrage)
         finissait en arrêt de sécurité « position inexploitable »."""
         try:
+            # fins de course sur plages : la position lue de la vanne 3 voies
+            # ne prouve pas la butée ; elle n'est pas tenue pour acquise, et
+            # la course complète est attendue. Sans cela, le résultat
+            # dépendait de l'ordre des threads au démarrage (remise au repos
+            # avant ou après la relecture de la position initiale).
+            if self.v3_course_complete:
+                self._diaphragme_commande = None
             self.commander_diaphragme("miller")
 
             # Vanne perte de charge ouverte (10 V)
@@ -2081,6 +2088,13 @@ class Pilote:
                 # mais la sortie gardait la dernière tension écrite
                 u_variateur = 0.0
             self.es.ecrire_variateur(u_variateur)
+            # ordre RUN cohérent avec la tension : il n'était pas écrit ici,
+            # si bien qu'une tension manuelle appliquée pendant une manœuvre
+            # restait sans effet (RUN jamais donné) et qu'un RUN antérieur
+            # restait actif à 0 V
+            run_voulu = manuel_actuel and u_manu_actuel > 0.05
+            self.es.ecrire_variateur_run(run_voulu)
+            self._run_actif = run_voulu
 
             self.etat.update({
                 "temperature": T, "p_amont": p_amont, "dp": dp,

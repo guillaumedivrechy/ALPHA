@@ -1622,3 +1622,39 @@ def test_offset_pt100(monkeypatch, tmp_path):
     p.appliquer_config(b.cfg)
     b.cycles(1.0, verifier=False)
     assert p.etat["temperature"] == 22.0
+
+
+def test_run_ecrit_pendant_une_manoeuvre(monkeypatch, tmp_path):
+    """Pendant une manœuvre de vanne, seule la tension était écrite : en
+    manuel, la tension appliquée restait sans effet (RUN jamais donné), et
+    un RUN antérieur restait actif à 0 V."""
+    from banc_simule import BancSimule
+    b = BancSimule(monkeypatch, tmp_path, caracterise=True)
+    p = b.p
+    p.commander_diaphragme("iso")                 # manœuvre en cours
+    p.mode_manuel_tension(3.0)
+    b.cycles(0.4, verifier=False)
+    assert "3voies" in p._manoeuvres
+    assert b.sim.u_ecrite == 3.0 and b.sim._run is True
+    p.mode_manuel_tension(0.0)
+    b.cycles(0.4, verifier=False)
+    assert "3voies" in p._manoeuvres
+    assert b.sim.u_ecrite == 0.0 and b.sim._run is False
+
+
+def test_remise_au_repos_deterministe(monkeypatch, tmp_path):
+    """Fins de course sur plages : la remise au repos attend toujours la
+    course complète de la vanne 3 voies, même lue déjà sur Miller (avant :
+    selon l'ordre des threads au démarrage, avec ou sans attente). Sans la
+    compensation, une vanne déjà en place ne déclenche pas de manœuvre."""
+    from banc_simule import BancSimule
+    b = BancSimule(monkeypatch, tmp_path, caracterise=True)
+    p = b.p
+    assert p.etat["diaphragme_lu"] == "miller" and not p._manoeuvres
+    p._position_repos()
+    assert "3voies" in p._manoeuvres
+    b.cycles(20.0, verifier=False)
+    assert not p._manoeuvres and not p.etat.get("defaut_vanne")
+    p.v3_course_complete = False
+    p._position_repos()
+    assert "3voies" not in p._manoeuvres
