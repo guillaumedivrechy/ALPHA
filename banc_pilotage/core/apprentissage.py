@@ -366,15 +366,18 @@ class Apprentissage:
         if self.pilote._angle_vanne_3voies(self._brutes()) == angle:
             return 0.0
         t0 = time.monotonic()
-        precedent = [self._etat_fc_3voies()]
+        precedent = self._etat_fc_3voies()
         if chronologie is not None:
-            chronologie.append((0.0, precedent[0]))
+            chronologie.append((0.0, precedent))
 
         def noter() -> None:
+            nonlocal precedent
+            if chronologie is None:
+                return
             etat = self._etat_fc_3voies()
-            if chronologie is not None and etat != precedent[0]:
+            if etat != precedent:
                 chronologie.append((round(time.monotonic() - t0, 2), etat))
-                precedent[0] = etat
+                precedent = etat
 
         self.pilote.es.ecrire_vanne_diaphragme(vers_0deg)
         ok = self._attendre(
@@ -509,6 +512,8 @@ class Apprentissage:
             "T1 0° → 90°", chrono_t1, res["T1_0_vers_90_s"])
         texte_t2, tardif_t2 = self._texte_chronologie(
             "T2 90° → 0°", chrono_t2, res["T2_90_vers_0_s"])
+        # les deux messages se cumulent : la course estimée reste retenue
+        # (max_s) même quand une bascule tardive la rend douteuse
         alerte = ""
         if course and course > 1.15 * max(res["T1_0_vers_90_s"],
                                           res["T2_90_vers_0_s"]):
@@ -516,10 +521,10 @@ class Apprentissage:
                        "course fermées avant les butées) : retenue pour le "
                        "chien de garde et pour l'attente de fin de manœuvre")
         if tardif_t1 or tardif_t2:
-            alerte = ("\n⚠ une fin de course a encore basculé APRÈS l'arrivée "
-                      "déclarée : le contact lu comme butée n'est pas en "
-                      "butée (came, sens de lecture ou affectation de l'entrée "
-                      "à vérifier) — course mesurée non fiable")
+            alerte += ("\n⚠ une fin de course a encore basculé APRÈS l'arrivée "
+                       "déclarée : le contact lu comme butée n'est pas en "
+                       "butée (came, sens de lecture ou affectation de l'entrée "
+                       "à vérifier) — course mesurée non fiable")
         res["chronologie_texte"] = texte_t1 + "\n" + texte_t2 + alerte
         log.info("Vanne 3 voies, chronologie des fins de course :\n%s",
                  res["chronologie_texte"])
@@ -822,12 +827,11 @@ class Apprentissage:
             return "miller"
         return None
 
-    def _dp_moyens(self, duree_s: float, statut: str,
-                   corriger: bool = True) -> tuple | None:
+    def _dp_moyens(self, duree_s: float, statut: str) -> tuple | None:
         """Moyennes (dp_iso, dp_miller) sur duree_s, corrigées du zéro
-        appris — un offset capteur fausserait les seuils d'identification
-        (corriger=False pour la mesure du zéro elle-même). None si annulé."""
-        z = self.pilote.zero_capteurs if corriger else {}
+        appris — un offset capteur fausserait les seuils d'identification.
+        None si annulé."""
+        z = self.pilote.zero_capteurs
         dt = self.pilote.periode
         iso: list[float] = []
         miller: list[float] = []

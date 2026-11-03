@@ -822,6 +822,13 @@ class Pilote:
             return msg
         return None
 
+    def _ouvrir_journal(self) -> None:
+        """Ouvre le journal de la session (en-têtes des fins de course 3 voies
+        d'après le mapping butée -> diaphragme en vigueur)."""
+        if self.journal is not None:
+            self.journal.diaphragme_par_angle = self._diaphragme_par_angle
+            self.journal.ouvrir(time.monotonic())
+
     def demarrer_regulation(self) -> str | None:
         refus = self._relance_interdite("démarrage de la régulation")
         if refus:
@@ -837,9 +844,7 @@ class Pilote:
         self.etat["sequence"] = None
         self._historique_re.clear()
         self._convergee_depuis = None
-        if self.journal is not None:
-            self.journal.diaphragme_par_angle = self._diaphragme_par_angle
-            self.journal.ouvrir(time.monotonic())
+        self._ouvrir_journal()
 
     def demarrer_sequence(self, paliers: list, reference: str) -> str | None:
         """Suivi d'un profil de paliers (durée_s, Re cible), enchaînés dans
@@ -848,8 +853,8 @@ class Pilote:
         Retourne un message d'erreur ou None."""
         if not paliers:
             return "Séquence vide."
-        if any(not (_nombre(d) and d > 0) or not (_nombre(re) and re >= 0)
-               for d, re in paliers):
+        if not all(_nombre(d) and d > 0 and _nombre(re) and re >= 0
+                   for d, re in paliers):
             return ("Séquence invalide : chaque palier doit avoir une durée "
                     "strictement positive et un Re positif ou nul.")
         refus = self._relance_interdite("démarrage de la séquence")
@@ -875,9 +880,7 @@ class Pilote:
         self._echelon_depuis = None        # 1er échelon : préparation complète
         self._historique_re.clear()
         self._convergee_depuis = None
-        if self.journal is not None:
-            self.journal.diaphragme_par_angle = self._diaphragme_par_angle
-            self.journal.ouvrir(time.monotonic())
+        self._ouvrir_journal()
         return None
 
     def figer_sequence(self) -> float | None:
@@ -1722,9 +1725,8 @@ class Pilote:
         # relire réaffirmerait l'ancienne position)
         if not self._position_initiale_lue:
             angle = self._angle_vanne_3voies(mesures)
-            if "3voies" in self._manoeuvres:
-                pass
-            elif angle in self._diaphragme_par_angle:
+            if "3voies" not in self._manoeuvres \
+                    and angle in self._diaphragme_par_angle:
                 self.etat["diaphragme"] = self._diaphragme_par_angle[angle]
                 # reprendre l'ordre correspondant : sans lui l'actionneur
                 # resterait hors tension, donc sans anti-condensation

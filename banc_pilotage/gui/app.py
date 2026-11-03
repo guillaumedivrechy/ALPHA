@@ -4536,8 +4536,12 @@ class Application(QMainWindow):
             # Affichage température (utilisée par les calculs)
             saisie = e.get("temperature_source") == "manuelle"
             offset = self.pilote.offset_pt100
-            suffixe = (" (saisie)" if saisie else
-                       f" (offset {offset:+.2f})".replace(".", ",") if offset else "")
+            if saisie:
+                suffixe = " (saisie)"
+            elif offset:
+                suffixe = f" (offset {offset:+.2f})".replace(".", ",")
+            else:
+                suffixe = ""
             self._lbl_air_temp.setText(f"{T:.1f}".replace(".", ",") + suffixe)
 
             # Récupérer l'humidité relative depuis la config

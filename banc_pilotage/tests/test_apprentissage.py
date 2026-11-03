@@ -724,3 +724,22 @@ def test_regulation_attend_la_butee_reelle(monkeypatch, tmp_path,
         assert not p.etat.get("arret_securite"), p.etat.get("arret_motif")
     else:
         assert fin < 8.0 and angle_a_la_fin < 80.0      # ancien comportement
+
+
+def test_vanne_3voies_course_estimee_et_bascule_tardive_cumulees(monkeypatch,
+                                                                 tmp_path):
+    """Came fermée trop tôt ET bascule tardive : les deux messages sont
+    affichés (la course estimée était écrasée par l'alerte, alors qu'elle
+    reste retenue pour le chien de garde)."""
+    from io_banc.simulateur import _Vanne3Voies
+    # 0° lu sous 15° ; 90° lu brièvement vers 30-40°, puis au-delà de 50°
+    monkeypatch.setattr(_Vanne3Voies, "fc_0",
+                        property(lambda self: self._angle < 15.0))
+    monkeypatch.setattr(_Vanne3Voies, "fc_90", property(
+        lambda self: 30.0 < self._angle < 40.0 or 50.0 < self._angle < 179.0))
+    b, app = _banc_11s(monkeypatch, tmp_path)
+    app._arrets_debut = b.p.arrets
+    app._executer(app._test_vanne_3voies, {})
+    texte = app.resultats["vanne_3voies"]["chronologie_texte"]
+    assert "Course complète estimée" in texte
+    assert "⚠ une fin de course a encore basculé APRÈS" in texte
