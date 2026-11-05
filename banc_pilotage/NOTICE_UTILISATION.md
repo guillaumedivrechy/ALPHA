@@ -184,9 +184,9 @@ Un message suivi de « — rétabli » signifie que le problème a disparu.
   Il s'ouvre directement dans Excel.
 - **Onglet Voies** : chaque capteur doit être « ● Active ». « Absente » ou
   « Liaison perdue » = problème de câblage ou de liaison.
-- **Température et humidité de l'air** : mesurées en temps réel (sonde
-  PT100 ou capteur SHT45 pour la température, capteur SHT45 pour
-  l'humidité), ou saisies. La source utilisée est affichée entre
+- **Température et humidité de l'air** : par défaut, mesurées en temps
+  réel par le capteur SHT45. Au choix : température de la sonde PT100, ou
+  valeurs saisies à la main. La source utilisée est affichée entre
   parenthèses dans la colonne de gauche, par exemple « 19,4 (SHT45) ». Le
   choix se fait dans l'onglet Configuration, par le responsable du banc.
 - **Avant de mesurer**, attendre **RÉGULÉ ✓** : c'est la garantie que le Re
@@ -223,9 +223,9 @@ diamètre hydraulique Dh, sont calculées automatiquement.
 | Carte | Réglage | Quand y toucher |
 |---|---|---|
 | **Fluide** | Pression atmosphérique [Pa] | en début de journée d'essais : saisir la pression **absolue du local** lue au baromètre (pas la pression « ramenée au niveau de la mer » des bulletins météo). 10 hPa d'écart ≈ 0,5 % d'erreur sur le Re. |
-| **Air** | Température utilisée : PT100, SHT45 ou température saisie | PT100 ou SHT45 : mesure en temps réel. Saisie : si les sondes sont absentes ou douteuses (saisir alors la température). Avec le SHT45, s'il ne répond pas, aucune consigne n'est acceptée, et un essai en cours s'arrête. |
+| **Air** | Température utilisée : SHT45 (par défaut), PT100 ou température saisie | SHT45 ou PT100 : mesure en temps réel. Saisie : si les sondes sont absentes ou douteuses (saisir alors la température). Avec le SHT45, s'il ne répond pas, aucune consigne n'est acceptée, et un essai en cours s'arrête. |
 | **Air** | Offset PT100, Offset SHT45 (+ ou −) [°C] | si une sonde s'écarte d'un thermomètre de référence : saisir la correction (ex. −0,4 °C). 0 par défaut. |
-| **Air** | Humidité utilisée : SHT45 ou humidité saisie | SHT45 : mesure en temps réel ; s'il ne répond plus, le banc continue avec l'humidité saisie (alerte « Capteur d'air SHT45 »). |
+| **Air** | Humidité utilisée : SHT45 (par défaut) ou humidité saisie | SHT45 : mesure en temps réel ; s'il ne répond plus, le banc continue avec l'humidité saisie (alerte « Capteur d'air SHT45 »). |
 | **Air** | Humidité saisie [%HR], Offset SHT45 humidité [%HR] | humidité saisie : valeur utilisée sans SHT45 (0 = air sec). Offset : correction de la mesure du SHT45, 0 par défaut. L'humidité pèse peu : de 0 à 100 %HR, ρ varie d'environ 0,5 % à 20 °C. |
 | **Bascule ISO / Miller** | Seuil et hystérésis (en Re conduite) | pour déplacer le passage entre les deux diaphragmes. Le titre de la carte rappelle les équivalents en Re veine. |
 | ⚠ **Géométrie veine d'essai** | Hauteur H et largeur W [m] (la section S et le diamètre hydraulique Dh en sont déduits) | après une mesure de la veine (ou un changement de veine). Le Re veine ne dépend que du périmètre 2 × (H + W) : 1 % d'erreur sur H + W = 1 % d'erreur sur le Re veine. Sans effet sur le Re conduite. |

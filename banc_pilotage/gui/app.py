@@ -3943,9 +3943,9 @@ class Application(QMainWindow):
 
     def _selectionner_sources_air(self) -> None:
         """Listes « température / humidité utilisée » <- config en mémoire
-        (clés absentes : PT100 et humidité saisie, comme avant le SHT45)."""
-        for cmb, section, defaut in ((self.cmb_t_source, "temperature", "pt100"),
-                                     (self.cmb_hr_source, "humidite", "manuelle")):
+        (clé absente : SHT45, comme le pilote)."""
+        for cmb, section, defaut in ((self.cmb_t_source, "temperature", "sht45"),
+                                     (self.cmb_hr_source, "humidite", "sht45")):
             i = cmb.findData(self.cfg.get(section, {}).get("source", defaut))
             cmb.setCurrentIndex(max(i, 0))
 

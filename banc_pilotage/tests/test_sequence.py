@@ -9,9 +9,11 @@ import pytest
 from core.banc import Banc
 from core.pilote import Pilote
 from core.sequence import charger_sequence_csv, debuts_paliers
+from banc_simule import sans_sht45  # noqa: E402
 
-CFG = json.loads((Path(__file__).resolve().parent.parent / "config.json")
-                 .read_text(encoding="utf-8"))
+CFG = sans_sht45(json.loads(
+    (Path(__file__).resolve().parent.parent / "config.json")
+    .read_text(encoding="utf-8")))
 
 
 # ------------------------------------------------------------- parsing CSV

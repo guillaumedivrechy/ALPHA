@@ -16,9 +16,11 @@ from faux_coupleur import FauxCoupleur          # noqa: E402
 from core.banc import Banc                      # noqa: E402
 from core.pilote import Pilote                  # noqa: E402
 from io_banc.wago import WagoModbus             # noqa: E402
+from banc_simule import sans_sht45  # noqa: E402
 
-CFG = json.loads((Path(__file__).resolve().parent.parent / "config.json")
-                 .read_text(encoding="utf-8"))
+CFG = sans_sht45(json.loads(
+    (Path(__file__).resolve().parent.parent / "config.json")
+    .read_text(encoding="utf-8")))
 PE = 32767                                      # 10 V sur les modules 0-10 V
 
 

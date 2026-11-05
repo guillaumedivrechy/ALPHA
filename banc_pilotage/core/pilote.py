@@ -823,26 +823,30 @@ class Pilote:
         """Sources et corrections de la température et de l'humidité de
         l'air (onglet Configuration).
 
-        temperature.source : "pt100" (défaut), "sht45" ou "manuelle"
+        Par défaut (clé absente), température ET humidité viennent du SHT45 ;
+        l'opérateur peut choisir la PT100 ou une valeur saisie.
+        temperature.source : "sht45" (défaut), "pt100" ou "manuelle"
         (valeur_manuelle_c) ; offsets PT100 et SHT45 bornés à ±10 °C.
-        humidite.source : "manuelle" (défaut : fluide.humidite_relative,
-        comportement antérieur au SHT45) ou "sht45" ; offset ±20 %HR."""
+        humidite.source : "sht45" (défaut) ou "manuelle"
+        (fluide.humidite_relative) ; offset ±20 %HR."""
         tcfg = cfg.get("temperature", {})
-        source = tcfg.get("source", "pt100")
+        source = tcfg.get("source", "sht45")
         if source not in SOURCES_TEMPERATURE:
-            log.warning(f"temperature.source = {source!r} inconnue : PT100")
-            source = "pt100"
+            log.warning(f"temperature.source = {source!r} inconnue : SHT45")
+            source = "sht45"
         self.t_manuelle = _temperature_manuelle(source,
                                                 tcfg.get("valeur_manuelle_c"))
         if source == "manuelle" and self.t_manuelle is None:
-            source = "pt100"                   # valeur saisie absente
+            log.warning("temperature.source = 'manuelle' sans "
+                        "valeur_manuelle_c : SHT45")
+            source = "sht45"                   # valeur saisie absente
         self.t_source = source
         # corrections ajoutées aux lectures des sondes (0 par défaut)
         self.offset_pt100 = _offset_pt100(tcfg.get("offset_pt100_c", 0.0))
         self.offset_sht45_t = _offset_pt100(tcfg.get("offset_sht45_c", 0.0))
         hcfg = cfg.get("humidite", {})
-        self.hr_source = "sht45" if hcfg.get("source") == "sht45" \
-            else "manuelle"
+        self.hr_source = "manuelle" if hcfg.get("source") == "manuelle" \
+            else "sht45"
         self.hr_manuelle = _borne(
             cfg.get("fluide", {}).get("humidite_relative", 0.0), 0.0, 100.0)
         self.offset_sht45_hr = _borne(hcfg.get("offset_sht45_pct", 0.0),

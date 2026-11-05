@@ -11,9 +11,11 @@ import pytest
 from core.banc import Banc
 from core.pilote import Pilote, TableGains
 from io_banc.simulateur import SimulateurBanc
+from banc_simule import sans_sht45  # noqa: E402
 
-CFG = json.loads((Path(__file__).resolve().parent.parent / "config.json")
-                 .read_text(encoding="utf-8"))
+CFG = sans_sht45(json.loads(
+    (Path(__file__).resolve().parent.parent / "config.json")
+    .read_text(encoding="utf-8")))
 
 
 class StubES:
@@ -1605,7 +1607,7 @@ def test_offset_pt100(monkeypatch, tmp_path):
     mesures_brutes ; sans effet en température saisie ; repris à chaud."""
     from banc_simule import BancSimule
     b = BancSimule(monkeypatch, tmp_path, cfg_sur={
-        "temperature": {"offset_pt100_c": -1.5}})
+        "temperature": {"source": "pt100", "offset_pt100_c": -1.5}})
     p = b.p
     b.cycles(1.0, verifier=False)
     brute = p.etat["mesures_brutes"]["temperature"]

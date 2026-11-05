@@ -14,9 +14,11 @@ from pathlib import Path
 from core.banc import Banc
 from core.journal import COLONNES, JournalEssai, entetes
 from core.pilote import Pilote
+from banc_simule import sans_sht45  # noqa: E402
 
-CFG = json.loads((Path(__file__).resolve().parent.parent / "config.json")
-                 .read_text(encoding="utf-8"))
+CFG = sans_sht45(json.loads(
+    (Path(__file__).resolve().parent.parent / "config.json")
+    .read_text(encoding="utf-8")))
 
 
 def _etat(**kw) -> dict:

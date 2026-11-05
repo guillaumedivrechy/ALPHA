@@ -34,7 +34,10 @@ def _derouler(test, delai, voie, racine, sortie):
     cfg["journal"]["actif"] = False
     banc = Banc(cfg)
     sim = BS.SimTrace(banc, cfg["simulation"], cfg["modbus"], cfg["actionneurs"])
-    p = Pilote(banc, sim, cfg)
+    # SHT45 virtuel : température et humidité viennent du SHT45 par défaut
+    p = Pilote(banc, sim, cfg, BS.Sht45Simule(
+        temperature=lambda: sim.temperature,
+        humidite_pct=cfg["fluide"].get("humidite_relative", 50.0)))
     p.demarrer()
     try:
         time.sleep(1.0)

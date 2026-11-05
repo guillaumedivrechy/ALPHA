@@ -18,9 +18,11 @@ import pytest
 from core.banc import Banc
 from core.pilote import Pilote, TableGains
 from io_banc.simulateur import SimulateurBanc
+from banc_simule import sans_sht45  # noqa: E402
 
-CFG = json.loads((Path(__file__).resolve().parent.parent / "config.json")
-                 .read_text(encoding="utf-8"))
+CFG = sans_sht45(json.loads(
+    (Path(__file__).resolve().parent.parent / "config.json")
+    .read_text(encoding="utf-8")))
 FC = ("fc_3voies_0", "fc_3voies_90", "fc_bypass_ouvert", "fc_bypass_ferme",
       "fc_pdc_ouvert")
 

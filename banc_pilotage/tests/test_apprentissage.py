@@ -10,12 +10,13 @@ import pytest
 from core.apprentissage import Apprentissage
 from core.banc import Banc
 from core.pilote import Pilote, TableGains
+from banc_simule import sans_sht45  # noqa: E402
 
 CHEMIN_CFG = Path(__file__).resolve().parent.parent / "config.json"
 
 
 def _cfg():
-    return json.loads(CHEMIN_CFG.read_text(encoding="utf-8"))
+    return sans_sht45(json.loads(CHEMIN_CFG.read_text(encoding="utf-8")))
 
 
 class StubES:

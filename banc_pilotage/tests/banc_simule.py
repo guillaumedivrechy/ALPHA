@@ -25,6 +25,16 @@ from io_banc.sht45 import Sht45Simule
 from io_banc.simulateur import SimulateurBanc
 
 RACINE_TESTS = Path(__file__).resolve().parent
+def sans_sht45(cfg: dict) -> dict:
+    """Banc sans capteur d'air SHT45 (pilote construit sans capteur_air) :
+    PT100 et humidité saisie, cadre des tests de la boucle antérieurs au
+    SHT45. Par défaut, température et humidité viennent du SHT45, et un
+    pilote sans capteur refuserait toute mise en route."""
+    cfg.setdefault("temperature", {})["source"] = "pt100"
+    cfg.setdefault("humidite", {})["source"] = "manuelle"
+    return cfg
+
+
 CFG_DEPOT = json.loads((RACINE_TESTS.parent / "config.json")
                        .read_text(encoding="utf-8"))
 DONNEES = RACINE_TESTS / "donnees" / "banc_caracterise"

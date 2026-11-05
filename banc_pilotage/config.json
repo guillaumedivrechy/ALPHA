@@ -39,14 +39,14 @@
     "dp_iso_500": 0.02
   },
   "temperature": {
-    "_commentaire": "Temperature de l'air utilisee dans les calculs (rho, mu, dilatation, donc le Re). source = 'pt100' : PT100 du module Wago 750-450 en temps reel ; 'sht45' : capteur Sensirion SHT45 (section sht45) ; 'manuelle' : valeur_manuelle_c, les sondes sont ignorees pour les calculs (restent affichees). offset_pt100_c / offset_sht45_c : correction ajoutee a la lecture de chaque sonde (positive ou negative, 0 par defaut), par exemple apres comparaison a un thermometre de reference. Les bornes de vraisemblance (regulation.temperature_min_c / max_c) s'appliquent aux lectures brutes des deux sondes. Source 'sht45' sans mesure valide : toute mise en route est refusee, et une perte de mesure en marche (au-dela de sht45.maintien_s) provoque un arret de securite. Reglable dans l'onglet Configuration.",
-    "source": "pt100",
+    "_commentaire": "Temperature de l'air utilisee dans les calculs (rho, mu, dilatation, donc le Re). source = 'sht45' (defaut) : capteur Sensirion SHT45 (section sht45) en temps reel ; 'pt100' : PT100 du module Wago 750-450 en temps reel ; 'manuelle' : valeur_manuelle_c, les sondes sont ignorees pour les calculs (restent affichees). offset_pt100_c / offset_sht45_c : correction ajoutee a la lecture de chaque sonde (positive ou negative, 0 par defaut), par exemple apres comparaison a un thermometre de reference. Les bornes de vraisemblance (regulation.temperature_min_c / max_c) s'appliquent aux lectures brutes des deux sondes. Source 'sht45' sans mesure valide : toute mise en route est refusee, et une perte de mesure en marche (au-dela de sht45.maintien_s) provoque un arret de securite. Reglable dans l'onglet Configuration.",
+    "source": "sht45",
     "valeur_manuelle_c": 20.0,
     "offset_pt100_c": 0.0,
     "offset_sht45_c": 0.0
   },
   "humidite": {
-    "_commentaire": "Humidite relative de l'air utilisee dans les calculs (formules de l'air humide si > 0). source = 'sht45' : mesure du capteur Sensirion SHT45 (section sht45), corrigee de offset_sht45_pct ; 'manuelle' : valeur saisie fluide.humidite_relative. Capteur indisponible (debranche, mesure plus ancienne que sht45.maintien_s, invraisemblable) : repli automatique sur la valeur saisie, avec alerte, sans arret (l'humidite pese ~0,5 % sur rho). Reglable dans l'onglet Configuration.",
+    "_commentaire": "Humidite relative de l'air utilisee dans les calculs (formules de l'air humide si > 0). source = 'sht45' (defaut) : mesure du capteur Sensirion SHT45 (section sht45), corrigee de offset_sht45_pct ; 'manuelle' : valeur saisie fluide.humidite_relative. Capteur indisponible (debranche, mesure plus ancienne que sht45.maintien_s, invraisemblable) : repli automatique sur la valeur saisie, avec alerte, sans arret (l'humidite pese ~0,5 % sur rho). Reglable dans l'onglet Configuration.",
     "source": "sht45",
     "offset_sht45_pct": 0.0
   },

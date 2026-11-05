@@ -105,8 +105,10 @@ Capteur d'air SHT45 (température, humidité) sur boîtier SEK-SensorBridge :
 - [ ] PT100 et SHT45 côte à côte : leur écart se lit dans la colonne de
       gauche (« PT100 … · SHT45 … ») et dans le journal (colonnes T PT100 et
       T SHT45).
-- [ ] Choisir les sources dans l'onglet Configuration (« Température
-      utilisée », « Humidité utilisée »).
+- [ ] Sources dans l'onglet Configuration : « Température utilisée » et
+      « Humidité utilisée » sont sur **SHT45 par défaut**. Les passer sur
+      PT100 ou sur une valeur saisie seulement si besoin. Sans SHT45 qui
+      répond, la température SHT45 bloque toute mise en route.
 
 - [ ] Zéro ΔP et P amont (apprentissage « Zéro capteurs », soufflerie
       arrêtée) : offsets de quelques Pa au plus ; après « Appliquer », la
@@ -156,7 +158,7 @@ relance possible avant « Acquitter », puis reprise normale.
       (watchdog / 3G3MV, §1) ; bandeau « liaison Modbus perdue ». Rebrancher :
       rien ne repart seul ; acquitter, relancer.
 - [ ] Débrancher la PT100 : repli en quelques secondes.
-- [ ] Source de température « SHT45 » : débrancher l'USB du SEK-SensorBridge
+- [ ] Source de température « SHT45 » (défaut) : débrancher l'USB du SEK-SensorBridge
       en régulation. L'arrêt se déclenche au bout de `sht45.maintien_s`
       (10 s). Rebrancher : mesure revenue en quelques secondes (reconnexion
       automatique), puis acquitter et relancer.

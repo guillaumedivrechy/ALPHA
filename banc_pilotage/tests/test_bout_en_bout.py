@@ -139,7 +139,7 @@ def test_redemarrage_relit_les_apprentissages(banc_appris, monkeypatch):
     cfg = json.loads((racine / "config.json").read_text(encoding="utf-8"))
     banc = Banc(cfg)
     neuf = Pilote(banc, SimTrace(banc, cfg["simulation"], cfg["modbus"],
-                                 cfg["actionneurs"]), cfg)
+                                 cfg["actionneurs"]), cfg, b.air)
     assert neuf.table_gains.points == p.table_gains.points
     assert neuf.table_gains_bas_re.points == p.table_gains_bas_re.points
     assert neuf.table_gains_pdc.points == p.table_gains_pdc.points

@@ -248,8 +248,10 @@ def test_humidite_mesuree_utilisee_dans_les_calculs(monkeypatch, tmp_path):
 
 
 def test_humidite_perdue_repli_sur_la_saisie_sans_arret(monkeypatch, tmp_path):
-    b = _banc(monkeypatch, tmp_path, humidite={"source": "sht45"},
-              humidite_pct=30.0)
+    """Humidité du SHT45, température de la PT100 : SHT45 perdu, pas
+    d'arrêt."""
+    b = _banc(monkeypatch, tmp_path, temperature={"source": "pt100"},
+              humidite={"source": "sht45"}, humidite_pct=30.0)
     p = b.p
     b.consigne(6000, "veine")
     assert b.jusqu_a_convergence(200) is not None
@@ -330,6 +332,7 @@ def test_sans_capteur_installe(monkeypatch, tmp_path):
     b = BancSimule(monkeypatch, tmp_path, caracterise=True)
     b.p.capteur_air = None
     b.cfg["humidite"]["source"] = "manuelle"
+    b.cfg["temperature"]["source"] = "pt100"
     b.p.appliquer_config(b.cfg)
     b.cycles(1.0, verifier=False)
     e = b.p.etat
@@ -339,3 +342,30 @@ def test_sans_capteur_installe(monkeypatch, tmp_path):
     b.p.appliquer_config(b.cfg)
     b.cycles(1.0, verifier=False)
     assert "capteur non installé" in e["alerte_sht45"]
+
+
+def test_par_defaut_temperature_et_humidite_du_sht45(monkeypatch, tmp_path):
+    """Sans choix de l'opérateur (clés absentes, config.json antérieur au
+    SHT45) comme avec le config.json du dépôt : T et HR du SHT45 ; la PT100
+    reste lue pour comparaison."""
+    import json
+    from pathlib import Path
+    from core.banc import Banc
+    from core.pilote import Pilote
+    depot = json.loads((Path(__file__).resolve().parent.parent / "config.json")
+                       .read_text(encoding="utf-8"))
+    assert depot["temperature"]["source"] == "sht45"
+    assert depot["humidite"]["source"] == "sht45"
+    ancien = json.loads(json.dumps(depot))
+    ancien["temperature"].pop("source")
+    ancien.pop("humidite")
+    for cfg in (depot, ancien):
+        p = Pilote(Banc(cfg), object(), cfg)
+        assert (p.t_source, p.hr_source) == ("sht45", "sht45")
+    b = _banc(monkeypatch, tmp_path, humidite_pct=35.0)
+    b.sim.temperature = 23.0
+    b.cycles(1.0, verifier=False)
+    e = b.p.etat
+    assert (e["temperature_source"], e["humidite_source"]) == ("sht45", "sht45")
+    assert (e["temperature"], e["humidite"]) == pytest.approx((23.0, 35.0))
+    assert e["temperature_pt100"] is not None

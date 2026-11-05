@@ -521,6 +521,8 @@ def test_offset_pt100_dans_la_configuration(ihm):
     champ = app.champs[("temperature", "offset_pt100_c")][0]
     assert champ.text() == "0.00"
     app.chk_unlock.setChecked(True)
+    assert app.cmb_t_source.currentData() == "sht45"       # par défaut
+    app.cmb_t_source.setCurrentIndex(app.cmb_t_source.findData("pt100"))
     champ.setText("-0,8")
     app._enregistrer_configuration()
     assert ihm.b.p.offset_pt100 == -0.8

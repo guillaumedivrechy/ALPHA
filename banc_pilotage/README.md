@@ -146,8 +146,8 @@ séquence.
 | `diaphragme_iso` / `diaphragme_miller` | D, d à 20 °C, coefficients de dilatation, formule de C (RHG/Stolz) |
 | `veine` | **à renseigner** : section [m²] et longueur caractéristique [m] pour le Re veine |
 | `fluide` | γ, Sutherland, humidité relative, valeurs forcées ρ/μ optionnelles |
-| `temperature` | source de la température des calculs : `pt100` ou `sht45` en temps réel (corrigées de `offset_pt100_c` / `offset_sht45_c`, + ou −, 0 par défaut) ou `manuelle` (valeur saisie). SHT45 sans mesure : mise en route refusée, arrêt de sécurité en marche |
-| `humidite` | source de l'humidité des calculs : `sht45` (corrigée de `offset_sht45_pct`) ou `manuelle` (`fluide.humidite_relative`) ; SHT45 perdu : repli sur la valeur saisie, avec alerte, sans arrêt |
+| `temperature` | source de la température des calculs : `sht45` (défaut, y compris clé absente) ou `pt100` en temps réel (corrigées de `offset_pt100_c` / `offset_sht45_c`, + ou −, 0 par défaut) ou `manuelle` (valeur saisie). SHT45 sans mesure : mise en route refusée, arrêt de sécurité en marche |
+| `humidite` | source de l'humidité des calculs : `sht45` (défaut, y compris section absente ; corrigée de `offset_sht45_pct`) ou `manuelle` (`fluide.humidite_relative`) ; SHT45 perdu : repli sur la valeur saisie, avec alerte, sans arrêt |
 | `sht45` | capteur d'air Sensirion SHT45 sur SEK-SensorBridge (USB) : port série et port du boîtier (`auto` par défaut), tension 3,3 V, adresse I²C, période de lecture, maintien de la dernière mesure. Contrôle hors logiciel : `python controle_sht45.py` |
 | `zero_capteurs` | offsets de zéro des capteurs ΔP (apprentissage « zéro capteurs ») |
 | `selection_diaphragme` | bascule ISO / Miller en Re conduite (8000) et hystérésis (± 500) ; seuil − hystérésis ≥ 5000 (validité ISO) |

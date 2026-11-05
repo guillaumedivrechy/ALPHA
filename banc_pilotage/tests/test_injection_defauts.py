@@ -82,6 +82,8 @@ def test_erreur_interne_du_cycle(monkeypatch, tmp_path):
 @pytest.mark.parametrize("t_c", [150.0, 0.0])
 def test_pt100_invraisemblable(monkeypatch, tmp_path, t_c):
     b = _banc(monkeypatch, tmp_path)
+    b.cfg["temperature"]["source"] = "pt100"      # défaut : SHT45
+    b.p.appliquer_config(b.cfg)
     retablir = _alterer(b, lambda m: m.update(temperature=t_c))
     b.cycles(10, verifier=False)
     _assert_repli(b, "defaut_capteur", "température invraisemblable")
