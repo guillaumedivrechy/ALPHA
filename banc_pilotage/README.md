@@ -1,7 +1,7 @@
 # Logiciel de pilotage du banc aéraulique — diaphragmes ISO 5167 / Miller
 
 Pilotage automatique du variateur de la soufflerie pour atteindre un nombre
-de Reynolds cible, à partir des capteurs du banc (FCO432, PT100), via un
+de Reynolds cible, à partir des capteurs du banc (FCO432, PT100, SHT45), via un
 coupleur **Wago 750-362 (Modbus TCP)**.
 
 > **Opérateurs** : la notice d'utilisation simplifiée est dans
@@ -56,10 +56,11 @@ deux fichiers** (qm, Re, C, ε, Y1).
    500 Pa. Cette bascule est **matérielle** et transparente pour le
    logiciel — la sortie reste 0-10 V = 0-500 Pa. La voie **ΔP ISO**
    (débits plus élevés, ΔP plus grands) n'a que le capteur 500 Pa.
-5. ρ et μ de l'air sont **recalculés en continu** à partir de P_amont et de
-   la PT100 : gaz parfait + Sutherland pour l'air sec, formules d'air humide
-   si `fluide.humidite_relative` > 0 (50 % par défaut, valeur fixe : le banc
-   n'a pas d'hygromètre) — plus précis que les tables figées
+5. ρ et μ de l'air sont **recalculés en continu** à partir de P_amont, de
+   la température (PT100, SHT45 ou valeur saisie) et de l'humidité relative
+   (SHT45 ou valeur saisie `fluide.humidite_relative`) : gaz parfait +
+   Sutherland pour l'air sec, formules d'air humide si l'humidité est > 0
+   — plus précis que les tables figées
    des classeurs. Des valeurs forcées restent possibles (`config.json`).
 
 ## Installation
@@ -67,7 +68,7 @@ deux fichiers** (qm, Re, C, ε, Y1).
 Python ≥ 3.10.
 
 ```bash
-pip install -r requirements.txt   # PySide6, pyqtgraph, pymodbus, pytest
+pip install -r requirements.txt   # PySide6, pyqtgraph, pymodbus, Sensirion, pytest
 ```
 
 (`pymodbus` n'est nécessaire qu'en mode matériel ; le mode `--simulation`
@@ -145,7 +146,9 @@ séquence.
 | `diaphragme_iso` / `diaphragme_miller` | D, d à 20 °C, coefficients de dilatation, formule de C (RHG/Stolz) |
 | `veine` | **à renseigner** : section [m²] et longueur caractéristique [m] pour le Re veine |
 | `fluide` | γ, Sutherland, humidité relative, valeurs forcées ρ/μ optionnelles |
-| `temperature` | source de la température des calculs : PT100 en temps réel (corrigée de `offset_pt100_c`, + ou −, 0 par défaut) ou valeur saisie |
+| `temperature` | source de la température des calculs : `pt100` ou `sht45` en temps réel (corrigées de `offset_pt100_c` / `offset_sht45_c`, + ou −, 0 par défaut) ou `manuelle` (valeur saisie). SHT45 sans mesure : mise en route refusée, arrêt de sécurité en marche |
+| `humidite` | source de l'humidité des calculs : `sht45` (corrigée de `offset_sht45_pct`) ou `manuelle` (`fluide.humidite_relative`) ; SHT45 perdu : repli sur la valeur saisie, avec alerte, sans arrêt |
+| `sht45` | capteur d'air Sensirion SHT45 sur SEK-SensorBridge (USB) : port série et port du boîtier (`auto` par défaut), tension 3,3 V, adresse I²C, période de lecture, maintien de la dernière mesure. Contrôle hors logiciel : `python controle_sht45.py` |
 | `zero_capteurs` | offsets de zéro des capteurs ΔP (apprentissage « zéro capteurs ») |
 | `selection_diaphragme` | bascule ISO / Miller en Re conduite (8000) et hystérésis (± 500) ; seuil − hystérésis ≥ 5000 (validité ISO) |
 | `actionneurs` | temps de course des vannes (chiens de garde), butées de la recopie PdC |
@@ -167,6 +170,9 @@ le nœud. Les adresses par défaut de `config.json` supposent :
   voies ΔP et P_amont en 0-10 V = 0-500 Pa ; ΔP Miller et P_amont sont des
   capteurs maître/esclave 50+500 Pa (bascule matérielle, cf. § Principe 4) ;
 - PT100 sur module RTD 750-450 (mot 16, valeur en 0,1 °C) ;
+- capteur d'air SHT45 (température, humidité) hors coupleur : boîtier
+  Sensirion SEK-SensorBridge en USB sur le PC (`io_banc/sht45.py`, lecture
+  dans un thread dédié toutes les secondes) ;
 - entrées TOR 750-1405 (FC2) : fins de course bypass, PdC, vanne 3 voies
   (0°/180°/90°), défaut variateur (contact NF, lecture inversée), défauts
   actionneurs ;
@@ -309,7 +315,8 @@ python -m pytest tests/ -q
 | **Re** | Nombre de Reynolds | - | Critère d'écoulement (Re = ρ·v·Lc/μ). Re conduite au-dessus de la bascule (8000 par défaut) → ISO ; en dessous → Miller |
 | **ΔP** (dP) | Différence de pression | Pa | Pression différentielle au diaphragme, mesurée par capteurs FCO432 |
 | **P1_abs** | Pression absolue amont | Pa | P1_abs = P_atm + P_amont (gauge). Nécessaire pour calcul ρ (gaz parfait) |
-| **T** | Température | °C | Mesurée par PT100 (module 750-450), utilisée pour ρ et μ |
+| **T** | Température | °C | Mesurée par PT100 (module 750-450) ou SHT45 (SEK-SensorBridge), ou saisie ; utilisée pour ρ et μ |
+| **HR** | Humidité relative | % | Mesurée par SHT45 ou saisie ; utilisée pour ρ et μ (air humide) |
 | **ρ** (rho) | Masse volumique | kg/m³ | ρ = P/(R·T) pour l'air (gaz parfait), recalculé en continu |
 | **μ** (mu) | Viscosité dynamique | Pa·s | Loi de Sutherland (fonction de T), utilisée pour Re et calculs diaphragmes |
 | **ν** (nu) | Viscosité cinématique | m²/s | ν = μ / ρ |

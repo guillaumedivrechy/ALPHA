@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QLabel, QLineEdit, QPushButton,
     QCheckBox, QSlider, QMessageBox, QFileDialog,
     QFrame, QProgressBar, QProgressDialog,
-    QSpinBox, QDoubleSpinBox,
+    QSpinBox, QDoubleSpinBox, QComboBox,
 )
 from PySide6.QtGui import QPixmap
 from PySide6.QtCore import Qt, QTimer
@@ -91,6 +91,17 @@ def _alpha(v, _):
 def _humidite_relative(v, _):
     return None if 0 <= v <= 100 else "doit être entre 0 et 100 %"
 
+def _offset_humidite(v, _):
+    return None if -20.0 <= v <= 20.0 else "doit être entre -20 et +20 %HR"
+
+# sources de l'air proposées dans l'onglet Configuration (libellé, valeur
+# écrite dans config.json)
+SOURCES_T_IHM = [("PT100 (Wago 750-450)", "pt100"),
+                 ("SHT45 (SEK-SensorBridge)", "sht45"),
+                 ("Température saisie", "manuelle")]
+SOURCES_HR_IHM = [("SHT45 (SEK-SensorBridge)", "sht45"),
+                  ("Humidité saisie", "manuelle")]
+
 def _d_inferieur_D(prefixe):
     def f(v, valeurs):
         D = valeurs.get((prefixe, "D20_mm"))
@@ -119,7 +130,9 @@ DEFAUTS_CLES_RECENTES = {
     ("mesure_dp", "seuil_debit_nul_pa"): 0.05,
     ("temperature", "valeur_manuelle_c"): 20.0,
     ("temperature", "offset_pt100_c"): 0.0,
+    ("temperature", "offset_sht45_c"): 0.0,
     ("fluide", "humidite_relative"): 0.0,
+    ("humidite", "offset_sht45_pct"): 0.0,
 }
 
 # affichage des clés absentes sans défaut (ex. veine.hauteur_m / largeur_m,
@@ -500,6 +513,7 @@ class Application(QMainWindow):
         ("consigne_limitee",  "⚠ Consigne limitée à la plage atteignable"),
         ("alerte_table_ff",   "⚠ Table de gains à refaire"),
         ("alerte_pdc",        "⚠ Consigne hors de portée du mode PdC"),
+        ("alerte_sht45",      "⚠ Capteur d'air SHT45"),
     ]
     # entrées TOR « défaut actionneur » : alerte seulement, sans repli (lues
     # dans mesures_brutes, pas sur pilote.etat)
@@ -569,7 +583,18 @@ class Application(QMainWindow):
         bhl = QHBoxLayout(body)
         bhl.setContentsMargins(0, 0, 0, 0)
         bhl.setSpacing(0)
-        bhl.addWidget(self._build_left_rail())
+        # colonne de gauche défilante : sur un écran bas (900 px), elle
+        # imposait sinon sa hauteur à toute la fenêtre
+        rail_defilant = QScrollArea()
+        rail_defilant.setWidget(self._build_left_rail())
+        rail_defilant.setWidgetResizable(True)
+        rail_defilant.setFixedWidth(262)
+        rail_defilant.setFrameShape(QFrame.Shape.NoFrame)
+        rail_defilant.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        rail_defilant.setStyleSheet("QScrollArea { background:#FFFFFF;"
+                                    " border:none; }")
+        bhl.addWidget(rail_defilant)
 
         self._stack = QStackedWidget()
         self._stack.addWidget(self._build_scope())      # 0
@@ -947,7 +972,6 @@ class Application(QMainWindow):
     def _build_left_rail(self) -> QWidget:
         rail = QWidget()
         rail.setObjectName("left-rail")
-        rail.setFixedWidth(262)
         vl = QVBoxLayout(rail)
         vl.setContentsMargins(16, 14, 16, 14)
         vl.setSpacing(0)
@@ -1004,6 +1028,9 @@ class Application(QMainWindow):
             wvl.addWidget(bar)
             vl.addWidget(w)
             self._ch_rows.append((key, lv, bar, fmt, max_val))
+
+        # ── AIR — TEMPS RÉEL (température, humidité, sondes) ──
+        vl.addWidget(self._build_section_air())
 
         # ── PRESSIONS — TEMPS RÉEL ─────────────────────────────
         hdr_p = QWidget()
@@ -3086,8 +3113,6 @@ class Application(QMainWindow):
             gl.addWidget(card, row, col)
             return card
 
-        cfg = self.cfg
-
         # ═══════════════════════════════════════════════════════════════
         # SECTION A : CALCUL REYNOLDS (paramètres physiques des formules)
         # ═══════════════════════════════════════════════════════════════
@@ -3103,7 +3128,6 @@ class Application(QMainWindow):
         _grp("Fluide", [
             (("patm_pa",),                      "Pression atmosphérique", "Pa",   "{:.2f}", _positif),
             (("fluide","gamma"),                "γ (rapport Cp/Cv)",      "—",    "{:.5f}", _positif),
-            (("fluide","humidite_relative"),    "Humidité relative",      "%",    "{:.1f}", _humidite_relative),
         ], col=0, row=1)
 
         # avec une humidité relative > 0, μ vient des formules de l'air
@@ -3114,30 +3138,53 @@ class Application(QMainWindow):
             (("fluide","sutherland_s"),       "Constante S",      "K",    "{:.1f}", _positif),
         ], col=0, row=2)
 
-        # température de l'air : PT100 en temps réel (corrigée d'un offset,
-        # positif ou négatif) ou saisie à la main
-        carte_t = _grp("Température de l'air", [
+        # air : température (PT100, SHT45 ou saisie) et humidité (SHT45 ou
+        # saisie), chaque sonde corrigée de son offset (positif ou négatif)
+        carte_t = _grp("Air : température et humidité", [
             (("temperature","offset_pt100_c"), "Offset PT100 (+ ou −)", "°C",
+             "{:.2f}", _offset_pt100),
+            (("temperature","offset_sht45_c"), "Offset SHT45 (+ ou −)", "°C",
              "{:.2f}", _offset_pt100),
             (("temperature","valeur_manuelle_c"), "Température saisie", "°C",
              "{:.1f}", _temperature_saisie),
+            (("humidite","offset_sht45_pct"), "Offset SHT45 humidité (+ ou −)",
+             "%HR", "{:.1f}", _offset_humidite),
+            (("fluide","humidite_relative"), "Humidité saisie", "%HR",
+             "{:.1f}", _humidite_relative),
         ], col=1, row=3)
-        rw_t = QWidget()
-        rw_t.setStyleSheet("background:transparent; border:none;")
-        rwl_t = QHBoxLayout(rw_t)
-        rwl_t.setContentsMargins(16, 11, 16, 11)
-        self.chk_t_manuelle = QCheckBox(
-            "Utiliser la température saisie (PT100 ignorée)")
-        self.chk_t_manuelle.setToolTip(
-            "Coché : ρ, μ et le Re sont calculés avec la température saisie "
-            "ci-dessus ; la PT100 n'est plus lue pour les calculs ni "
-            "surveillée. Décoché : PT100 en temps réel, corrigée de l'offset "
-            "ci-dessus (0 par défaut).")
-        self.chk_t_manuelle.setChecked(
-            cfg.get("temperature", {}).get("source") == "manuelle")
-        self.chk_t_manuelle.setEnabled(False)
-        rwl_t.addWidget(self.chk_t_manuelle)
-        carte_t.layout().addWidget(rw_t)
+
+        def _choix(libelle: str, options: list, aide: str) -> QComboBox:
+            rw = QWidget()
+            rw.setStyleSheet("background:transparent; border:none;")
+            rwl = QHBoxLayout(rw)
+            rwl.setContentsMargins(16, 8, 16, 8)
+            ll = QLabel(libelle)
+            ll.setStyleSheet("font-size:12.5px; color:#3A4D60;"
+                             " background:transparent; border:none;")
+            rwl.addWidget(ll)
+            rwl.addStretch()
+            cmb = QComboBox()
+            for texte, valeur in options:
+                cmb.addItem(texte, valeur)
+            cmb.setToolTip(aide)
+            cmb.setEnabled(False)
+            rwl.addWidget(cmb)
+            carte_t.layout().addWidget(rw)
+            return cmb
+
+        self.cmb_t_source = _choix(
+            "Température utilisée", SOURCES_T_IHM,
+            "Température de l'air des calculs (ρ, μ, Re). PT100 ou SHT45 : "
+            "mesure en temps réel, corrigée de l'offset de la sonde. SHT45 "
+            "sans mesure : mise en route refusée, arrêt de sécurité si la "
+            "mesure se perd en marche. Saisie : les sondes restent affichées "
+            "mais ne servent plus aux calculs.")
+        self.cmb_hr_source = _choix(
+            "Humidité utilisée", SOURCES_HR_IHM,
+            "Humidité relative des calculs (formules de l'air humide). SHT45 "
+            "sans mesure : repli sur l'humidité saisie, avec alerte, sans "
+            "arrêt (effet ~0,5 % sur ρ).")
+        self._selectionner_sources_air()
 
         _grp("Géométrie veine d'essai (rectangulaire)", [
             (("veine","hauteur_m"),             "Hauteur H",        "m",    "{:.3f}", _positif),
@@ -3203,6 +3250,28 @@ class Application(QMainWindow):
         albl_tu.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         artl.addWidget(albl_tu)
         acl.addWidget(arow_t)
+
+        # Humidité relative (utilisée par les calculs : SHT45 ou saisie)
+        arow_hr = QWidget()
+        arow_hr.setStyleSheet("background:transparent; border-bottom:1px solid #E9EEF1;")
+        arhl = QHBoxLayout(arow_hr)
+        arhl.setContentsMargins(16, 11, 16, 11)
+        arhl.setSpacing(8)
+        albl_hr = QLabel("Humidité relative")
+        albl_hr.setStyleSheet("font-size:12.5px; color:#3A4D60; background:transparent; border:none;")
+        arhl.addWidget(albl_hr)
+        arhl.addStretch()
+        self._lbl_air_hr = QLabel("—")
+        self._lbl_air_hr.setStyleSheet(
+            "font-family:'IBM Plex Mono',monospace; font-size:12px; font-weight:600;"
+            " color:#14223C; background:transparent; border:none;")
+        arhl.addWidget(self._lbl_air_hr)
+        albl_hru = QLabel("%HR")
+        albl_hru.setStyleSheet("font-size:11px; color:#6B7E8E; background:transparent; border:none;")
+        albl_hru.setFixedWidth(46)
+        albl_hru.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        arhl.addWidget(albl_hru)
+        acl.addWidget(arow_hr)
 
         # Masse volumique (ρ)
         arow_rho = QWidget()
@@ -3832,7 +3901,8 @@ class Application(QMainWindow):
             return
         for entree, _ in self.champs.values():
             entree.setEnabled(unlock)
-        self.chk_t_manuelle.setEnabled(unlock)
+        self.cmb_t_source.setEnabled(unlock)
+        self.cmb_hr_source.setEnabled(unlock)
         self.btn_enregistrer.setEnabled(unlock)
         self.lbl_cfg_statut.setText("")
 
@@ -3869,8 +3939,15 @@ class Application(QMainWindow):
         for chemin, (label, val_fmt) in self._champs_lecture.items():
             label.setText(_formater_champ(val_fmt, self._valeur_affichee(chemin)))
         self._carte_bascule.titre.setText(self._titre_bascule().upper())
-        self.chk_t_manuelle.setChecked(
-            self.cfg.get("temperature", {}).get("source") == "manuelle")
+        self._selectionner_sources_air()
+
+    def _selectionner_sources_air(self) -> None:
+        """Listes « température / humidité utilisée » <- config en mémoire
+        (clés absentes : PT100 et humidité saisie, comme avant le SHT45)."""
+        for cmb, section, defaut in ((self.cmb_t_source, "temperature", "pt100"),
+                                     (self.cmb_hr_source, "humidite", "manuelle")):
+            i = cmb.findData(self.cfg.get(section, {}).get("source", defaut))
+            cmb.setCurrentIndex(max(i, 0))
 
     def _synchroniser_affichage_config(self) -> None:
         """Après toute écriture de la configuration (Appliquer d'un
@@ -3962,7 +4039,9 @@ class Application(QMainWindow):
                 pass
             _cfg_ecrire(candidat, chemin, v)
         _cfg_ecrire(candidat, ("temperature", "source"),
-                    "manuelle" if self.chk_t_manuelle.isChecked() else "pt100")
+                    self.cmb_t_source.currentData())
+        _cfg_ecrire(candidat, ("humidite", "source"),
+                    self.cmb_hr_source.currentData())
         try:
             banc = Banc(candidat)
         except (ValueError, KeyError) as exc:
@@ -4082,7 +4161,79 @@ class Application(QMainWindow):
             "u_variateur": brutes.get("frequence_variateur", e.get("u_variateur")),
         }
 
+    def _build_section_air(self) -> QWidget:
+        """Température et humidité utilisées par les calculs, avec leur
+        source, et lecture des deux sondes (PT100, SHT45) pour comparer."""
+        bloc = QWidget()
+        bvl = QVBoxLayout(bloc)
+        bvl.setContentsMargins(0, 0, 0, 0)
+        bvl.setSpacing(0)
+        hdr = QWidget()
+        hl = QHBoxLayout(hdr)
+        hl.setContentsMargins(0, 32, 0, 8)
+        lbl = QLabel("🌡 AIR — TEMPS RÉEL")
+        lbl.setObjectName("section-hdr")
+        hl.addWidget(lbl)
+        hl.addStretch()
+        bvl.addWidget(hdr)
+        self._air_vals = {}
+        for cle, nom in (("temperature", "T air [°C]"),
+                         ("humidite", "HR [%]")):
+            w = QWidget()
+            w.setObjectName("ligne-air")
+            w.setStyleSheet("#ligne-air { border-bottom:1px solid #E9EEF1; }"
+                            " QLabel { border:none; }")
+            wl = QHBoxLayout(w)
+            wl.setContentsMargins(0, 9, 0, 9)
+            wl.setSpacing(8)
+            ln = QLabel(nom)
+            ln.setObjectName("ch-name")
+            wl.addWidget(ln, 1)
+            lv = QLabel("—")
+            lv.setObjectName("ch-val")
+            lv.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            wl.addWidget(lv)
+            bvl.addWidget(w)
+            self._air_vals[cle] = lv
+        # sondes : PT100 · SHT45, et état du SHT45
+        self._lbl_air_sondes = QLabel("—")
+        self._lbl_air_sondes.setWordWrap(True)
+        self._lbl_air_sondes.setStyleSheet(
+            "font-size:10.5px; color:#6B7E8E; background:transparent;"
+            " border:none; padding-top:6px;")
+        bvl.addWidget(self._lbl_air_sondes)
+        return bloc
+
+    def _tick_air(self, e: dict) -> None:
+        def nombre(v, fmt="{:.1f}"):
+            return "—" if v is None else fmt.format(v).replace(".", ",")
+        T = e.get("temperature")
+        source_t = {"sht45": "SHT45", "manuelle": "saisie"}.get(
+            e.get("temperature_source"), "PT100")
+        self._air_vals["temperature"].setText(
+            nombre(T) + (f" ({source_t})" if T is not None else ""))
+        hr = e.get("humidite")
+        source_hr = "SHT45" if e.get("humidite_source") == "sht45" else "saisie"
+        self._air_vals["humidite"].setText(
+            nombre(hr) + (f" ({source_hr})" if hr is not None else ""))
+        sht45 = e.get("sht45") or {}
+        texte = (f"PT100 {nombre(e.get('temperature_pt100'))} °C  ·  "
+                 f"SHT45 {nombre(e.get('temperature_sht45'))} °C")
+        alerte = e.get("alerte_sht45")
+        if alerte:
+            texte += "\n⚠ " + alerte
+            couleur = COLORS["error"]
+        else:
+            couleur = "#6B7E8E"
+            if sht45.get("erreur") and sht45.get("description") is not None:
+                texte += "\nSHT45 absent (non utilisé)"
+        self._lbl_air_sondes.setText(texte)
+        self._lbl_air_sondes.setStyleSheet(
+            f"font-size:10.5px; color:{couleur}; background:transparent;"
+            " border:none; padding-top:6px;")
+
     def _tick_left(self, e: dict) -> None:
+        self._tick_air(e)
         brutes = e.get("mesures_brutes") or {}
         vals = self._valeurs_voies(e)
         for key, lv, bar, fmt, max_val in self._ch_rows:
@@ -4522,6 +4673,19 @@ class Application(QMainWindow):
             self._curve_iso_stable.setData(
                 [p[0] for p in paliers_iso], [p[1] for p in paliers_iso])
 
+    def _suffixe_source_t(self, e: dict) -> str:
+        """« (PT100) », « (SHT45, offset −0,50) », « (saisie) »… : source de
+        la température affichée, et l'offset qui la corrige."""
+        source = e.get("temperature_source")
+        if source == "manuelle":
+            return " (saisie)"
+        nom, offset = (("SHT45", self.pilote.offset_sht45_t)
+                       if source == "sht45" else
+                       ("PT100", self.pilote.offset_pt100))
+        if offset:
+            return f" ({nom}, offset {offset:+.2f})".replace(".", ",")
+        return f" ({nom})"
+
     def _tick_config(self, e: dict) -> None:
         """Mise à jour temps réel de l'encart Caractéristiques de l'air (onglet Configuration)."""
         # Uniquement si l'onglet Configuration est visible (page 4)
@@ -4533,19 +4697,18 @@ class Application(QMainWindow):
         P_abs = self.pilote.banc.patm_pa + (e.get("p_amont") or 0.0)
 
         if T is not None:
-            # Affichage température (utilisée par les calculs)
-            saisie = e.get("temperature_source") == "manuelle"
-            offset = self.pilote.offset_pt100
-            if saisie:
-                suffixe = " (saisie)"
-            elif offset:
-                suffixe = f" (offset {offset:+.2f})".replace(".", ",")
-            else:
-                suffixe = ""
-            self._lbl_air_temp.setText(f"{T:.1f}".replace(".", ",") + suffixe)
+            # Affichage température (utilisée par les calculs) et source
+            self._lbl_air_temp.setText(
+                f"{T:.1f}".replace(".", ",") + self._suffixe_source_t(e))
 
-            # Récupérer l'humidité relative depuis la config
-            HR_pct = self.cfg.get("fluide", {}).get("humidite_relative", 0.0)
+            # humidité utilisée par la boucle (SHT45 ou saisie)
+            HR_pct = e.get("humidite")
+            if HR_pct is None:
+                HR_pct = self.cfg.get("fluide", {}).get("humidite_relative", 0.0)
+            source_hr = "SHT45" if e.get("humidite_source") == "sht45" \
+                else "saisie"
+            self._lbl_air_hr.setText(
+                f"{HR_pct:.1f}".replace(".", ",") + f" ({source_hr})")
 
             # Calcul propriétés de l'air
             if HR_pct > 0:
@@ -4598,6 +4761,7 @@ class Application(QMainWindow):
         else:
             # Si pas de température, tout en "—"
             self._lbl_air_temp.setText("—")
+            self._lbl_air_hr.setText("—")
             self._lbl_air_rho.setText("—")
             self._lbl_air_mu.setText("—")
             self._lbl_air_nu.setText("—")

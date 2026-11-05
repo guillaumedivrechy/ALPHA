@@ -21,6 +21,7 @@ from pathlib import Path
 
 from core.banc import Banc
 from core.pilote import Pilote
+from io_banc.sht45 import Sht45Simule
 from io_banc.simulateur import SimulateurBanc
 
 RACINE_TESTS = Path(__file__).resolve().parent
@@ -74,7 +75,12 @@ class BancSimule:
         banc = Banc(cfg)
         self.sim = SimTrace(banc, cfg["simulation"], cfg["modbus"],
                             cfg["actionneurs"])
-        self.p = Pilote(banc, self.sim, cfg)
+        # SHT45 virtuel : T de l'air simulé, humidité saisie (débrancher()
+        # pour simuler une panne)
+        self.air = Sht45Simule(
+            temperature=lambda: self.sim.temperature,
+            humidite_pct=cfg["fluide"].get("humidite_relative", 50.0))
+        self.p = Pilote(banc, self.sim, cfg, self.air)
         self.violations: list[str] = []
         self.p._position_repos()
         self.cycles(20.0)

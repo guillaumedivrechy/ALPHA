@@ -72,7 +72,8 @@ def test_format_demande_par_l_exploitation(tmp_path):
         "phase regulation", "Qv [m3/s]", "ρ [kg/m3]", "µ [Pa.s]",
         "ν [m2/s]", "dP ISO [Pa]", "dP Miller [Pa]", "P Amont [Pa]",
         "Vanne PDC [V]", "Vanne PDC [% ferm]", "Vanne ISO", "Vanne Miller",
-        "T [degC]", "source T", "H [%HR]", "Defaut",
+        "T [degC]", "source T", "H [%HR]", "source H", "T PT100 [degC]",
+        "T SHT45 [degC]", "Defaut",
         "FC 3 voies 0°", "FC 3 voies 90°", "FC 3 voies 180°",
         "FC Bypass ouvert", "FC Bypass fermé", "FC PdC ouverte",
         "FC PdC fermée"]
@@ -349,3 +350,25 @@ def test_fins_de_course_en_dernieres_colonnes(tmp_path):
     assert ligne[-7:] == ["1", "0", "0", "1", "0", "0", "1"]
     assert entetes({"0": "iso", "90": "miller"})[-7:-5] == [
         "FC 3 voies 0° (ISO)", "FC 3 voies 90° (Miller)"]
+
+
+def test_colonnes_du_capteur_d_air(tmp_path):
+    """SHT45 : humidité utilisée et sa source, lectures des deux sondes ;
+    SHT45 perdu, l'alerte figure dans la colonne Defaut."""
+    j = JournalEssai(tmp_path, periode_s=0.0)
+    j.ouvrir(0.0)
+    j.enregistrer(_etat(humidite=37.4, humidite_source="sht45",
+                        temperature_pt100=26.1, temperature_sht45=21.3), 0.2,
+                  humidite_relative=50.0)
+    j.enregistrer(_etat(humidite=50.0, humidite_source="manuelle",
+                        temperature_pt100=26.1, temperature_sht45=None,
+                        alerte_sht45="SHT45 indisponible"), 0.4)
+    j.fermer()
+    entete, l1, l2 = (l.split(";") for l in
+                      j.chemin.read_text(encoding="utf-8-sig").splitlines())
+    c1, c2 = dict(zip(entete, l1)), dict(zip(entete, l2))
+    assert (c1["H [%HR]"], c1["source H"]) == ("37,4", "sht45")
+    assert (c1["T PT100 [degC]"], c1["T SHT45 [degC]"]) == ("26,1", "21,3")
+    assert c1["Defaut"] == ""
+    assert (c2["source H"], c2["T SHT45 [degC]"]) == ("manuelle", "")
+    assert c2["Defaut"] == "SHT45 indisponible"

@@ -42,6 +42,11 @@ COLONNES = [
     ("temperature", "T [degC]"),
     ("temperature_source", "source T"),
     ("humidite_relative", "H [%HR]"),
+    # source de l'humidité et lectures des deux sondes (corrigées de leur
+    # offset), pour les comparer quelle que soit la source retenue
+    ("humidite_source", "source H"),
+    ("temperature_pt100", "T PT100 [degC]"),
+    ("temperature_sht45", "T SHT45 [degC]"),
     ("defauts", "Defaut"),
     # fins de course, en dernières colonnes : 1 = contact actif, 0 = non
     # (vanne 3 voies : diaphragme de chaque butée ajouté à l'ouverture du
@@ -81,7 +86,9 @@ _MESURES_DEBIT = ("re_mesure", "qv")
 
 # drapeaux de défaut recopiés dans la colonne « defauts »
 _DEFAUTS = ("erreur_com", "defaut_capteur", "defaut_vanne",
-            "defaut_variateur", "defaut_pdc", "incoherence_vanne")
+            "defaut_variateur", "defaut_pdc", "incoherence_vanne",
+            # SHT45 perdu : humidité saisie utilisée à sa place
+            "alerte_sht45")
 
 
 # colonnes arrondies à l'unité. Un Reynolds est un nombre sans dimension de
@@ -185,7 +192,8 @@ class JournalEssai:
                     recopie_pdc: tuple[float, float] | None = None) -> None:
         """Écrit une ligne si la période est écoulée. Silencieux sinon.
         zero_capteurs : zéros appris, ôtés des ΔP bruts des deux capteurs ;
-        humidite_relative : humidité de la configuration [%] ;
+        humidite_relative : humidité de la configuration [%], si l'état
+        ne publie pas l'humidité utilisée (etat["humidite"]) ;
         recopie_pdc : tensions de recopie de la vanne PdC fermée / ouverte
         (apprentissage « calibration PdC »)."""
         if self._f is None:
@@ -228,7 +236,8 @@ class JournalEssai:
         lu = etat.get("diaphragme_lu")
         valeurs["vanne_iso"] = lu == "iso"
         valeurs["vanne_miller"] = lu == "miller"
-        valeurs["humidite_relative"] = humidite_relative
+        valeurs["humidite_relative"] = etat.get("humidite",
+                                                humidite_relative)
         for cle in _FINS_DE_COURSE:
             v = brutes.get(cle)
             valeurs[cle] = None if v is None else bool(v)

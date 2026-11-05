@@ -277,12 +277,12 @@ def test_changement_de_reference_convertit_la_consigne_saisie(ihm):
 
 
 def test_temperature_saisie_choisie_dans_la_configuration(ihm):
-    """Onglet Configuration : case « température saisie » et valeur, écrites
-    dans config.json et appliquées au pilote à l'enregistrement."""
+    """Onglet Configuration : source « température saisie » et valeur,
+    écrites dans config.json et appliquées au pilote à l'enregistrement."""
     app = ihm.app
     app.chk_unlock.setChecked(True)
-    assert app.chk_t_manuelle.isEnabled()
-    app.chk_t_manuelle.setChecked(True)
+    assert app.cmb_t_source.isEnabled()
+    app.cmb_t_source.setCurrentIndex(app.cmb_t_source.findData("manuelle"))
     app.champs[("temperature", "valeur_manuelle_c")][0].setText("27,5")
     app._enregistrer_configuration()
     assert ihm.b.p.t_manuelle == 27.5
@@ -719,7 +719,7 @@ def test_configuration_relue_au_redemarrage(ihm):
     a.chk_unlock.setChecked(True)
     a.champs[("temperature", "offset_pt100_c")][0].setText("-0,4")
     a.champs[("temperature", "valeur_manuelle_c")][0].setText("23,5")
-    a.chk_t_manuelle.setChecked(True)
+    a.cmb_t_source.setCurrentIndex(a.cmb_t_source.findData("manuelle"))
     a.champs[("selection_diaphragme", "seuil_re")][0].setText("8500")
     a._enregistrer_configuration()
     assert not [d for d in ihm.dialogues if d[0] == "critical"], ihm.dialogues
@@ -789,3 +789,42 @@ def test_pressions_affichees_corrigees_du_zero(ihm):
     assert v["dp_miller"] == pytest.approx(br["dp_diaph_500"] - 0.2)
     lv = next(lv for cle, lv, *_ in a._ch_rows if cle == "p_amont")
     assert lv.text().replace(",", ".") == f"{v['p_amont']:.2f}"
+
+
+def test_sources_sht45_dans_la_configuration(ihm):
+    """Onglet Configuration : température et humidité du SHT45, offsets,
+    écrits dans config.json et appliqués au pilote ; écran principal et
+    carte de l'air affichent valeurs et sources."""
+    app, p = ihm.app, ihm.b.p
+    ihm.b.air.bruit_t = ihm.b.air.bruit_hr = 0.0
+    ihm.b.air.humidite_pct = 40.0
+    app.chk_unlock.setChecked(True)
+    app.cmb_t_source.setCurrentIndex(app.cmb_t_source.findData("sht45"))
+    app.cmb_hr_source.setCurrentIndex(app.cmb_hr_source.findData("sht45"))
+    app.champs[("temperature", "offset_sht45_c")][0].setText("-0,5")
+    app.champs[("humidite", "offset_sht45_pct")][0].setText("1,5")
+    app._enregistrer_configuration()
+    assert not [d for d in ihm.dialogues if d[0] == "critical"], ihm.dialogues
+    cfg = json.loads(app.chemin_cfg.read_text(encoding="utf-8"))
+    assert cfg["temperature"]["source"] == "sht45"
+    assert cfg["temperature"]["offset_sht45_c"] == -0.5
+    assert cfg["humidite"] == {**cfg["humidite"], "source": "sht45",
+                               "offset_sht45_pct": 1.5}
+    assert (p.t_source, p.hr_source) == ("sht45", "sht45")
+    ihm.avancer(1.0)
+    e = p.etat
+    assert e["humidite"] == pytest.approx(41.5)
+    assert e["temperature"] == pytest.approx(ihm.b.sim.temperature - 0.5)
+    assert app._air_vals["humidite"].text() == "41,5 (SHT45)"
+    assert app._air_vals["temperature"].text().endswith("(SHT45)")
+    assert "PT100" in app._lbl_air_sondes.text()
+    # capteur perdu banc à l'arrêt : alerte affichée, mise en route refusée
+    ihm.b.air.debrancher()
+    ihm.avancer(p.sht45_maintien_s + 1.0)
+    assert "consignes refusées" in app._lbl_air_sondes.text()
+    assert p.demarrer_regulation() is not None
+    # relu au redémarrage de l'IHM (listes positionnées depuis la config)
+    app.cfg = cfg
+    app._remplir_champs_config()
+    assert app.cmb_t_source.currentData() == "sht45"
+    assert app.cmb_hr_source.currentData() == "sht45"

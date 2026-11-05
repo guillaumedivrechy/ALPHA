@@ -6,5 +6,11 @@ PySide6>=6.5,<7
 pyqtgraph>=0.13,<0.15
 # Communication Modbus TCP (inutile en mode --simulation)
 pymodbus>=3.6,<4
+# Capteur d'air SHT45 sur SEK-SensorBridge (USB) ; pyserial : recherche du
+# port série du boîtier. Validé avec sensirion-shdlc-sensorbridge 1.0.0,
+# sensirion-shdlc-driver 1.0.2, pyserial 3.5.
+sensirion-shdlc-sensorbridge>=1.0,<2
+sensirion-shdlc-driver>=1.0.2,<2
+pyserial>=3.4,<4
 # Développement / tests
 pytest>=7

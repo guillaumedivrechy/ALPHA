@@ -34,6 +34,22 @@ def _abandon(message: str) -> None:
     sys.exit(f"\nDémarrage impossible :\n{message}\n")
 
 
+def _capteur_air(cfg: dict, simulation: bool, es):
+    """Capteur d'air SHT45 (SEK-SensorBridge en USB), virtuel en simulation ;
+    None si sht45.actif = false. Absent ou débranché, le logiciel démarre :
+    le pilote le signale et retombe sur les valeurs saisies."""
+    c = cfg.get("sht45", {})
+    if not c.get("actif", True):
+        return None
+    if simulation:
+        from io_banc.sht45 import Sht45Simule
+        return Sht45Simule(
+            temperature=lambda: es.temperature,
+            humidite_pct=cfg.get("fluide", {}).get("humidite_relative", 50.0))
+    from io_banc.sht45 import Sht45SensorBridge
+    return Sht45SensorBridge(c)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--simulation", action="store_true",
@@ -82,7 +98,12 @@ def main() -> None:
         mode = "wago " + cfg["modbus"]["ip"]
 
     try:
-        pilote = Pilote(banc, es, cfg)
+        capteur_air = _capteur_air(cfg, args.simulation, es)
+    except ValueError as exc:
+        _abandon(f"{chemin_cfg.name}, section \"sht45\" : {exc}")
+
+    try:
+        pilote = Pilote(banc, es, cfg, capteur_air)
         pilote.demarrer()
     except KeyError as exc:
         _abandon(f"{chemin_cfg.name} : paramètre obligatoire absent ({exc}).")

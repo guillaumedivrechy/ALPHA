@@ -82,6 +82,16 @@ def _offset_pt100(valeur) -> float:
     return min(max(float(valeur), -10.0), 10.0) if _nombre(valeur) else 0.0
 
 
+def _borne(valeur, mini: float, maxi: float, defaut: float = 0.0) -> float:
+    return min(max(float(valeur), mini), maxi) if _nombre(valeur) else defaut
+
+
+# sources de la température de l'air (temperature.source) et de l'humidité
+# (humidite.source)
+SOURCES_TEMPERATURE = ("pt100", "sht45", "manuelle")
+SOURCES_HUMIDITE = ("sht45", "manuelle")
+
+
 def _temperature_manuelle(source, valeur) -> float | None:
     """Température de l'air saisie à la main (temperature.source =
     "manuelle"), ou None : PT100 lue en temps réel."""
@@ -366,9 +376,12 @@ FC_3VOIES = {"0": "fc_3voies_0", "90": "fc_3voies_90"}
 
 
 class Pilote:
-    def __init__(self, banc: Banc, es, cfg: dict):
+    def __init__(self, banc: Banc, es, cfg: dict, capteur_air=None):
         self.banc = banc
         self.es = es                       # EntreesSorties (Wago ou simulateur)
+        # capteur d'air SHT45 (io_banc.sht45), ou None : lu sans attente,
+        # sa dernière mesure seulement (thread de lecture propre)
+        self.capteur_air = capteur_air
         r = cfg["regulation"]
 
         # CRITIQUE : Valider période > 0 pour éviter division par zéro
@@ -443,12 +456,8 @@ class Pilote:
         # ventilateur à fond sans que rien ne le signale.
         self.t_min_c = r.get("temperature_min_c", -40.0)
         self.t_max_c = r.get("temperature_max_c", 80.0)
-        # température saisie à la main (None = PT100 en temps réel)
-        tcfg = cfg.get("temperature", {})
-        self.t_manuelle = _temperature_manuelle(tcfg.get("source"),
-                                                tcfg.get("valeur_manuelle_c"))
-        # correction ajoutée à la lecture de la PT100 (0 par défaut)
-        self.offset_pt100 = _offset_pt100(tcfg.get("offset_pt100_c", 0.0))
+        # sources de la température et de l'humidité de l'air, offsets
+        self._config_air(cfg)
         # vitesse de repli de la commande quand le capteur ΔP sature
         self.recul_saturation = r.get("recul_saturation_v_par_s", 0.5)
         # limite maximale de consigne Re pour le diaphragme ISO (évite
@@ -810,6 +819,73 @@ class Pilote:
         self._plafond_u_sature = None
         self.pi.u_max = 10.0
 
+    def _config_air(self, cfg: dict) -> None:
+        """Sources et corrections de la température et de l'humidité de
+        l'air (onglet Configuration).
+
+        temperature.source : "pt100" (défaut), "sht45" ou "manuelle"
+        (valeur_manuelle_c) ; offsets PT100 et SHT45 bornés à ±10 °C.
+        humidite.source : "manuelle" (défaut : fluide.humidite_relative,
+        comportement antérieur au SHT45) ou "sht45" ; offset ±20 %HR."""
+        tcfg = cfg.get("temperature", {})
+        source = tcfg.get("source", "pt100")
+        if source not in SOURCES_TEMPERATURE:
+            log.warning(f"temperature.source = {source!r} inconnue : PT100")
+            source = "pt100"
+        self.t_manuelle = _temperature_manuelle(source,
+                                                tcfg.get("valeur_manuelle_c"))
+        if source == "manuelle" and self.t_manuelle is None:
+            source = "pt100"                   # valeur saisie absente
+        self.t_source = source
+        # corrections ajoutées aux lectures des sondes (0 par défaut)
+        self.offset_pt100 = _offset_pt100(tcfg.get("offset_pt100_c", 0.0))
+        self.offset_sht45_t = _offset_pt100(tcfg.get("offset_sht45_c", 0.0))
+        hcfg = cfg.get("humidite", {})
+        self.hr_source = "sht45" if hcfg.get("source") == "sht45" \
+            else "manuelle"
+        self.hr_manuelle = _borne(
+            cfg.get("fluide", {}).get("humidite_relative", 0.0), 0.0, 100.0)
+        self.offset_sht45_hr = _borne(hcfg.get("offset_sht45_pct", 0.0),
+                                      -20.0, 20.0)
+        # dernière mesure du SHT45 tenue au plus ce délai (lecture à 1 s)
+        self.sht45_maintien_s = _borne(
+            cfg.get("sht45", {}).get("maintien_s", 10.0), 1.0, 120.0, 10.0)
+
+    def _lire_capteur_air(self) -> tuple[tuple[float, float] | None, str]:
+        """(T, HR) corrigées de leurs offsets d'après la dernière mesure du
+        SHT45, ou (None, motif) : capteur absent, mesure plus ancienne que
+        sht45.maintien_s, ou invraisemblable (bornes PT100 sur la
+        température brute, 0-100 %HR)."""
+        capteur = self.capteur_air
+        if capteur is None:
+            return None, "capteur non installé"
+        try:
+            m = capteur.derniere_mesure()
+        except Exception as exc:  # noqa: BLE001 — jamais bloquant
+            return None, f"lecture impossible ({exc})"
+        if m is None or time.monotonic() - m.t > self.sht45_maintien_s:
+            return None, getattr(capteur, "erreur", None) or \
+                "pas de mesure récente"
+        if not (self.t_min_c <= m.temperature_c <= self.t_max_c
+                and 0.0 <= m.humidite_pct <= 100.0):
+            return None, (f"mesure invraisemblable ({m.temperature_c:.1f} °C, "
+                          f"{m.humidite_pct:.1f} %HR)")
+        return (m.temperature_c + self.offset_sht45_t,
+                _borne(m.humidite_pct + self.offset_sht45_hr, 0.0, 100.0)), ""
+
+    def motif_temperature_indisponible(self) -> str | None:
+        """Source de température « SHT45 » sans mesure valide : toute mise en
+        route (régulation, séquence, manuel, apprentissage) est refusée.
+        Retourne le motif, ou None."""
+        if self.t_source != "sht45":
+            return None
+        air, motif = self._lire_capteur_air()
+        if air is not None:
+            return None
+        return (f"température de l'air indisponible : SHT45 ({motif}) — "
+                "rebrancher le SEK-SensorBridge, ou choisir la PT100 ou la "
+                "température saisie (onglet Configuration)")
+
     def _relance_interdite(self, quoi: str) -> str | None:
         """Arrêt de sécurité non acquitté : toute relance du ventilateur est
         refusée ICI, et pas seulement par l'IHM (le curseur de la page
@@ -818,6 +894,11 @@ class Pilote:
         if self.etat.get("arret_securite"):
             msg = (f"{quoi} refusé : arrêt de sécurité de "
                    f"{self.etat['arret_securite']} non acquitté")
+            log.warning(msg)
+            return msg
+        motif = self.motif_temperature_indisponible()
+        if motif:
+            msg = f"{quoi} refusé : {motif}"
             log.warning(msg)
             return msg
         return None
@@ -1066,11 +1147,7 @@ class Pilote:
             self.tau_consigne = r.get("tau_consigne_s", self.tau_consigne)
             self.t_min_c = r.get("temperature_min_c", self.t_min_c)
             self.t_max_c = r.get("temperature_max_c", self.t_max_c)
-            tcfg = cfg.get("temperature", {})
-            self.t_manuelle = _temperature_manuelle(
-                tcfg.get("source"), tcfg.get("valeur_manuelle_c"))
-            self.offset_pt100 = _offset_pt100(
-                tcfg.get("offset_pt100_c", self.offset_pt100))
+            self._config_air(cfg)
             self.recul_saturation = r.get("recul_saturation_v_par_s",
                                           self.recul_saturation)
             # la fenêtre est un nombre d'échantillons : la reconstruire à
@@ -1351,6 +1428,8 @@ class Pilote:
 
     def demarrer(self) -> None:
         """Démarre le thread de régulation et attend qu'il soit prêt."""
+        if self.capteur_air is not None:
+            self.capteur_air.demarrer()        # lecture du SHT45 (thread)
         self._ready.clear()  # Réinitialiser l'event
         self._thread = threading.Thread(target=self._boucle, daemon=True)
         self._thread.start()
@@ -1413,6 +1492,13 @@ class Pilote:
             msg = f"Fermeture E/S échouée : {e}"
             erreurs_arret.append(msg)
             log.error(msg)
+
+        # 5. Capteur d'air : thread de lecture arrêté, port série libéré
+        if self.capteur_air is not None:
+            try:
+                self.capteur_air.arreter()
+            except Exception as e:
+                log.debug(f"Arrêt du capteur d'air (erreur ignorée) : {e}")
 
         # Signaler les échecs critiques dans etat (visible IHM)
         if erreurs_arret:
@@ -1691,16 +1777,83 @@ class Pilote:
         self.etat["diaphragme_commande"] = self._diaphragme_par_angle.get(
             self._diaphragme_commande)
 
-        # ---- température saisie à la main ----------------------------------
-        # choix de l'opérateur (onglet Configuration) : la PT100 est ignorée,
-        # y compris ses contrôles de vraisemblance (sonde absente ou
-        # douteuse) ; sa lecture reste visible dans les mesures brutes
-        self.etat["temperature_source"] = \
-            "manuelle" if self.t_manuelle is not None else "pt100"
-        if self.t_manuelle is not None:
+        # ---- capteur d'air SHT45 : humidité (et température) -------------
+        air, motif_air = self._lire_capteur_air()
+        self.etat["temperature_sht45"] = air[0] if air else None
+        self.etat["sht45"] = {
+            "description": getattr(self.capteur_air, "description", None),
+            "erreur": motif_air or None,
+        }
+        if self.hr_source == "sht45" and air is not None:
+            hr, source_hr = air[1], "sht45"
+        else:
+            # saisie, ou repli sur la saisie : l'humidité pèse peu sur rho
+            # (~0,5 % de 0 à 100 %HR à 20 °C), pas d'arrêt pour elle
+            hr, source_hr = self.hr_manuelle, "manuelle"
+        # humidité de CE cycle dans les calculs (rho, mu)
+        self.banc.fluide.humidite_relative = hr
+        self.etat["humidite"] = hr
+        self.etat["humidite_source"] = source_hr
+        sht45_choisi = "sht45" in (self.hr_source, self.t_source)
+        if sht45_choisi and air is None:
+            usage = [quoi for quoi, src in (("humidité", self.hr_source),
+                                            ("température", self.t_source))
+                     if src == "sht45"]
+            self.etat["alerte_sht45"] = (
+                f"SHT45 indisponible ({motif_air}) — "
+                + " et ".join(usage) + " : "
+                + ("consignes refusées" if self.t_source == "sht45"
+                   else f"humidité saisie ({hr:.0f} %HR) utilisée"))
+        else:
+            self.etat["alerte_sht45"] = None
+
+        # ---- PT100 : lecture corrigée de son offset, si vraisemblable ------
+        pt100_ok = self.t_min_c <= T <= self.t_max_c
+        self.etat["temperature_pt100"] = T + self.offset_pt100 if pt100_ok \
+            else None
+
+        # ---- température de l'air : source choisie par l'opérateur ---------
+        # (onglet Configuration) ; les autres sondes restent visibles
+        self.etat["temperature_source"] = self.t_source
+        if self.t_source == "manuelle":
+            # PT100 ignorée, y compris ses contrôles de vraisemblance (sonde
+            # absente ou douteuse) ; sa lecture reste dans les mesures brutes
             T = self.t_manuelle
             mesures["temperature"] = T
             self._cycles_t_invalide = 0
+        elif self.t_source == "sht45":
+            if air is not None:
+                T = air[0]
+                mesures["temperature"] = T
+                self._derniere_T_valide = T
+            else:
+                with self._verrou:
+                    en_marche = self.regulation_active or (
+                        self.mode_manuel and self.tension_manuelle > 0)
+                if en_marche:
+                    # mesure perdue (au-delà de sht45.maintien_s) : rho, mu
+                    # et le Re ne sont plus calculables -> repli sûr
+                    self._repli_sur()
+                    self.etat.update({
+                        "defaut_capteur": f"SHT45 indisponible ({motif_air}) "
+                                          "— température de l'air inconnue ; "
+                                          "rebrancher le SEK-SensorBridge, ou "
+                                          "choisir la PT100 (onglet "
+                                          "Configuration), puis relancer",
+                        "regulation": False, "u_variateur": 0.0,
+                        "convergee": False, "temperature": None,
+                    })
+                    return
+                # banc à l'arrêt : toute mise en route est refusée
+                # (_relance_interdite) ; affichage sur la PT100 si elle est
+                # vraisemblable (source affichée en conséquence), sinon la
+                # dernière valeur valide
+                if pt100_ok:
+                    T = T + self.offset_pt100
+                    self.etat["temperature_source"] = "pt100"
+                else:
+                    T = self._derniere_T_valide or 20.0
+                mesures["temperature"] = T
         # ---- vraisemblance de la PT100 -------------------------------------
         # Hors bornes = sonde coupée ou module saturé. rho et mu en dépendent,
         # donc le Re : sans ce test le PI poursuit une mesure fantaisiste et
@@ -1708,7 +1861,7 @@ class Pilote:
         # bornes sur la lecture BRUTE (sonde coupée, voie mal adressée),
         # offset de l'opérateur ajouté ensuite ; mesures_brutes garde la
         # lecture non corrigée
-        elif self.t_min_c <= T <= self.t_max_c:
+        elif pt100_ok:
             self._cycles_t_invalide = 0
             T = T + self.offset_pt100
             mesures["temperature"] = T

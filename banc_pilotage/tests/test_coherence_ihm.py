@@ -228,6 +228,11 @@ def test_tout_champ_editable_est_repris_a_chaud():
     deb = SRC_PILOTE.find("def appliquer_config")
     fin = SRC_PILOTE.find("\n    def ", deb + 10)
     corps = SRC_PILOTE[deb:fin if fin > deb else deb + 6000]
+    # sources et offsets de l'air : relus par _config_air, qu'appelle
+    # appliquer_config
+    assert "self._config_air(cfg)" in corps
+    deb = SRC_PILOTE.find("def _config_air")
+    corps += SRC_PILOTE[deb:SRC_PILOTE.find("\n    def ", deb + 10)]
     assert "appliquer_config" in SRC_GUI, \
         "l'IHM n'appelle pas appliquer_config : la moitié des champs seraient inertes"
 

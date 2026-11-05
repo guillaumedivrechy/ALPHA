@@ -71,6 +71,11 @@ class Apprentissage:
             return ("Arrêtez le ventilateur avant de lancer un apprentissage "
                     "(bouton ARRÊT VARIATEUR) : les séquences doivent partir "
                     "d'un banc à l'arrêt.")
+        # tables apprises en Re : sans température de l'air, elles seraient
+        # fausses (source « SHT45 » sans mesure valide)
+        motif = self.pilote.motif_temperature_indisponible()
+        if motif:
+            return f"Apprentissage refusé : {motif}"
         cible = {"calibration_pdc": self._test_calibration_pdc,
                  "vanne_3voies": self._test_vanne_3voies,
                  "vanne_bypass": self._test_vanne_bypass,

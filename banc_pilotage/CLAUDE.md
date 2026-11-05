@@ -44,6 +44,8 @@ core/
 io_banc/
   wago.py              EntreesSorties (interface) + WagoModbus
   simulateur.py        banc virtuel (mêmes équations)
+  sht45.py             capteur d'air SHT45 sur SEK-SensorBridge (USB,
+                       thread de lecture) + SHT45 simulé
 gui/app.py             IHM — lit pilote.etat via QTimer, ne calcule rien
 tests/                 pytest — sans matériel
   banc_simule.py       pilote + simulateur à horloge accélérée, invariants

@@ -26,7 +26,7 @@ avoir été caractérisé (apprentissages faits) avant un essai.
 
 | Zone | Ce qu'on y trouve |
 |---|---|
-| **Colonne de gauche** | les mesures en temps réel : débit Qv, masse volumique ρ, viscosités μ et ν, pression amont, ΔP ISO, ΔP Miller ; l'état des actionneurs (variateur, vannes) |
+| **Colonne de gauche** | les mesures en temps réel : débit Qv, masse volumique ρ, viscosités μ et ν ; l'air (température et humidité utilisées, avec leur source, et lecture des deux sondes PT100 et SHT45) ; pression amont, ΔP ISO, ΔP Miller ; l'état des actionneurs (variateur, vannes) |
 | **Centre** | les onglets **Graphique** (courbe du Re mesuré et de la consigne), **Voies** (état des capteurs), **Séquence** (profils automatiques), Configuration ; Apprentissage et Maintenance sont réservés |
 | **Colonne de droite** | le panneau **PILOTAGE** (Re mesuré, état, mode, consigne, boutons) et le **JOURNAL D'ACTION** (tout ce qui se passe, alertes comprises) |
 | **Bandeau du bas** | liaison, fréquence du variateur, journal d'essai en cours, état du banc, durée de la régulation |
@@ -162,6 +162,7 @@ Tant que l'arrêt n'est pas acquitté, aucune relance n'est possible.
 | ⚠ Défaut vanne | une vanne n'a pas atteint sa position à temps : vérifier la vanne, prévenir le responsable |
 | ⚠ Défaut variateur | le variateur signale un défaut : voir son afficheur |
 | ⚠ Table de gains à refaire | la régulation fonctionne mais peine : prévenir le responsable |
+| ⚠ Capteur d'air SHT45 | le capteur d'humidité et de température ne répond plus : vérifier le câble USB du boîtier SEK-SensorBridge. Pour l'humidité, le banc continue avec l'humidité saisie. Si le SHT45 fournit la température, aucune consigne n'est acceptée (et un essai en cours s'arrête) : rebrancher, ou passer sur la PT100 (onglet Configuration) |
 
 Un message suivi de « — rétabli » signifie que le problème a disparu.
 
@@ -176,15 +177,18 @@ Un message suivi de « — rétabli » signifie que le problème a disparu.
   Re calculé ; Convergence (1 = RÉGULÉ ✓) ; phase regulation ; Qv ; ρ ; µ ;
   ν ; dP ISO ; dP Miller ; P Amont ; Vanne PDC [V] (tension de recopie, position réelle, sur l'échelle de la calibration) et [% ferm] ; Vanne ISO /
   Vanne Miller (1 = en butée, 0 et 0 = en course) ; T ; source T ; H [%HR] ;
+  source H ; T PT100 ; T SHT45 (lectures des deux sondes, pour comparer) ;
   Defaut ; puis l'état des 7 fins de course (1 = contact actif) : FC 3 voies
   0° (ISO), 90° (Miller), 180°, FC Bypass ouvert / fermé, FC PdC ouverte /
   fermée. Les Reynolds sont dans la référence choisie (Veine ou Conduite).
   Il s'ouvre directement dans Excel.
 - **Onglet Voies** : chaque capteur doit être « ● Active ». « Absente » ou
   « Liaison perdue » = problème de câblage ou de liaison.
-- **Température de l'air** : par défaut celle de la sonde PT100, en temps
-  réel. Le choix (sonde ou valeur saisie) se fait dans l'onglet
-  Configuration, par le responsable du banc.
+- **Température et humidité de l'air** : mesurées en temps réel (sonde
+  PT100 ou capteur SHT45 pour la température, capteur SHT45 pour
+  l'humidité), ou saisies. La source utilisée est affichée entre
+  parenthèses dans la colonne de gauche, par exemple « 19,4 (SHT45) ». Le
+  choix se fait dans l'onglet Configuration, par le responsable du banc.
 - **Avant de mesurer**, attendre **RÉGULÉ ✓** : c'est la garantie que le Re
   est stable autour de la consigne.
 
@@ -219,9 +223,10 @@ diamètre hydraulique Dh, sont calculées automatiquement.
 | Carte | Réglage | Quand y toucher |
 |---|---|---|
 | **Fluide** | Pression atmosphérique [Pa] | en début de journée d'essais : saisir la pression **absolue du local** lue au baromètre (pas la pression « ramenée au niveau de la mer » des bulletins météo). 10 hPa d'écart ≈ 0,5 % d'erreur sur le Re. |
-| **Fluide** | Humidité relative [%] | si l'on veut tenir compte de l'humidité de l'air (0 = air sec) |
-| **Température de l'air** | Offset PT100 (+ ou −) | si la sonde PT100 s'écarte d'un thermomètre de référence : saisir la correction (ex. −0,4 °C). 0 par défaut. |
-| **Température de l'air** | Température saisie + case « Utiliser la température saisie » | si la sonde est absente ou douteuse : cocher la case et saisir la température. Décochée = sonde en temps réel. |
+| **Air** | Température utilisée : PT100, SHT45 ou température saisie | PT100 ou SHT45 : mesure en temps réel. Saisie : si les sondes sont absentes ou douteuses (saisir alors la température). Avec le SHT45, s'il ne répond pas, aucune consigne n'est acceptée, et un essai en cours s'arrête. |
+| **Air** | Offset PT100, Offset SHT45 (+ ou −) [°C] | si une sonde s'écarte d'un thermomètre de référence : saisir la correction (ex. −0,4 °C). 0 par défaut. |
+| **Air** | Humidité utilisée : SHT45 ou humidité saisie | SHT45 : mesure en temps réel ; s'il ne répond plus, le banc continue avec l'humidité saisie (alerte « Capteur d'air SHT45 »). |
+| **Air** | Humidité saisie [%HR], Offset SHT45 humidité [%HR] | humidité saisie : valeur utilisée sans SHT45 (0 = air sec). Offset : correction de la mesure du SHT45, 0 par défaut. L'humidité pèse peu : de 0 à 100 %HR, ρ varie d'environ 0,5 % à 20 °C. |
 | **Bascule ISO / Miller** | Seuil et hystérésis (en Re conduite) | pour déplacer le passage entre les deux diaphragmes. Le titre de la carte rappelle les équivalents en Re veine. |
 | ⚠ **Géométrie veine d'essai** | Hauteur H et largeur W [m] (la section S et le diamètre hydraulique Dh en sont déduits) | après une mesure de la veine (ou un changement de veine). Le Re veine ne dépend que du périmètre 2 × (H + W) : 1 % d'erreur sur H + W = 1 % d'erreur sur le Re veine. Sans effet sur le Re conduite. |
 | ⚠ **Diaphragme ISO 5167** et **Diaphragme Miller** | d orifice [mm] | uniquement d'après la cote mesurée ou le certificat du diaphragme. Paramètre le plus sensible : 1 % d'erreur sur d ≈ 2 % d'erreur sur le débit et le Re. |

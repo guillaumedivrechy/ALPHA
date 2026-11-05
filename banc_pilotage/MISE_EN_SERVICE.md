@@ -13,6 +13,8 @@ n'est pas entièrement cochée. Noter les valeurs relevées dans la marge.
       fermée en moins d'une seconde, aucun message d'erreur.
 - [ ] Sauvegarder `config.json`, `etat_banc.json` et `apprentissages/` (copie
       ou commit) : point de retour si un réglage tourne mal.
+- [ ] `pip install -r requirements.txt` : bibliothèques Sensirion et pyserial
+      (capteur d'air SHT45) installées.
 
 ## 1. Sécurité, ventilateur hors tension
 
@@ -86,6 +88,26 @@ arrive en butée quelques secondes plus tard (constaté au premier essai).
 
 ## 4. Capteurs, ventilateur arrêté puis à faible régime
 
+Capteur d'air SHT45 (température, humidité) sur boîtier SEK-SensorBridge :
+
+- [ ] SHT45 branché sur le port ONE ou TWO du boîtier, et boîtier branché en
+      USB sur le PC. Le pilote USB du boîtier est installé : un port COM
+      apparaît dans le Gestionnaire de périphériques.
+- [ ] Logiciel du banc **fermé**, lancer `python controle_sht45.py` : la
+      sortie affiche le port COM trouvé, le port du boîtier (ONE/TWO), le
+      numéro de série du SHT45 et 10 mesures sans erreur. En cas d'échec,
+      garder toute la sortie (motif précis). Port COM imposé :
+      `python controle_sht45.py COM3`.
+- [ ] Température du SHT45 comparée à un thermomètre de référence placé au
+      même endroit. Si besoin, régler « Offset SHT45 » dans l'onglet
+      Configuration. Même chose pour l'humidité (« Offset SHT45
+      humidité ») avec un hygromètre de référence.
+- [ ] PT100 et SHT45 côte à côte : leur écart se lit dans la colonne de
+      gauche (« PT100 … · SHT45 … ») et dans le journal (colonnes T PT100 et
+      T SHT45).
+- [ ] Choisir les sources dans l'onglet Configuration (« Température
+      utilisée », « Humidité utilisée »).
+
 - [ ] Zéro ΔP et P amont (apprentissage « Zéro capteurs », soufflerie
       arrêtée) : offsets de quelques Pa au plus ; après « Appliquer », la
       P amont lue ventilateur arrêté (page principale) vaut ≈ 0 Pa.
@@ -134,6 +156,13 @@ relance possible avant « Acquitter », puis reprise normale.
       (watchdog / 3G3MV, §1) ; bandeau « liaison Modbus perdue ». Rebrancher :
       rien ne repart seul ; acquitter, relancer.
 - [ ] Débrancher la PT100 : repli en quelques secondes.
+- [ ] Source de température « SHT45 » : débrancher l'USB du SEK-SensorBridge
+      en régulation. L'arrêt se déclenche au bout de `sht45.maintien_s`
+      (10 s). Rebrancher : mesure revenue en quelques secondes (reconnexion
+      automatique), puis acquitter et relancer.
+- [ ] Source d'humidité « SHT45 » (température PT100) : même débranchement.
+      **Pas d'arrêt** ; alerte « Capteur d'air SHT45 », humidité saisie
+      utilisée (colonne « source H » du journal = manuelle).
 - [ ] Débrancher un capteur ΔP en régulation : repli en ≤ 12 s.
 - [ ] Ouvrir le contact MB du variateur (ou provoquer un défaut 3G3MV) : repli
       immédiat.
