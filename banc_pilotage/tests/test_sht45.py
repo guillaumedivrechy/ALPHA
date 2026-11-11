@@ -8,7 +8,7 @@ import time
 import pytest
 
 from io_banc.sht45 import (CMD_MESURE_HAUTE_PRECISION, CMD_NUMERO_SERIE,
-                           ConfigSht45, Sht45SensorBridge, crc8,
+                           ConfigSht45, Sht45SensorBridge, Sht45Simule, crc8,
                            decoder_mesure, decoder_numero_serie)
 
 
@@ -341,7 +341,7 @@ def test_sans_capteur_installe(monkeypatch, tmp_path):
     b.cfg["humidite"]["source"] = "sht45"
     b.p.appliquer_config(b.cfg)
     b.cycles(1.0, verifier=False)
-    assert "capteur non installé" in e["alerte_sht45"]
+    assert "capteur désactivé" in e["alerte_sht45"]
 
 
 def test_par_defaut_temperature_et_humidite_du_sht45(monkeypatch, tmp_path):
@@ -360,8 +360,16 @@ def test_par_defaut_temperature_et_humidite_du_sht45(monkeypatch, tmp_path):
     ancien["temperature"].pop("source")
     ancien.pop("humidite")
     for cfg in (depot, ancien):
-        p = Pilote(Banc(cfg), object(), cfg)
+        p = Pilote(Banc(cfg), object(), cfg, Sht45Simule())
         assert (p.t_source, p.hr_source) == ("sht45", "sht45")
+    # sans capteur installé (sht45.actif = false), défaut PT100 et humidité
+    # saisie : un banc sans SEK-SensorBridge reste utilisable
+    p = Pilote(Banc(ancien), object(), ancien)
+    assert (p.t_source, p.hr_source) == ("pt100", "manuelle")
+    # choix explicite du SHT45 sans capteur : respecté, motif explicite
+    p = Pilote(Banc(depot), object(), depot)
+    assert p.t_source == "sht45"
+    assert "sht45.actif = false" in p.motif_temperature_indisponible()
     b = _banc(monkeypatch, tmp_path, humidite_pct=35.0)
     b.sim.temperature = 23.0
     b.cycles(1.0, verifier=False)
@@ -369,3 +377,43 @@ def test_par_defaut_temperature_et_humidite_du_sht45(monkeypatch, tmp_path):
     assert (e["temperature_source"], e["humidite_source"]) == ("sht45", "sht45")
     assert (e["temperature"], e["humidite"]) == pytest.approx((23.0, 35.0))
     assert e["temperature_pt100"] is not None
+
+
+def test_source_d_humidite_inconnue_signalee(caplog):
+    """Faute de frappe (« saisie ») : défaut du banc, avec un avertissement
+    dans le log (elle passait sans trace)."""
+    import json
+    import logging
+    from pathlib import Path
+    from core.banc import Banc
+    from core.pilote import Pilote
+    cfg = json.loads((Path(__file__).resolve().parent.parent / "config.json")
+                     .read_text(encoding="utf-8"))
+    cfg["humidite"]["source"] = "saisie"
+    with caplog.at_level(logging.WARNING):
+        p = Pilote(Banc(cfg), object(), cfg, Sht45Simule())
+    assert p.hr_source == "sht45"
+    assert "humidite.source = 'saisie' inconnue" in caplog.text
+
+
+def test_apprentissage_interrompu_si_le_ventilateur_est_refuse(monkeypatch,
+                                                               tmp_path):
+    """SHT45 perdu entre deux phases (ventilateur à 0 V, donc sans arrêt de
+    sécurité) : la commande suivante du ventilateur est refusée, et la
+    séquence s'arrête au lieu de continuer ventilateur arrêté."""
+    from core.apprentissage import Apprentissage
+    b = _banc(monkeypatch, tmp_path, temperature={"source": "sht45"})
+    p = b.p
+    app = Apprentissage(p, b.cfg, tmp_path / "config.json")
+    app._arrets_debut = p.arrets
+    app._variateur(2.0)
+    assert p.tension_manuelle == 2.0 and not app._interrompu()
+    app._variateur(0.0)
+    b.air.debrancher()
+    b.cycles(p.sht45_maintien_s + 1.0, verifier=False)
+    assert not p.etat.get("arret_securite")          # ventilateur à 0 V
+    app._variateur(3.0)
+    assert app._interrompu()
+    assert app.etat["statut"].startswith("interrompu : mode manuel refusé")
+    assert "SHT45" in app.etat["statut"]
+    assert p.tension_manuelle == 0.0

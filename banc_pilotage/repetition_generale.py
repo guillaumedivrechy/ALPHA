@@ -37,6 +37,7 @@ import core.pilote
 from core.apprentissage import Apprentissage
 from core.banc import Banc
 from core.pilote import Pilote
+from io_banc.sht45 import Sht45Simule
 from io_banc.simulateur import SimulateurBanc
 
 
@@ -55,7 +56,13 @@ def main() -> int:
 
     banc = Banc(cfg)
     es = SimulateurBanc(banc, cfg.get("simulation"), cfg.get("modbus"), cfg.get("actionneurs"))
-    pilote = Pilote(banc, es, cfg)
+    # SHT45 virtuel, comme « main.py --simulation » : température et
+    # humidité viennent du SHT45 par défaut ; sans capteur, toute
+    # séquence serait refusée
+    air = Sht45Simule(temperature=lambda: es.temperature,
+                      humidite_pct=cfg.get("fluide", {}).get(
+                          "humidite_relative", 50.0))
+    pilote = Pilote(banc, es, cfg, air)
     pilote.demarrer()
     app = Apprentissage(pilote, cfg, dossier / "config.json")
     print(f"Répétition générale (simulation) — fichiers dans {dossier}")
@@ -86,8 +93,16 @@ def main() -> int:
     # le verdict agrégé (resume) couvre mapping + défauts : source unique
     etape("verif_cablage",
           lambda r: _exiger(r["resume"] == "câblage conforme", r["resume"]))
+    # plage de recopie de la vanne PdC : celle que reproduit le simulateur,
+    # d'après la calibration du banc réel (actionneurs.pdc_recopie_*_v,
+    # ~6,8 V) ; le seuil fixe de 8 V datait d'une recopie 0-10 V idéale
+    act = cfg.get("actionneurs", {})
+    plage_attendue = (act.get("pdc_recopie_max_v", 10.0)
+                      - act.get("pdc_recopie_min_v", 0.0))
     etape("calibration_pdc",
-          lambda r: _exiger(r["plage_v"] > 8.0, f"plage recopie : {r}"))
+          lambda r: _exiger(abs(r["plage_v"] - plage_attendue) < 0.3,
+                            f"plage recopie : {r} (attendu "
+                            f"{plage_attendue:.2f} V)"))
     etape("vanne_3voies",
           lambda r: _exiger(0.5 < r["max_s"] < 30.0, f"chronos 3 voies : {r}"))
     etape("vanne_bypass",
@@ -104,9 +119,11 @@ def main() -> int:
         paliers = r["paliers_plage_haute"]
         _exiger(len(paliers) >= 4, f"table ISO incomplète : {r}")
         # le simulateur est linéaire et le palier saturé est exclu : la
-        # table doit être strictement croissante
-        _exiger(all(a[1] < b[1] for a, b in zip(paliers, paliers[1:])),
-                f"table ISO non monotone : {paliers}")
+        # table, rangée par tension, doit être strictement croissante. Les
+        # paliers sont relevés en descente puis en montée (phases 4a, 4b)
+        table = sorted(paliers)
+        _exiger(all(a[1] < b[1] for a, b in zip(table, table[1:])),
+                f"table ISO non monotone : {table}")
 
     etape("re_mapping_miller", _miller, timeout=900.0)
     etape("re_mapping_iso", _iso, timeout=900.0)

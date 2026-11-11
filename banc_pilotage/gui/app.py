@@ -1990,7 +1990,14 @@ class Application(QMainWindow):
             self._mes_slider.setValue(0)
             self._mes_slider.blockSignals(False)
             return
-        self.pilote.mode_manuel_tension(valeur / 100.0)
+        refus = self.pilote.mode_manuel_tension(valeur / 100.0)
+        if refus:
+            # curseur désarmé et ramené à 0 : un seul message, pas un par pas
+            self._mes_run_arme = False
+            self._mes_slider.blockSignals(True)
+            self._mes_slider.setValue(0)
+            self._mes_slider.blockSignals(False)
+            self._refus_mise_en_route(refus)
 
     def _mes_arret(self) -> None:
         """Arret total, y compris si la page n'a rien demarre : c'est le
@@ -3608,10 +3615,13 @@ class Application(QMainWindow):
                                       "nombre strictement positif attendu")
             else:
                 self.pilote.definir_consigne(re_val, self._ref_re)
-                self.pilote.demarrer_regulation()
-                self._log(f"Consigne Re → {re_val:.0f} ({self._ref_re})",
-                          COLORS["accent"])
-                self._dirty["re"] = False
+                refus = self.pilote.demarrer_regulation()
+                if refus:
+                    self._refus_mise_en_route(refus)
+                else:
+                    self._log(f"Consigne Re → {re_val:.0f} ({self._ref_re})",
+                              COLORS["accent"])
+                    self._dirty["re"] = False
         elif self._mode == "manuel":
             texte = self._inp_vman.text().strip()
             try:
@@ -3622,9 +3632,12 @@ class Application(QMainWindow):
                                       "nombre entre 0 et 10 V attendu")
             else:
                 v = min(max(v, 0.0), 10.0)
-                self.pilote.commander_variateur_manuel(v)
-                self._log(f"Variateur → {v:.1f} V", COLORS["accent"])
-                self._dirty["vman"] = False
+                refus = self.pilote.commander_variateur_manuel(v)
+                if refus:
+                    self._refus_mise_en_route(refus)
+                else:
+                    self._log(f"Variateur → {v:.1f} V", COLORS["accent"])
+                    self._dirty["vman"] = False
 
         # PdC : en manuel seulement. En asservi, la boucle la pilote (et la
         # pré-positionne avant les manœuvres) : la commander ici court-
@@ -3830,6 +3843,12 @@ class Application(QMainWindow):
 
     # ── action log ────────────────────────────────────────────────────────
 
+    def _refus_mise_en_route(self, refus: str) -> None:
+        """Mise en route refusée par le pilote (SHT45 sans mesure, arrêt de
+        sécurité…) : dite à l'opérateur, jamais journalisée comme faite."""
+        self._log(f"⚠ {refus}", COLORS["error"])
+        QMessageBox.warning(self, "Mise en route refusée", refus)
+
     def _log(self, msg: str, color: str = "#6B7E8E") -> None:
         self._action_log.appendleft({
             "t":   datetime.now().strftime("%H:%M:%S"),
@@ -3942,12 +3961,15 @@ class Application(QMainWindow):
         self._selectionner_sources_air()
 
     def _selectionner_sources_air(self) -> None:
-        """Listes « température / humidité utilisée » <- config en mémoire
-        (clé absente : SHT45, comme le pilote)."""
-        for cmb, section, defaut in ((self.cmb_t_source, "temperature", "sht45"),
-                                     (self.cmb_hr_source, "humidite", "sht45")):
+        """Listes « température / humidité utilisée » <- config en mémoire.
+        Clé absente ou valeur inconnue : le défaut du pilote (SHT45, ou
+        PT100 et humidité saisie sans capteur) — la liste affichait sinon
+        sa 1re entrée, et l'enregistrement suivant l'écrivait."""
+        defaut_t, defaut_hr = self.pilote.sources_air_par_defaut()
+        for cmb, section, defaut in ((self.cmb_t_source, "temperature", defaut_t),
+                                     (self.cmb_hr_source, "humidite", defaut_hr)):
             i = cmb.findData(self.cfg.get(section, {}).get("source", defaut))
-            cmb.setCurrentIndex(max(i, 0))
+            cmb.setCurrentIndex(i if i >= 0 else cmb.findData(defaut))
 
     def _synchroniser_affichage_config(self) -> None:
         """Après toute écriture de la configuration (Appliquer d'un

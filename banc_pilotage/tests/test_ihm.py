@@ -830,3 +830,49 @@ def test_sources_sht45_dans_la_configuration(ihm):
     app._remplir_champs_config()
     assert app.cmb_t_source.currentData() == "sht45"
     assert app.cmb_hr_source.currentData() == "sht45"
+
+
+def test_mise_en_route_refusee_signalee(ihm):
+    """SHT45 sans mesure (température SHT45) : APPLIQUER en asservi et en
+    manuel, et le curseur de Maintenance, disent le refus (journal +
+    message) au lieu de journaliser une consigne qui ne démarre pas."""
+    app, p = ihm.app, ihm.b.p
+    ihm.b.air.debrancher()
+    ihm.avancer(p.sht45_maintien_s + 1.0)
+    app._set_mode("asservi")
+    app.inp_re.setText("6000")
+    app._appliquer()
+    assert not p.regulation_active
+    assert ihm.dialogues[-1][:2] == ("warning", "Mise en route refusée")
+    assert ihm.journal[0].startswith("⚠ démarrage de la régulation refusé")
+    assert not any(m.startswith("Consigne Re →") for m in ihm.journal)
+    app._set_mode("manuel")
+    app._inp_vman.setText("3")
+    app._appliquer()
+    assert not p.mode_manuel or p.tension_manuelle == 0.0
+    # (la vanne PdC, elle, reste commandable sans SHT45)
+    assert any(m.startswith("⚠ mode manuel refusé") for m in ihm.journal)
+    assert not any(m.startswith("Variateur →") for m in ihm.journal)
+    # Maintenance : curseur désarmé et ramené à 0, un seul message
+    n = len(ihm.dialogues)
+    app._nav(app.PAGE_MAINTENANCE)
+    app._mes_run_arme = True
+    app._mes_slider.setValue(300)
+    assert app._mes_slider.value() == 0 and not app._mes_run_arme
+    assert len(ihm.dialogues) == n + 1
+    app._mes_slider.setValue(500)                    # désarmé : sans effet
+    assert len(ihm.dialogues) == n + 1
+    assert ihm.b.sim.u_ecrite == 0.0
+
+
+def test_source_inconnue_affichee_comme_le_pilote(ihm):
+    """Source de température inconnue dans config.json (« PT100 » en
+    majuscules) : la liste affiche la source réellement utilisée par le
+    pilote (défaut SHT45), pas sa 1re entrée, que l'enregistrement suivant
+    aurait écrite."""
+    app, p = ihm.app, ihm.b.p
+    app.cfg["temperature"]["source"] = "PT100"
+    p.appliquer_config(app.cfg)
+    app._remplir_champs_config()
+    assert p.t_source == "sht45"
+    assert app.cmb_t_source.currentData() == "sht45"

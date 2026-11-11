@@ -823,30 +823,38 @@ class Pilote:
         """Sources et corrections de la température et de l'humidité de
         l'air (onglet Configuration).
 
-        Par défaut (clé absente), température ET humidité viennent du SHT45 ;
-        l'opérateur peut choisir la PT100 ou une valeur saisie.
-        temperature.source : "sht45" (défaut), "pt100" ou "manuelle"
+        Par défaut (clé absente ou valeur inconnue), température ET
+        humidité viennent du SHT45 ; sans capteur installé (sht45.actif =
+        false), de la PT100 et de l'humidité saisie
+        (sources_air_par_defaut). L'opérateur peut choisir la PT100 ou une
+        valeur saisie.
+        temperature.source : "sht45", "pt100" ou "manuelle"
         (valeur_manuelle_c) ; offsets PT100 et SHT45 bornés à ±10 °C.
-        humidite.source : "sht45" (défaut) ou "manuelle"
+        humidite.source : "sht45" ou "manuelle"
         (fluide.humidite_relative) ; offset ±20 %HR."""
+        defaut_t, defaut_hr = self.sources_air_par_defaut()
         tcfg = cfg.get("temperature", {})
-        source = tcfg.get("source", "sht45")
+        source = tcfg.get("source", defaut_t)
         if source not in SOURCES_TEMPERATURE:
-            log.warning(f"temperature.source = {source!r} inconnue : SHT45")
-            source = "sht45"
+            log.warning(f"temperature.source = {source!r} inconnue : "
+                        f"{defaut_t}")
+            source = defaut_t
         self.t_manuelle = _temperature_manuelle(source,
                                                 tcfg.get("valeur_manuelle_c"))
         if source == "manuelle" and self.t_manuelle is None:
             log.warning("temperature.source = 'manuelle' sans "
-                        "valeur_manuelle_c : SHT45")
-            source = "sht45"                   # valeur saisie absente
+                        f"valeur_manuelle_c : {defaut_t}")
+            source = defaut_t                  # valeur saisie absente
         self.t_source = source
         # corrections ajoutées aux lectures des sondes (0 par défaut)
         self.offset_pt100 = _offset_pt100(tcfg.get("offset_pt100_c", 0.0))
         self.offset_sht45_t = _offset_pt100(tcfg.get("offset_sht45_c", 0.0))
         hcfg = cfg.get("humidite", {})
-        self.hr_source = "manuelle" if hcfg.get("source") == "manuelle" \
-            else "sht45"
+        self.hr_source = hcfg.get("source", defaut_hr)
+        if self.hr_source not in SOURCES_HUMIDITE:
+            log.warning(f"humidite.source = {self.hr_source!r} inconnue : "
+                        f"{defaut_hr}")
+            self.hr_source = defaut_hr
         self.hr_manuelle = _borne(
             cfg.get("fluide", {}).get("humidite_relative", 0.0), 0.0, 100.0)
         self.offset_sht45_hr = _borne(hcfg.get("offset_sht45_pct", 0.0),
@@ -855,6 +863,14 @@ class Pilote:
         self.sht45_maintien_s = _borne(
             cfg.get("sht45", {}).get("maintien_s", 10.0), 1.0, 120.0, 10.0)
 
+    def sources_air_par_defaut(self) -> tuple[str, str]:
+        """(température, humidité) quand config.json ne dit rien : SHT45
+        pour les deux ; sans capteur installé, PT100 et humidité saisie
+        (un banc sans SEK-SensorBridge resterait sinon inutilisable)."""
+        if self.capteur_air is None:
+            return "pt100", "manuelle"
+        return "sht45", "sht45"
+
     def _lire_capteur_air(self) -> tuple[tuple[float, float] | None, str]:
         """(T, HR) corrigées de leurs offsets d'après la dernière mesure du
         SHT45, ou (None, motif) : capteur absent, mesure plus ancienne que
@@ -862,7 +878,7 @@ class Pilote:
         température brute, 0-100 %HR)."""
         capteur = self.capteur_air
         if capteur is None:
-            return None, "capteur non installé"
+            return None, "capteur désactivé (sht45.actif = false)"
         try:
             m = capteur.derniere_mesure()
         except Exception as exc:  # noqa: BLE001 — jamais bloquant
@@ -1083,9 +1099,10 @@ class Pilote:
         with self._verrou:
             self.mode_manuel = False
 
-    def commander_variateur_manuel(self, volts: float) -> None:
-        """Mode manuel : fixe la tension variateur (RUN géré automatiquement)."""
-        self.mode_manuel_tension(volts)
+    def commander_variateur_manuel(self, volts: float) -> str | None:
+        """Mode manuel : fixe la tension variateur (RUN géré automatiquement).
+        Retourne le motif d'un refus, ou None."""
+        return self.mode_manuel_tension(volts)
 
     def appliquer_banc(self, banc: Banc) -> None:
         """Remplace le moteur de calcul après modification de la

@@ -147,7 +147,13 @@ class Apprentissage:
         séquence interrompue ne le relance jamais."""
         if self._interrompu():
             return
-        self.pilote.mode_manuel_tension(volts)
+        refus = self.pilote.mode_manuel_tension(volts)
+        if refus:
+            # relance refusée (SHT45 perdu, arrêt de sécurité) : la séquence
+            # s'arrête. Ignoré, le refus la laissait continuer ventilateur
+            # arrêté (câblage « variateur muet », paliers à débit nul)
+            self.etat["statut"] = f"interrompu : {refus}"
+            self._annule.set()
 
     def _executer(self, cible, params) -> None:
         self._arrets_debut = self.pilote.arrets
