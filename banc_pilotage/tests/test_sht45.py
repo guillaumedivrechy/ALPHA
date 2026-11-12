@@ -474,8 +474,16 @@ def test_etat_et_port_du_capteur_reel():
         assert c.port_serie_actif is None and not c.connexion_en_cours
     finally:
         c.arreter()
-    # 1er contact en échec : plus « en cours », mais en erreur
-    c = Sht45SensorBridge({}, ouvrir_bridge=lambda p, d: bridge,
+    # boîtier introuvable au démarrage : « connexion en cours » pendant
+    # sht45.delai_connexion_s (énumération USB), puis absence = panne
+    c = Sht45SensorBridge({"reconnexion_s": 0.5, "delai_connexion_s": 1.0},
+                          ouvrir_bridge=lambda p, d: bridge,
                           lister_ports=lambda: [])
-    c._signaler("aucun port série USB")
-    assert not c.connexion_en_cours
+    c.demarrer()
+    try:
+        time.sleep(0.3)
+        assert c.connexion_en_cours and "aucun port" in c.erreur
+        time.sleep(1.0)
+        assert not c.connexion_en_cours
+    finally:
+        c.arreter()

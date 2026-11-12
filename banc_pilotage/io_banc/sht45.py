@@ -107,6 +107,7 @@ class ConfigSht45:
     debit_bauds: int = 460800
     periode_s: float = 1.0
     reconnexion_s: float = 5.0
+    delai_connexion_s: float = 10.0    # « connexion en cours » au démarrage
 
     @classmethod
     def depuis(cls, cfg: dict | None) -> "ConfigSht45":
@@ -129,6 +130,8 @@ class ConfigSht45:
             debit_bauds=int(c.get("debit_bauds", d.debit_bauds)),
             periode_s=max(float(c.get("periode_s", d.periode_s)), 0.2),
             reconnexion_s=max(float(c.get("reconnexion_s", d.reconnexion_s)), 0.5),
+            delai_connexion_s=max(float(c.get("delai_connexion_s",
+                                              d.delai_connexion_s)), 0.0),
         )
 
 
@@ -225,19 +228,25 @@ class Sht45SensorBridge(CapteurAir):
         self.description = "SHT45 (non connecté)"
         self.numero_serie: int | None = None
         self.port_serie_actif = None
-        # vrai jusqu'au 1er résultat (mesure ou échec) : démarrage normal,
-        # distinct d'un capteur perdu
-        self._premier_contact = True
+        self._t_demarrage: float | None = None
+        self._deja_mesure = False
 
     @property
     def connexion_en_cours(self) -> bool:
-        return self._premier_contact
+        """Démarrage normal, distinct d'un capteur perdu : aucune mesure
+        encore reçue, et délai de connexion (énumération USB, recherche du
+        port) pas écoulé. Après une 1re mesure, une absence est une perte."""
+        if self._deja_mesure:
+            return False
+        return self._t_demarrage is None or \
+            time.monotonic() - self._t_demarrage < self.cfg.delai_connexion_s
 
     # ----- cycle de vie
     def demarrer(self) -> None:
         if self._thread is not None:
             return
         self._stop.clear()
+        self._t_demarrage = time.monotonic()
         self._thread = threading.Thread(target=self._boucle, name="sht45",
                                         daemon=True)
         self._thread.start()
@@ -347,11 +356,10 @@ class Sht45SensorBridge(CapteurAir):
             with self._verrou:
                 self._derniere = mesure
             self.erreur = None
-            self._premier_contact = False
+            self._deja_mesure = True
             self._stop.wait(self.cfg.periode_s)
 
     def _signaler(self, motif: str) -> None:
-        self._premier_contact = False
         if motif != self.erreur:
             log.warning("Capteur d'air SHT45 : %s", motif)
         self.erreur = motif

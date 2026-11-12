@@ -51,7 +51,7 @@
     "offset_sht45_pct": 0.0
   },
   "sht45": {
-    "_commentaire": "Capteur d'air Sensirion SHT45 (temperature, humidite) sur boitier SEK-SensorBridge branche en USB. actif = false : pas de capteur. port_serie : 'auto' (recherche du boitier parmi les ports USB) ou 'COM3'... ; port_bridge : 'auto' (ONE puis TWO), 'ONE' ou 'TWO' ; tension_v : alimentation du capteur (SHT45 : 1,2 a 3,6 V) ; adresse_i2c : 68 (= 0x44, SHT45-AD1B ; 69 = 0x45 pour la variante BD1B) ; periode_s : intervalle de lecture ; reconnexion_s : intervalle des tentatives apres une erreur ; maintien_s : age maximal de la derniere mesure avant de la declarer perdue. Controle sans le logiciel : python controle_sht45.py",
+    "_commentaire": "Capteur d'air Sensirion SHT45 (temperature, humidite) sur boitier SEK-SensorBridge branche en USB. actif = false : pas de capteur. port_serie : 'auto' (recherche du boitier parmi les ports USB) ou 'COM3'... ; port_bridge : 'auto' (ONE puis TWO), 'ONE' ou 'TWO' ; tension_v : alimentation du capteur (SHT45 : 1,2 a 3,6 V) ; adresse_i2c : 68 (= 0x44, SHT45-AD1B ; 69 = 0x45 pour la variante BD1B) ; periode_s : intervalle de lecture ; reconnexion_s : intervalle des tentatives apres une erreur ; delai_connexion_s : au demarrage, duree pendant laquelle l'absence de mesure est affichee 'connexion SHT45 en cours' (consigne refusee : patienter) et non comme une panne ; maintien_s : age maximal de la derniere mesure avant de la declarer perdue. Controle sans le logiciel : python controle_sht45.py",
     "actif": true,
     "port_serie": "auto",
     "port_bridge": "auto",
@@ -60,6 +60,7 @@
     "debit_bauds": 460800,
     "periode_s": 1.0,
     "reconnexion_s": 5.0,
+    "delai_connexion_s": 10.0,
     "maintien_s": 10.0
   },
   "mesure_dp": {
