@@ -443,6 +443,11 @@ _NAV_LABELS = ["Graphique", "Voies", "Séquence", "Apprentissage",
 # (clé etat/brutes, nom affiché, max barre, format, couleur barre)
 # Les clés "dp_iso" et "dp_miller" sont résolues dans _tick_left via mesures_brutes
 # Section CALCULS - Temps réel (couleur violette)
+# colonne de gauche de l'écran principal : espace au-dessus de chaque
+# rubrique (Air, Pressions, Actionneurs) et sous son titre [px]
+ESPACE_RUBRIQUES_PX = 52
+MARGE_SOUS_TITRE_PX = 12
+
 _CALCULS = [
     ("qv",          "Qv [m³/s]",     0.05,    "{:.6f}", "#9B59B6"),
     ("rho",         "ρ [kg/m³]",     2.0,     "{:.3f}", "#9B59B6"),
@@ -976,7 +981,7 @@ class Application(QMainWindow):
         # ── CALCULS — TEMPS RÉEL ───────────────────────────────
         hdr1 = QWidget()
         h1 = QHBoxLayout(hdr1)
-        h1.setContentsMargins(0, 0, 0, 8)
+        h1.setContentsMargins(0, 0, 0, MARGE_SOUS_TITRE_PX)
         lbl_c = QLabel("🎓 CALCULS — TEMPS RÉEL")
         lbl_c.setObjectName("section-hdr")
         h1.addWidget(lbl_c)
@@ -1032,7 +1037,7 @@ class Application(QMainWindow):
         # ── PRESSIONS — TEMPS RÉEL ─────────────────────────────
         hdr_p = QWidget()
         h_p = QHBoxLayout(hdr_p)
-        h_p.setContentsMargins(0, 32, 0, 8)  # Marge haut augmentée pour espacement
+        h_p.setContentsMargins(0, ESPACE_RUBRIQUES_PX, 0, MARGE_SOUS_TITRE_PX)
         lbl_p = QLabel("💨 PRESSIONS — TEMPS RÉEL")
         lbl_p.setObjectName("section-hdr")
         h_p.addWidget(lbl_p)
@@ -1083,7 +1088,7 @@ class Application(QMainWindow):
         # ── ACTIONNEURS ────────────────────────────────────────
         hdr2 = QWidget()
         h2 = QHBoxLayout(hdr2)
-        h2.setContentsMargins(0, 32, 0, 8)  # Marge haut augmentée pour espacement
+        h2.setContentsMargins(0, ESPACE_RUBRIQUES_PX, 0, MARGE_SOUS_TITRE_PX)
         la = QLabel("⚡ ACTIONNEURS — ÉTAT")
         la.setObjectName("section-hdr")
         h2.addWidget(la)
@@ -4317,7 +4322,7 @@ class Application(QMainWindow):
         bvl.setSpacing(0)
         hdr = QWidget()
         hl = QHBoxLayout(hdr)
-        hl.setContentsMargins(0, 32, 0, 8)
+        hl.setContentsMargins(0, ESPACE_RUBRIQUES_PX, 0, MARGE_SOUS_TITRE_PX)
         lbl = QLabel("🌡 AIR — TEMPS RÉEL")
         lbl.setObjectName("section-hdr")
         hl.addWidget(lbl)
