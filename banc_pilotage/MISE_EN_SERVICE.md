@@ -105,10 +105,10 @@ Capteur d'air SHT45 (température, humidité) sur boîtier SEK-SensorBridge :
 - [ ] PT100 et SHT45 côte à côte : leur écart se lit dans la colonne de
       gauche (« PT100 … · SHT45 … ») et dans le journal (colonnes T PT100 et
       T SHT45).
-- [ ] Sources dans l'onglet Configuration : « Température utilisée » et
-      « Humidité utilisée » sont sur **SHT45 par défaut**. Les passer sur
-      PT100 ou sur une valeur saisie seulement si besoin. Sans SHT45 qui
-      répond, la température SHT45 bloque toute mise en route.
+- [ ] Onglet Configuration, carte Air : température et humidité sur
+      **Capteur** (sonde SHT45) par défaut. Choisir la sonde PT100, ou
+      **Saisie manuelle**, seulement si besoin. Sans SHT45 qui répond, la
+      température SHT45 bloque toute mise en route.
 
 - [ ] Zéro ΔP et P amont (apprentissage « Zéro capteurs », soufflerie
       arrêtée) : offsets de quelques Pa au plus ; après « Appliquer », la

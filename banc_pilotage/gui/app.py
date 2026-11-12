@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QLabel, QLineEdit, QPushButton,
     QCheckBox, QSlider, QMessageBox, QFileDialog,
     QFrame, QProgressBar, QProgressDialog,
-    QSpinBox, QDoubleSpinBox, QComboBox,
+    QSpinBox, QDoubleSpinBox, QComboBox, QGraphicsOpacityEffect,
 )
 from PySide6.QtGui import QPixmap
 from PySide6.QtCore import Qt, QTimer
@@ -94,13 +94,10 @@ def _humidite_relative(v, _):
 def _offset_humidite(v, _):
     return None if -20.0 <= v <= 20.0 else "doit être entre -20 et +20 %HR"
 
-# sources de l'air proposées dans l'onglet Configuration (libellé, valeur
-# écrite dans config.json)
-SOURCES_T_IHM = [("PT100 (Wago 750-450)", "pt100"),
-                 ("SHT45 (SEK-SensorBridge)", "sht45"),
-                 ("Température saisie", "manuelle")]
-SOURCES_HR_IHM = [("SHT45 (SEK-SensorBridge)", "sht45"),
-                  ("Humidité saisie", "manuelle")]
+# sondes de température proposées en mode « Capteur » (libellé, valeur de
+# temperature.source) ; la saisie manuelle est un bascule à part
+SONDES_T_IHM = [("SHT45 (SEK-SensorBridge)", "sht45"),
+                ("PT100 (Wago 750-450)", "pt100")]
 
 def _d_inferieur_D(prefixe):
     def f(v, valeurs):
@@ -3039,6 +3036,67 @@ class Application(QMainWindow):
             ("veine", "longueur_caracteristique_m"): 0.2,
         }
 
+        def _ligne_champ(chemin, libelle, unite, val_fmt, validation,
+                         cvl) -> QWidget:
+            """Ligne « libellé … champ | unité » d'une carte : champ éditable
+            (enregistré dans self.champs) si `validation`, sinon valeur en
+            lecture seule. Retourne la ligne."""
+            try:
+                raw = _cfg_lire(self.cfg, chemin)
+            except (KeyError, TypeError):
+                # clé ajoutée après la création de ce config.json : sa
+                # valeur par défaut (sinon « — » rendait tout
+                # enregistrement de l'onglet impossible)
+                raw = DEFAUTS_CLES_RECENTES.get(chemin, NON_RENSEIGNE)
+            rw = QWidget()
+            rw.setStyleSheet(
+                "background:transparent; border-bottom:1px solid #E9EEF1;")
+            rwl = QHBoxLayout(rw)
+            rwl.setContentsMargins(16, 11, 16, 11)
+            rwl.setSpacing(8)
+            ll = QLabel(libelle)
+            ll.setStyleSheet("font-size:12.5px; color:#3A4D60; background:transparent; border:none;")
+            rwl.addWidget(ll)
+            defaut = VALEURS_A_AJUSTER.get(chemin)
+            if defaut is not None and isinstance(raw, float) and abs(raw - defaut) < 1e-9:
+                lw = QLabel("à ajuster")
+                lw.setToolTip(
+                    "Valeur d'usine, non mesurée sur le banc réel — "
+                    "à renseigner avant un essai en référence Re veine.")
+                lw.setStyleSheet(
+                    f"font-size:10px; font-weight:700; color:{COLORS['warn']};"
+                    " background:transparent; border:none;")
+                rwl.addWidget(lw)
+            rwl.addStretch()
+            if validation is not None:
+                # champ éditable
+                texte = _formater_champ(val_fmt, raw)
+                inp = QLineEdit(texte)
+                self._formats_champs[chemin] = val_fmt
+                self._textes_affiches[chemin] = texte
+                inp.setObjectName("num-input")
+                inp.setAlignment(Qt.AlignmentFlag.AlignRight)
+                inp.setFixedWidth(100)
+                inp.setEnabled(False)
+                rwl.addWidget(inp)
+                self.champs[chemin] = (inp, validation)
+            else:
+                # valeur en lecture seule (texte)
+                lv = QLabel(_formater_champ(val_fmt, raw))
+                self._champs_lecture[chemin] = (lv, val_fmt)
+                lv.setStyleSheet(
+                    "font-family:'IBM Plex Mono',monospace; font-size:12px;"
+                    " font-weight:600; color:#14223C; background:transparent; border:none;")
+                rwl.addWidget(lv)
+            lbl_u = QLabel(unite)
+            lbl_u.setStyleSheet(
+                "font-size:11px; color:#6B7E8E; background:transparent; border:none;")
+            lbl_u.setFixedWidth(30 if len(unite) <= 3 else 46)
+            lbl_u.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            rwl.addWidget(lbl_u)
+            cvl.addWidget(rw)
+            return rw
+
         def _grp(titre: str, rows: list[tuple], col: int, row: int) -> QWidget:
             """Groupe en carte : (chemin_tuple, libelle, unite, valeur_fmt, validation|None)."""
             card = QWidget()
@@ -3063,60 +3121,8 @@ class Application(QMainWindow):
             card.titre = lt
             # lignes
             for chemin, libelle, unite, val_fmt, validation in rows:
-                try:
-                    raw = _cfg_lire(self.cfg, chemin)
-                except (KeyError, TypeError):
-                    # clé ajoutée après la création de ce config.json : sa
-                    # valeur par défaut (sinon « — » rendait tout
-                    # enregistrement de l'onglet impossible)
-                    raw = DEFAUTS_CLES_RECENTES.get(chemin, NON_RENSEIGNE)
-                rw = QWidget()
-                rw.setStyleSheet(
-                    "background:transparent; border-bottom:1px solid #E9EEF1;")
-                rwl = QHBoxLayout(rw)
-                rwl.setContentsMargins(16, 11, 16, 11)
-                rwl.setSpacing(8)
-                ll = QLabel(libelle)
-                ll.setStyleSheet("font-size:12.5px; color:#3A4D60; background:transparent; border:none;")
-                rwl.addWidget(ll)
-                defaut = VALEURS_A_AJUSTER.get(chemin)
-                if defaut is not None and isinstance(raw, float) and abs(raw - defaut) < 1e-9:
-                    lw = QLabel("à ajuster")
-                    lw.setToolTip(
-                        "Valeur d'usine, non mesurée sur le banc réel — "
-                        "à renseigner avant un essai en référence Re veine.")
-                    lw.setStyleSheet(
-                        f"font-size:10px; font-weight:700; color:{COLORS['warn']};"
-                        " background:transparent; border:none;")
-                    rwl.addWidget(lw)
-                rwl.addStretch()
-                if validation is not None:
-                    # champ éditable
-                    texte = _formater_champ(val_fmt, raw)
-                    inp = QLineEdit(texte)
-                    self._formats_champs[chemin] = val_fmt
-                    self._textes_affiches[chemin] = texte
-                    inp.setObjectName("num-input")
-                    inp.setAlignment(Qt.AlignmentFlag.AlignRight)
-                    inp.setFixedWidth(100)
-                    inp.setEnabled(False)
-                    rwl.addWidget(inp)
-                    self.champs[chemin] = (inp, validation)
-                else:
-                    # valeur en lecture seule (texte)
-                    lv = QLabel(_formater_champ(val_fmt, raw))
-                    self._champs_lecture[chemin] = (lv, val_fmt)
-                    lv.setStyleSheet(
-                        "font-family:'IBM Plex Mono',monospace; font-size:12px;"
-                        " font-weight:600; color:#14223C; background:transparent; border:none;")
-                    rwl.addWidget(lv)
-                lbl_u = QLabel(unite)
-                lbl_u.setStyleSheet(
-                    "font-size:11px; color:#6B7E8E; background:transparent; border:none;")
-                lbl_u.setFixedWidth(30 if len(unite) <= 3 else 46)
-                lbl_u.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-                rwl.addWidget(lbl_u)
-                cvl.addWidget(rw)
+                _ligne_champ(chemin, libelle, unite, val_fmt, validation,
+                             cvl)
             gl.addWidget(card, row, col)
             return card
 
@@ -3145,52 +3151,107 @@ class Application(QMainWindow):
             (("fluide","sutherland_s"),       "Constante S",      "K",    "{:.1f}", _positif),
         ], col=0, row=2)
 
-        # air : température (PT100, SHT45 ou saisie) et humidité (SHT45 ou
-        # saisie), chaque sonde corrigée de son offset (positif ou négatif)
-        carte_t = _grp("Air : température et humidité", [
-            (("temperature","offset_pt100_c"), "Offset PT100 (+ ou −)", "°C",
-             "{:.2f}", _offset_pt100),
-            (("temperature","offset_sht45_c"), "Offset SHT45 (+ ou −)", "°C",
-             "{:.2f}", _offset_pt100),
-            (("temperature","valeur_manuelle_c"), "Température saisie", "°C",
-             "{:.1f}", _temperature_saisie),
-            (("humidite","offset_sht45_pct"), "Offset SHT45 humidité (+ ou −)",
-             "%HR", "{:.1f}", _offset_humidite),
-            (("fluide","humidite_relative"), "Humidité saisie", "%HR",
-             "{:.1f}", _humidite_relative),
-        ], col=1, row=3)
+        # air : pour la température et pour l'humidité, un bascule
+        # « Capteur | Saisie manuelle ». Capteur : sonde (et son offset) en
+        # temps réel ; saisie : la valeur saisie prend le relais. Les champs
+        # sans objet dans le mode choisi sont grisés ; la valeur réellement
+        # utilisée par les calculs est rappelée sous chaque bloc.
+        carte_t = _grp("Air : température et humidité", [], col=1, row=3)
+        lay_air = carte_t.layout()
 
-        def _choix(libelle: str, options: list, aide: str) -> QComboBox:
+        def _entete_bloc(titre: str, aide: str) -> list[QPushButton]:
             rw = QWidget()
-            rw.setStyleSheet("background:transparent; border:none;")
+            rw.setStyleSheet("background:#F2F6F8; border:none;"
+                             " border-bottom:1px solid #E9EEF1;")
             rwl = QHBoxLayout(rw)
             rwl.setContentsMargins(16, 8, 16, 8)
-            ll = QLabel(libelle)
+            lt = QLabel(titre)
+            lt.setStyleSheet("font-size:13px; font-weight:700; color:#14223C;"
+                             " background:transparent; border:none;")
+            rwl.addWidget(lt)
+            rwl.addStretch()
+            seg, btns = self._seg(["Capteur", "Saisie manuelle"])
+            seg.setToolTip(aide)
+            rwl.addWidget(seg)
+            lay_air.addWidget(rw)
+            return btns
+
+        def _ligne_sonde() -> QComboBox:
+            rw = QWidget()
+            rw.setStyleSheet("background:transparent; border:none;"
+                             " border-bottom:1px solid #E9EEF1;")
+            rwl = QHBoxLayout(rw)
+            rwl.setContentsMargins(16, 8, 16, 8)
+            ll = QLabel("Sonde")
             ll.setStyleSheet("font-size:12.5px; color:#3A4D60;"
                              " background:transparent; border:none;")
             rwl.addWidget(ll)
             rwl.addStretch()
             cmb = QComboBox()
-            for texte, valeur in options:
+            for texte, valeur in SONDES_T_IHM:
                 cmb.addItem(texte, valeur)
-            cmb.setToolTip(aide)
             cmb.setEnabled(False)
             rwl.addWidget(cmb)
-            carte_t.layout().addWidget(rw)
+            lay_air.addWidget(rw)
+            self._lignes_air["sonde"] = rw
             return cmb
 
-        self.cmb_t_source = _choix(
-            "Température utilisée", SOURCES_T_IHM,
-            "Température de l'air des calculs (ρ, μ, Re). PT100 ou SHT45 : "
-            "mesure en temps réel, corrigée de l'offset de la sonde. SHT45 "
-            "sans mesure : mise en route refusée, arrêt de sécurité si la "
-            "mesure se perd en marche. Saisie : les sondes restent affichées "
-            "mais ne servent plus aux calculs.")
-        self.cmb_hr_source = _choix(
-            "Humidité utilisée", SOURCES_HR_IHM,
-            "Humidité relative des calculs (formules de l'air humide). SHT45 "
-            "sans mesure : repli sur l'humidité saisie, avec alerte, sans "
-            "arrêt (effet ~0,5 % sur ρ).")
+        def _ligne_utilisee() -> QLabel:
+            lbl = QLabel("→ utilisée : —")
+            lbl.setStyleSheet("font-size:12px; font-weight:600;"
+                              f" color:{COLORS['accent']}; background:transparent;"
+                              " border:none; padding:6px 16px 10px 16px;")
+            lay_air.addWidget(lbl)
+            return lbl
+
+        # lignes de la carte, grisées quand le mode choisi les rend sans objet
+        self._lignes_air: dict = {}
+
+        def _ligne_air(chemin, libelle, unite, val_fmt, validation):
+            self._lignes_air[chemin] = _ligne_champ(
+                chemin, libelle, unite, val_fmt, validation, lay_air)
+
+        # ---- température
+        self._btns_t_mode = _entete_bloc(
+            "Température",
+            "Capteur : température mesurée en temps réel par la sonde choisie "
+            "(SHT45 ou PT100), corrigée de son offset. SHT45 sans mesure : "
+            "mise en route refusée, arrêt de sécurité si la mesure se perd "
+            "en marche.\nSaisie manuelle : la valeur saisie remplace les "
+            "sondes dans les calculs (ρ, μ, Re) ; les sondes restent "
+            "affichées.")
+        self.cmb_sonde_t = _ligne_sonde()
+        _ligne_air(("temperature", "offset_sht45_c"), "Offset SHT45 (+ ou −)",
+                   "°C", "{:.2f}", _offset_pt100)
+        _ligne_air(("temperature", "offset_pt100_c"), "Offset PT100 (+ ou −)",
+                   "°C", "{:.2f}", _offset_pt100)
+        _ligne_air(("temperature", "valeur_manuelle_c"), "Valeur saisie",
+                   "°C", "{:.1f}", _temperature_saisie)
+        self._lbl_t_utilisee = _ligne_utilisee()
+        # ---- humidité
+        self._btns_hr_mode = _entete_bloc(
+            "Humidité",
+            "Capteur : humidité relative mesurée par le SHT45, corrigée de "
+            "son offset ; SHT45 sans mesure : repli sur la valeur saisie, "
+            "avec alerte, sans arrêt (effet ~0,5 % sur ρ).\nSaisie "
+            "manuelle : la valeur saisie est utilisée (0 = air sec).")
+        _ligne_air(("humidite", "offset_sht45_pct"), "Offset SHT45 (+ ou −)",
+                   "%HR", "{:.1f}", _offset_humidite)
+        _ligne_air(("fluide", "humidite_relative"), "Valeur saisie",
+                   "%HR", "{:.1f}", _humidite_relative)
+        self._lbl_hr_utilisee = _ligne_utilisee()
+
+        self._t_saisie = self._hr_saisie = False
+        for i, btn in enumerate(self._btns_t_mode):
+            btn.setEnabled(False)
+            btn.clicked.connect(
+                lambda _=False, saisie=bool(i): self._choisir_mode_air(
+                    t_saisie=saisie))
+        for i, btn in enumerate(self._btns_hr_mode):
+            btn.setEnabled(False)
+            btn.clicked.connect(
+                lambda _=False, saisie=bool(i): self._choisir_mode_air(
+                    hr_saisie=saisie))
         self._selectionner_sources_air()
 
         _grp("Géométrie veine d'essai (rectangulaire)", [
@@ -3920,8 +3981,7 @@ class Application(QMainWindow):
             return
         for entree, _ in self.champs.values():
             entree.setEnabled(unlock)
-        self.cmb_t_source.setEnabled(unlock)
-        self.cmb_hr_source.setEnabled(unlock)
+        self._maj_activation_air()
         self.btn_enregistrer.setEnabled(unlock)
         self.lbl_cfg_statut.setText("")
 
@@ -3961,15 +4021,82 @@ class Application(QMainWindow):
         self._selectionner_sources_air()
 
     def _selectionner_sources_air(self) -> None:
-        """Listes « température / humidité utilisée » <- config en mémoire.
-        Clé absente ou valeur inconnue : le défaut du pilote (SHT45, ou
-        PT100 et humidité saisie sans capteur) — la liste affichait sinon
-        sa 1re entrée, et l'enregistrement suivant l'écrivait."""
+        """Bascules « Capteur | Saisie manuelle » et sonde <- config en
+        mémoire. Clé absente ou valeur inconnue : le défaut du pilote (SHT45,
+        ou PT100 et humidité saisie sans capteur), et non une entrée
+        arbitraire que l'enregistrement suivant écrirait."""
         defaut_t, defaut_hr = self.pilote.sources_air_par_defaut()
-        for cmb, section, defaut in ((self.cmb_t_source, "temperature", defaut_t),
-                                     (self.cmb_hr_source, "humidite", defaut_hr)):
-            i = cmb.findData(self.cfg.get(section, {}).get("source", defaut))
-            cmb.setCurrentIndex(i if i >= 0 else cmb.findData(defaut))
+        t = self.cfg.get("temperature", {}).get("source", defaut_t)
+        if t not in ("sht45", "pt100", "manuelle"):
+            t = defaut_t
+        hr = self.cfg.get("humidite", {}).get("source", defaut_hr)
+        if hr not in ("sht45", "manuelle"):
+            hr = defaut_hr
+        self.regler_sources_air(t, hr)
+
+    def regler_sources_air(self, t: str | None = None,
+                           hr: str | None = None) -> None:
+        """Positionne l'onglet sur une source de température ("sht45",
+        "pt100", "manuelle") et/ou d'humidité ("sht45", "manuelle"), sans
+        enregistrer. En saisie, la sonde reste sur sa dernière valeur (ou
+        le défaut du banc), retrouvée au retour en mode Capteur."""
+        if t is not None:
+            if t != "manuelle":
+                self.cmb_sonde_t.setCurrentIndex(
+                    max(self.cmb_sonde_t.findData(t), 0))
+            elif self.cmb_sonde_t.currentIndex() < 0:
+                self.cmb_sonde_t.setCurrentIndex(0)
+            self._t_saisie = t == "manuelle"
+        if hr is not None:
+            self._hr_saisie = hr == "manuelle"
+        self._maj_activation_air()
+
+    def source_t_ihm(self) -> str:
+        """Source de température choisie dans l'onglet (non enregistrée)."""
+        return "manuelle" if self._t_saisie else self.cmb_sonde_t.currentData()
+
+    def source_hr_ihm(self) -> str:
+        return "manuelle" if self._hr_saisie else "sht45"
+
+    def _choisir_mode_air(self, t_saisie: bool | None = None,
+                          hr_saisie: bool | None = None) -> None:
+        """Clic sur un bascule « Capteur | Saisie manuelle »."""
+        if t_saisie is not None:
+            self._t_saisie = t_saisie
+        if hr_saisie is not None:
+            self._hr_saisie = hr_saisie
+        self._maj_activation_air()
+
+    def _maj_activation_air(self) -> None:
+        """Bascules et champs de la carte Air : modifiables onglet
+        déverrouillé, et seulement ceux du mode choisi (les autres grisés :
+        sans effet sur les calculs tant que ce mode est actif)."""
+        unlock = self.chk_unlock.isChecked()
+        self._seg_set(self._btns_t_mode, 1 if self._t_saisie else 0)
+        self._seg_set(self._btns_hr_mode, 1 if self._hr_saisie else 0)
+        for btn in self._btns_t_mode + self._btns_hr_mode:
+            btn.setEnabled(unlock)
+        self.cmb_sonde_t.setEnabled(unlock and not self._t_saisie)
+        actifs = {
+            ("temperature", "offset_sht45_c"): not self._t_saisie,
+            ("temperature", "offset_pt100_c"): not self._t_saisie,
+            ("temperature", "valeur_manuelle_c"): self._t_saisie,
+            ("humidite", "offset_sht45_pct"): not self._hr_saisie,
+            ("fluide", "humidite_relative"): self._hr_saisie,
+        }
+        for chemin, actif in actifs.items():
+            self.champs[chemin][0].setEnabled(unlock and actif)
+        actifs["sonde"] = not self._t_saisie
+        for cle, actif in actifs.items():
+            # ligne sans objet dans ce mode : nettement estompée, onglet
+            # verrouillé ou non (un champ désactivé a sinon le même aspect)
+            ligne = self._lignes_air[cle]
+            if actif:
+                ligne.setGraphicsEffect(None)
+            else:
+                effet = QGraphicsOpacityEffect(ligne)
+                effet.setOpacity(0.3)
+                ligne.setGraphicsEffect(effet)
 
     def _synchroniser_affichage_config(self) -> None:
         """Après toute écriture de la configuration (Appliquer d'un
@@ -4060,10 +4187,8 @@ class Application(QMainWindow):
             except (KeyError, TypeError, ValueError):
                 pass
             _cfg_ecrire(candidat, chemin, v)
-        _cfg_ecrire(candidat, ("temperature", "source"),
-                    self.cmb_t_source.currentData())
-        _cfg_ecrire(candidat, ("humidite", "source"),
-                    self.cmb_hr_source.currentData())
+        _cfg_ecrire(candidat, ("temperature", "source"), self.source_t_ihm())
+        _cfg_ecrire(candidat, ("humidite", "source"), self.source_hr_ihm())
         try:
             banc = Banc(candidat)
         except (ValueError, KeyError) as exc:
@@ -4229,15 +4354,22 @@ class Application(QMainWindow):
     def _tick_air(self, e: dict) -> None:
         def nombre(v, fmt="{:.1f}"):
             return "—" if v is None else fmt.format(v).replace(".", ",")
+        # valeur saisie : en orange et « SAISIE », pour qu'on ne la prenne
+        # pas pour une mesure
         T = e.get("temperature")
-        source_t = {"sht45": "SHT45", "manuelle": "saisie"}.get(
+        t_saisie = e.get("temperature_source") == "manuelle"
+        source_t = "SAISIE" if t_saisie else {"sht45": "SHT45"}.get(
             e.get("temperature_source"), "PT100")
         self._air_vals["temperature"].setText(
             nombre(T) + (f" ({source_t})" if T is not None else ""))
         hr = e.get("humidite")
-        source_hr = "SHT45" if e.get("humidite_source") == "sht45" else "saisie"
+        hr_saisie = e.get("humidite_source") != "sht45"
         self._air_vals["humidite"].setText(
-            nombre(hr) + (f" ({source_hr})" if hr is not None else ""))
+            nombre(hr) + ((" (SAISIE)" if hr_saisie else " (SHT45)")
+                          if hr is not None else ""))
+        for cle, saisie in (("temperature", t_saisie), ("humidite", hr_saisie)):
+            self._air_vals[cle].setStyleSheet(
+                f"color:{COLORS['warn']};" if saisie else "")
         sht45 = e.get("sht45") or {}
         texte = (f"PT100 {nombre(e.get('temperature_pt100'))} °C  ·  "
                  f"SHT45 {nombre(e.get('temperature_sht45'))} °C")
@@ -4708,11 +4840,51 @@ class Application(QMainWindow):
             return f" ({nom}, offset {offset:+.2f})".replace(".", ",")
         return f" ({nom})"
 
+    def _maj_valeurs_air_utilisees(self, e: dict) -> None:
+        """Sous chaque bloc de la carte Air : la valeur que les calculs
+        utilisent en ce moment et sa provenance ; rappel si le choix affiché
+        n'est pas encore enregistré (il n'agit qu'à l'enregistrement)."""
+        def nombre(v):
+            return "—" if v is None else f"{v:.1f}".replace(".", ",")
+        p = self.pilote
+        noms = {"sht45": "SHT45", "pt100": "PT100", "manuelle": "saisie manuelle"}
+        # température
+        T, src = e.get("temperature"), e.get("temperature_source")
+        texte = f"→ utilisée : {nombre(T)} °C ({noms.get(src, src or '—')})"
+        couleur = COLORS["accent"]
+        if p.t_source == "sht45" and e.get("alerte_sht45"):
+            texte = ("⚠ SHT45 sans mesure : mise en route refusée"
+                     f" (affiché : {nombre(T)} °C, {noms.get(src, '—')})")
+            couleur = COLORS["error"]
+        if self.source_t_ihm() != p.t_source:
+            texte += "\n   choix modifié : actif après « Enregistrer »"
+            couleur = COLORS["warn"]
+        self._lbl_t_utilisee.setText(texte)
+        self._lbl_t_utilisee.setStyleSheet(
+            f"font-size:12px; font-weight:600; color:{couleur};"
+            " background:transparent; border:none; padding:6px 16px 10px 16px;")
+        # humidité
+        hr, src = e.get("humidite"), e.get("humidite_source")
+        texte = f"→ utilisée : {nombre(hr)} %HR ({noms.get(src, src or '—')})"
+        couleur = COLORS["accent"]
+        if p.hr_source == "sht45" and src == "manuelle":
+            texte = (f"→ utilisée : {nombre(hr)} %HR (saisie : SHT45 sans "
+                     "mesure)")
+            couleur = COLORS["warn"]
+        if self.source_hr_ihm() != p.hr_source:
+            texte += "\n   choix modifié : actif après « Enregistrer »"
+            couleur = COLORS["warn"]
+        self._lbl_hr_utilisee.setText(texte)
+        self._lbl_hr_utilisee.setStyleSheet(
+            f"font-size:12px; font-weight:600; color:{couleur};"
+            " background:transparent; border:none; padding:6px 16px 10px 16px;")
+
     def _tick_config(self, e: dict) -> None:
         """Mise à jour temps réel de l'encart Caractéristiques de l'air (onglet Configuration)."""
         # Uniquement si l'onglet Configuration est visible (page 4)
         if self._stack.currentIndex() != 4:
             return
+        self._maj_valeurs_air_utilisees(e)
 
         # Température du capteur
         T = e.get("temperature")

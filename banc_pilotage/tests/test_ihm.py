@@ -281,8 +281,8 @@ def test_temperature_saisie_choisie_dans_la_configuration(ihm):
     écrites dans config.json et appliquées au pilote à l'enregistrement."""
     app = ihm.app
     app.chk_unlock.setChecked(True)
-    assert app.cmb_t_source.isEnabled()
-    app.cmb_t_source.setCurrentIndex(app.cmb_t_source.findData("manuelle"))
+    assert all(b.isEnabled() for b in app._btns_t_mode)
+    app._btns_t_mode[1].click()                     # « Saisie manuelle »
     app.champs[("temperature", "valeur_manuelle_c")][0].setText("27,5")
     app._enregistrer_configuration()
     assert ihm.b.p.t_manuelle == 27.5
@@ -521,8 +521,8 @@ def test_offset_pt100_dans_la_configuration(ihm):
     champ = app.champs[("temperature", "offset_pt100_c")][0]
     assert champ.text() == "0.00"
     app.chk_unlock.setChecked(True)
-    assert app.cmb_t_source.currentData() == "sht45"       # par défaut
-    app.cmb_t_source.setCurrentIndex(app.cmb_t_source.findData("pt100"))
+    assert app.source_t_ihm() == "sht45"                   # par défaut
+    app.cmb_sonde_t.setCurrentIndex(app.cmb_sonde_t.findData("pt100"))
     champ.setText("-0,8")
     app._enregistrer_configuration()
     assert ihm.b.p.offset_pt100 == -0.8
@@ -721,7 +721,7 @@ def test_configuration_relue_au_redemarrage(ihm):
     a.chk_unlock.setChecked(True)
     a.champs[("temperature", "offset_pt100_c")][0].setText("-0,4")
     a.champs[("temperature", "valeur_manuelle_c")][0].setText("23,5")
-    a.cmb_t_source.setCurrentIndex(a.cmb_t_source.findData("manuelle"))
+    a.regler_sources_air(t="manuelle")
     a.champs[("selection_diaphragme", "seuil_re")][0].setText("8500")
     a._enregistrer_configuration()
     assert not [d for d in ihm.dialogues if d[0] == "critical"], ihm.dialogues
@@ -801,8 +801,7 @@ def test_sources_sht45_dans_la_configuration(ihm):
     ihm.b.air.bruit_t = ihm.b.air.bruit_hr = 0.0
     ihm.b.air.humidite_pct = 40.0
     app.chk_unlock.setChecked(True)
-    app.cmb_t_source.setCurrentIndex(app.cmb_t_source.findData("sht45"))
-    app.cmb_hr_source.setCurrentIndex(app.cmb_hr_source.findData("sht45"))
+    app.regler_sources_air(t="sht45", hr="sht45")
     app.champs[("temperature", "offset_sht45_c")][0].setText("-0,5")
     app.champs[("humidite", "offset_sht45_pct")][0].setText("1,5")
     app._enregistrer_configuration()
@@ -828,8 +827,8 @@ def test_sources_sht45_dans_la_configuration(ihm):
     # relu au redémarrage de l'IHM (listes positionnées depuis la config)
     app.cfg = cfg
     app._remplir_champs_config()
-    assert app.cmb_t_source.currentData() == "sht45"
-    assert app.cmb_hr_source.currentData() == "sht45"
+    assert app.source_t_ihm() == "sht45"
+    assert app.source_hr_ihm() == "sht45"
 
 
 def test_mise_en_route_refusee_signalee(ihm):
@@ -875,4 +874,50 @@ def test_source_inconnue_affichee_comme_le_pilote(ihm):
     p.appliquer_config(app.cfg)
     app._remplir_champs_config()
     assert p.t_source == "sht45"
-    assert app.cmb_t_source.currentData() == "sht45"
+    assert app.source_t_ihm() == "sht45"
+
+
+def test_bascules_capteur_ou_saisie_manuelle(ihm):
+    """Carte Air : un bascule « Capteur | Saisie manuelle » par grandeur.
+    Seuls les champs du mode choisi sont modifiables ; le choix n'agit
+    qu'à l'enregistrement (rappel affiché d'ici là) ; la valeur saisie
+    prend alors le relais, signalée « SAISIE » sur l'écran principal."""
+    app, p = ihm.app, ihm.b.p
+    ch = app.champs
+    app._nav(4)
+    # verrouillé : rien n'est modifiable
+    assert not any(b.isEnabled() for b in app._btns_t_mode + app._btns_hr_mode)
+    app.chk_unlock.setChecked(True)
+    # mode Capteur (défaut) : sonde et offsets actifs, valeurs saisies grisées
+    assert app.cmb_sonde_t.isEnabled()
+    assert ch[("temperature", "offset_sht45_c")][0].isEnabled()
+    assert not ch[("temperature", "valeur_manuelle_c")][0].isEnabled()
+    assert ch[("humidite", "offset_sht45_pct")][0].isEnabled()
+    assert not ch[("fluide", "humidite_relative")][0].isEnabled()
+    # température en saisie manuelle, humidité laissée au capteur
+    app._btns_t_mode[1].click()
+    assert not app.cmb_sonde_t.isEnabled()
+    assert not ch[("temperature", "offset_sht45_c")][0].isEnabled()
+    assert ch[("temperature", "valeur_manuelle_c")][0].isEnabled()
+    ch[("temperature", "valeur_manuelle_c")][0].setText("18,5")
+    ihm.avancer(0.4)
+    assert p.t_source == "sht45"                      # pas encore enregistré
+    assert "actif après « Enregistrer »" in app._lbl_t_utilisee.text()
+    app._enregistrer_configuration()
+    assert not [d for d in ihm.dialogues if d[0] == "critical"], ihm.dialogues
+    ihm.avancer(0.4)
+    assert (p.t_source, p.hr_source) == ("manuelle", "sht45")
+    assert p.etat["temperature"] == 18.5
+    assert app._lbl_t_utilisee.text().startswith(
+        "→ utilisée : 18,5 °C (saisie manuelle)")
+    assert "(SHT45)" in app._lbl_hr_utilisee.text()
+    assert app._air_vals["temperature"].text() == "18,5 (SAISIE)"
+    assert app._air_vals["humidite"].text().endswith("(SHT45)")
+    # retour au capteur : la sonde choisie auparavant est retrouvée
+    app.chk_unlock.setChecked(True)
+    app._btns_t_mode[0].click()
+    app._btns_hr_mode[1].click()
+    app._enregistrer_configuration()
+    ihm.avancer(0.4)
+    assert (p.t_source, p.hr_source) == ("sht45", "manuelle")
+    assert app._air_vals["humidite"].text().endswith("(SAISIE)")
