@@ -140,6 +140,8 @@ class CapteurAir:
 
     description = "SHT45"
     erreur: str | None = None
+    port_serie_actif: str | None = None    # port série en service, ou None
+    connexion_en_cours = False             # 1er contact pas encore établi
 
     def demarrer(self) -> None:
         pass
@@ -222,6 +224,14 @@ class Sht45SensorBridge(CapteurAir):
         self.erreur = "connexion en cours"
         self.description = "SHT45 (non connecté)"
         self.numero_serie: int | None = None
+        self.port_serie_actif = None
+        # vrai jusqu'au 1er résultat (mesure ou échec) : démarrage normal,
+        # distinct d'un capteur perdu
+        self._premier_contact = True
+
+    @property
+    def connexion_en_cours(self) -> bool:
+        return self._premier_contact
 
     # ----- cycle de vie
     def demarrer(self) -> None:
@@ -270,6 +280,7 @@ class Sht45SensorBridge(CapteurAir):
             port = self._trouver_capteur(bridge)
             if port is not None:
                 self._bridge, self._port = bridge, port
+                self.port_serie_actif = port_serie
                 nom_port = {0: "ONE", 1: "TWO"}[port]
                 self.description = (f"SHT45 n° {self.numero_serie} — "
                                     f"{port_serie}, port {nom_port}, "
@@ -308,6 +319,7 @@ class Sht45SensorBridge(CapteurAir):
         return MesureAir(t, hr, time.monotonic())
 
     def _fermer(self) -> None:
+        self.port_serie_actif = None
         bridge, self._bridge = self._bridge, None
         if bridge is not None:
             try:
@@ -335,9 +347,11 @@ class Sht45SensorBridge(CapteurAir):
             with self._verrou:
                 self._derniere = mesure
             self.erreur = None
+            self._premier_contact = False
             self._stop.wait(self.cfg.periode_s)
 
     def _signaler(self, motif: str) -> None:
+        self._premier_contact = False
         if motif != self.erreur:
             log.warning("Capteur d'air SHT45 : %s", motif)
         self.erreur = motif
@@ -351,6 +365,7 @@ class Sht45Simule(CapteurAir):
     bruitée. `debrancher()` / `rebrancher()` simulent une panne."""
 
     description = "SHT45 simulé"
+    port_serie_actif = "simulation"
 
     def __init__(self, temperature=lambda: 20.0, humidite_pct: float = 50.0,
                  bruit_t: float = 0.02, bruit_hr: float = 0.1, graine: int = 45):

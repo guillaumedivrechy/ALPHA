@@ -822,7 +822,8 @@ def test_sources_sht45_dans_la_configuration(ihm):
     # capteur perdu banc à l'arrêt : alerte affichée, mise en route refusée
     ihm.b.air.debrancher()
     ihm.avancer(p.sht45_maintien_s + 1.0)
-    assert "consignes refusées" in app._lbl_air_sondes.text()
+    assert "consignes refusées" in app._lbl_air_alerte.text()
+    assert app._lbl_air_etat_sht45.text() == "SHT45 simulation · NON OK"
     assert p.demarrer_regulation() is not None
     # relu au redémarrage de l'IHM (listes positionnées depuis la config)
     app.cfg = cfg
@@ -921,3 +922,17 @@ def test_bascules_capteur_ou_saisie_manuelle(ihm):
     ihm.avancer(0.4)
     assert (p.t_source, p.hr_source) == ("sht45", "manuelle")
     assert app._air_vals["humidite"].text().endswith("(SAISIE)")
+
+
+def test_aucune_consigne_au_demarrage(ihm):
+    """Au démarrage, la consigne Re est vide : APPLIQUER sans saisie est
+    refusé (avant : 14 373 Re veine, le maximum, pré-rempli)."""
+    app, p = ihm.app, ihm.b.p
+    assert app.inp_re.text() == ""
+    app._set_mode("asservi")
+    app._appliquer()
+    assert not p.regulation_active
+    assert ihm.journal[0].startswith("⚠ Consigne Re vide refusée")
+    app.inp_re.setText("6000")
+    app._appliquer()
+    assert p.regulation_active and p.re_cible == 6000.0

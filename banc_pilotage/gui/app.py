@@ -1288,7 +1288,9 @@ class Application(QMainWindow):
             dirty_key="re",
             unit_lbl="Re",
             slider_min=0, slider_max=100,  # *250 → 0-25 000
-            default_slider=60,             # → 15 000 par défaut
+            # aucune consigne au démarrage : pré-remplie (15 000, ramenée au
+            # maximum du banc), APPLIQUER lançait le ventilateur à plein débit
+            default_slider=0,
             inp_width=78,
             on_slider=self._on_re_slider,
             on_input=self._on_re_input,
@@ -1486,6 +1488,9 @@ class Application(QMainWindow):
         inp = QLineEdit(str(int(_default_val) if dirty_key == "re"
                             else f"{_default_val:.1f}" if dirty_key == "vman"
                             else str(int(_default_val))))
+        if dirty_key == "re":
+            inp.setText("")
+            inp.setPlaceholderText("saisir")
         inp.setObjectName("num-input")
         inp.setFixedWidth(inp_width)
         inp.setAlignment(Qt.AlignmentFlag.AlignRight)
@@ -3675,7 +3680,11 @@ class Application(QMainWindow):
                 re_val = float(texte.replace(",", ".").replace(" ", ""))
             except ValueError:
                 re_val = None
-            if re_val is None or re_val <= 0:
+            if not texte:
+                self._signaler_saisie(self.inp_re,
+                                      "Consigne Re vide refusée : saisir "
+                                      "la consigne avant APPLIQUER")
+            elif re_val is None or re_val <= 0:
                 self._signaler_saisie(self.inp_re,
                                       f"Consigne Re « {texte} » refusée : "
                                       "nombre strictement positif attendu")
@@ -4354,7 +4363,34 @@ class Application(QMainWindow):
             "font-size:10.5px; color:#6B7E8E; background:transparent;"
             " border:none; padding-top:6px;")
         bvl.addWidget(self._lbl_air_sondes)
+        # état du SHT45 : port COM et OK / NON OK / connexion en cours
+        self._lbl_air_etat_sht45 = QLabel("—")
+        bvl.addWidget(self._lbl_air_etat_sht45)
+        self._lbl_air_alerte = QLabel("")
+        self._lbl_air_alerte.setWordWrap(True)
+        self._lbl_air_alerte.setStyleSheet(
+            f"font-size:10.5px; color:{COLORS['error']}; background:transparent;"
+            " border:none; padding-top:2px;")
+        self._lbl_air_alerte.setVisible(False)
+        bvl.addWidget(self._lbl_air_alerte)
         return bloc
+
+    def _etat_sht45_affiche(self, e: dict) -> tuple[str, str]:
+        """« SHT45 COM3 · OK » / « NON OK » / « connexion en cours » et sa
+        couleur : NON OK en rouge si le SHT45 sert aux calculs, en gris
+        sinon."""
+        sht45 = e.get("sht45") or {}
+        port = sht45.get("port") or "—"
+        etat = sht45.get("etat")
+        if etat == "ok":
+            return f"SHT45 {port} · OK", COLORS["ok"]
+        if etat == "connexion":
+            return "SHT45 · connexion en cours…", COLORS["accent"]
+        if etat == "desactive":
+            return "SHT45 · désactivé", "#6B7E8E"
+        utilise = "sht45" in (self.pilote.t_source, self.pilote.hr_source)
+        return (f"SHT45 {port} · NON OK",
+                COLORS["error"] if utilise else "#6B7E8E")
 
     def _tick_air(self, e: dict) -> None:
         def nombre(v, fmt="{:.1f}"):
@@ -4375,21 +4411,17 @@ class Application(QMainWindow):
         for cle, saisie in (("temperature", t_saisie), ("humidite", hr_saisie)):
             self._air_vals[cle].setStyleSheet(
                 f"color:{COLORS['warn']};" if saisie else "")
-        sht45 = e.get("sht45") or {}
         texte = (f"PT100 {nombre(e.get('temperature_pt100'))} °C  ·  "
                  f"SHT45 {nombre(e.get('temperature_sht45'))} °C")
-        alerte = e.get("alerte_sht45")
-        if alerte:
-            texte += "\n⚠ " + alerte
-            couleur = COLORS["error"]
-        else:
-            couleur = "#6B7E8E"
-            if sht45.get("erreur") and sht45.get("description") is not None:
-                texte += "\nSHT45 absent (non utilisé)"
         self._lbl_air_sondes.setText(texte)
-        self._lbl_air_sondes.setStyleSheet(
-            f"font-size:10.5px; color:{couleur}; background:transparent;"
-            " border:none; padding-top:6px;")
+        etat, couleur = self._etat_sht45_affiche(e)
+        self._lbl_air_etat_sht45.setText(etat)
+        self._lbl_air_etat_sht45.setStyleSheet(
+            f"font-size:10.5px; font-weight:700; color:{couleur};"
+            " background:transparent; border:none; padding-top:2px;")
+        alerte = e.get("alerte_sht45")
+        self._lbl_air_alerte.setText(f"⚠ {alerte}" if alerte else "")
+        self._lbl_air_alerte.setVisible(bool(alerte))
 
     def _tick_left(self, e: dict) -> None:
         self._tick_air(e)

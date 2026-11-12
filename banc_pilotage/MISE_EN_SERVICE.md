@@ -98,6 +98,9 @@ Capteur d'air SHT45 (température, humidité) sur boîtier SEK-SensorBridge :
       numéro de série du SHT45 et 10 mesures sans erreur. En cas d'échec,
       garder toute la sortie (motif précis). Port COM imposé :
       `python controle_sht45.py COM3`.
+- [ ] Logiciel lancé : la colonne de gauche passe de « SHT45 · connexion
+      en cours… » à « SHT45 COMx · OK » en quelques secondes (port COM
+      trouvé par le logiciel).
 - [ ] Température du SHT45 comparée à un thermomètre de référence placé au
       même endroit. Si besoin, régler « Offset SHT45 » dans l'onglet
       Configuration. Même chose pour l'humidité (« Offset SHT45

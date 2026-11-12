@@ -13,6 +13,7 @@ Séquence quand l'opérateur valide une consigne Re :
 """
 
 from __future__ import annotations
+import json
 import logging
 import threading
 import time
@@ -373,6 +374,9 @@ CLE_DP = {"iso": "dp_iso_500", "miller": "dp_diaph_500"}
 # Codage simplifié : une seule FC active par position stable.
 # Ce codage diffère de la doc SNAA710000 mais correspond à la vanne réelle.
 FC_3VOIES = {"0": "fc_3voies_0", "90": "fc_3voies_90"}
+# butée Miller de la vanne 3 voies garantie à la fermeture propre d'une
+# session (sous RACINE) : évite d'attendre sa course au démarrage suivant
+FICHIER_REPOS_3VOIES = "repos_vanne_3voies.json"
 
 
 class Pilote:
@@ -491,6 +495,7 @@ class Pilote:
         d90 = pos.get("diaphragme_a_90deg", "miller")
         self._diaphragme_par_angle = {"0": d0, "90": d90}
         self._angle_par_diaphragme = {d0: "0", d90: "90"}
+        self._repos_3voies_memorise = self._lire_repos_3voies()
 
         # ordres TOR maintenus, réaffirmés à chaque cycle (voir _cycle) : sur
         # la carte GF3 l'actionneur est alimenté par ses bornes de commande,
@@ -879,6 +884,8 @@ class Pilote:
         capteur = self.capteur_air
         if capteur is None:
             return None, "capteur désactivé (sht45.actif = false)"
+        if self._sht45_connexion_en_cours():
+            return None, "connexion SHT45 en cours"
         try:
             m = capteur.derniere_mesure()
         except Exception as exc:  # noqa: BLE001 — jamais bloquant
@@ -893,6 +900,26 @@ class Pilote:
         return (m.temperature_c + self.offset_sht45_t,
                 _borne(m.humidite_pct + self.offset_sht45_hr, 0.0, 100.0)), ""
 
+    def _sht45_connexion_en_cours(self) -> bool:
+        """Premier contact avec le SHT45 pas encore établi (démarrage) : un
+        état normal, à distinguer d'un capteur perdu."""
+        return bool(getattr(self.capteur_air, "connexion_en_cours", False))
+
+    def etat_sht45(self, air) -> dict:
+        """État du SHT45 pour l'IHM : port série utilisé et état « ok »,
+        « connexion », « non_ok » ou « desactive »."""
+        c = self.capteur_air
+        if c is None:
+            etat = "desactive"
+        elif air is not None:
+            etat = "ok"
+        elif self._sht45_connexion_en_cours():
+            etat = "connexion"
+        else:
+            etat = "non_ok"
+        return {"etat": etat, "port": getattr(c, "port_serie_actif", None),
+                "description": getattr(c, "description", None)}
+
     def motif_temperature_indisponible(self) -> str | None:
         """Source de température « SHT45 » sans mesure valide : toute mise en
         route (régulation, séquence, manuel, apprentissage) est refusée.
@@ -902,9 +929,12 @@ class Pilote:
         air, motif = self._lire_capteur_air()
         if air is not None:
             return None
+        if self._sht45_connexion_en_cours():
+            return ("connexion SHT45 en cours : patienter quelques secondes "
+                    "puis relancer")
         return (f"température de l'air indisponible : SHT45 ({motif}) — "
-                "rebrancher le SEK-SensorBridge, ou choisir la PT100 ou la "
-                "température saisie (onglet Configuration)")
+                "vérifier le SHT45 ou basculer la température en saisie "
+                "manuelle (onglet Configuration)")
 
     def _relance_interdite(self, quoi: str) -> str | None:
         """Arrêt de sécurité non acquitté : toute relance du ventilateur est
@@ -1417,7 +1447,7 @@ class Pilote:
 
     # ----------------------------------------------------------------- boucle
 
-    def _position_repos(self) -> None:
+    def _position_repos(self, butee_sure: str | None = None) -> None:
         """Met les vannes en position de repos (sécurité / démarrage) :
         - Vanne 3 voies → Miller (butée donnée par positions_vanne_3voies)
         - Vanne perte de charge → ouverte (10 V, pas de restriction)
@@ -1427,15 +1457,21 @@ class Pilote:
         vanne n'est pas déjà en butée : écrits en direct, les ordres
         laissaient une vanne en course sans manœuvre connue, et une consigne
         lancée pendant les ~11 s de course (fin d'apprentissage, démarrage)
-        finissait en arrêt de sécurité « position inexploitable »."""
+        finissait en arrêt de sécurité « position inexploitable ».
+
+        butee_sure : butée où la vanne 3 voies est SÛREMENT arrivée (course
+        complète attendue par l'apprentissage qui se termine, ou fermeture
+        propre de la session précédente), ou None."""
         try:
             # fins de course sur plages : la position lue de la vanne 3 voies
-            # ne prouve pas la butée ; elle n'est pas tenue pour acquise, et
-            # la course complète est attendue. Sans cela, le résultat
-            # dépendait de l'ordre des threads au démarrage (remise au repos
-            # avant ou après la relecture de la position initiale).
+            # ne prouve pas la butée ; sans butée garantie, la course
+            # complète est attendue. Garantie sur le Miller (et lue) : rien
+            # à attendre (~13 s gagnées à chaque démarrage et fin
+            # d'apprentissage)
             if self.v3_course_complete:
-                self._diaphragme_commande = None
+                miller = self._angle_par_diaphragme["miller"]
+                self._diaphragme_commande = miller if butee_sure == miller \
+                    else None
             self.commander_diaphragme("miller")
 
             # Vanne perte de charge ouverte (10 V)
@@ -1446,6 +1482,28 @@ class Pilote:
         except (IOError, RuntimeError, OSError) as exc:
             # liaison indisponible : signalé, sans bloquer le démarrage ni l'arrêt
             log.warning(f"Position repos non appliquée: {exc}")
+
+    def _lire_repos_3voies(self) -> str | None:
+        """Butée Miller garantie à la fermeture de la session précédente, ou
+        None. Consommée à la lecture : après un arrêt brutal (vanne
+        peut-être en course), le fichier n'a pas été réécrit et ne vaut
+        plus rien."""
+        chemin = RACINE / FICHIER_REPOS_3VOIES
+        try:
+            angle = json.loads(chemin.read_text(encoding="utf-8")).get(
+                "butee_3voies_sure")
+        except (OSError, ValueError, AttributeError):
+            return None
+        if angle is not None:
+            self._memoriser_repos_3voies(None)
+        return angle if angle in self._diaphragme_par_angle else None
+
+    def _memoriser_repos_3voies(self, angle: str | None) -> None:
+        try:
+            ecrire_json_atomique(RACINE / FICHIER_REPOS_3VOIES,
+                                 {"butee_3voies_sure": angle})
+        except OSError as exc:
+            log.warning(f"Position de la vanne 3 voies non mémorisée : {exc}")
 
     def demarrer(self) -> None:
         """Démarre le thread de régulation et attend qu'il soit prêt."""
@@ -1460,7 +1518,13 @@ class Pilote:
                 "Thread de régulation non démarré en 2s. "
                 "Vérifier connexion Wago ou erreur d'initialisation."
             )
-        self._position_repos()
+        # remise au repos décidée sur des fins de course LUES : attendre le
+        # 1er cycle (le thread était prêt avant d'avoir lu les entrées)
+        fin = time.monotonic() + 2.0
+        while self.etat.get("cycles", 0) < 1 and time.monotonic() < fin:
+            time.sleep(0.01)
+        self._position_repos(butee_sure=self._repos_3voies_memorise)
+        self._repos_3voies_memorise = None
 
     def arreter(self) -> None:
         """Arrêt complet, dans cet ordre : ventilateur coupé, boucle arrêtée,
@@ -1491,7 +1555,12 @@ class Pilote:
                 erreurs_arret.append(msg)
                 log.warning(msg)
 
-        # 3. Vannes en position de repos (sécurité matérielle)
+        # 3. Vannes en position de repos (sécurité matérielle). Vanne 3 voies
+        # déjà sûrement en butée Miller : mémorisé pour le prochain
+        # démarrage (pas d'attente de course), seulement sur fermeture propre
+        miller = self._angle_par_diaphragme.get("miller")
+        self._memoriser_repos_3voies(
+            miller if self.butee_3voies_sure() == miller else None)
         try:
             self._position_repos()
         except Exception as e:
@@ -1801,10 +1870,8 @@ class Pilote:
         # ---- capteur d'air SHT45 : humidité (et température) -------------
         air, motif_air = self._lire_capteur_air()
         self.etat["temperature_sht45"] = air[0] if air else None
-        self.etat["sht45"] = {
-            "description": getattr(self.capteur_air, "description", None),
-            "erreur": motif_air or None,
-        }
+        self.etat["sht45"] = dict(self.etat_sht45(air),
+                                  erreur=motif_air or None)
         if self.hr_source == "sht45" and air is not None:
             hr, source_hr = air[1], "sht45"
         else:
@@ -1816,14 +1883,18 @@ class Pilote:
         self.etat["humidite"] = hr
         self.etat["humidite_source"] = source_hr
         sht45_choisi = "sht45" in (self.hr_source, self.t_source)
-        if sht45_choisi and air is None:
+        # connexion en cours (démarrage) : pas d'alerte, l'IHM l'affiche
+        if sht45_choisi and air is None \
+                and not self._sht45_connexion_en_cours():
             usage = [quoi for quoi, src in (("humidité", self.hr_source),
                                             ("température", self.t_source))
                      if src == "sht45"]
             self.etat["alerte_sht45"] = (
                 f"SHT45 indisponible ({motif_air}) — "
                 + " et ".join(usage) + " : "
-                + ("consignes refusées" if self.t_source == "sht45"
+                + ("consignes refusées — vérifier le SHT45 ou basculer "
+                   "la température en saisie manuelle"
+                   if self.t_source == "sht45"
                    else f"humidité saisie ({hr:.0f} %HR) utilisée"))
         else:
             self.etat["alerte_sht45"] = None
@@ -1858,9 +1929,10 @@ class Pilote:
                     self.etat.update({
                         "defaut_capteur": f"SHT45 indisponible ({motif_air}) "
                                           "— température de l'air inconnue ; "
-                                          "rebrancher le SEK-SensorBridge, ou "
-                                          "choisir la PT100 (onglet "
-                                          "Configuration), puis relancer",
+                                          "vérifier le SHT45 ou basculer la "
+                                          "température en saisie manuelle "
+                                          "(onglet Configuration), puis "
+                                          "relancer",
                         "regulation": False, "u_variateur": 0.0,
                         "convergee": False, "temperature": None,
                     })
@@ -3218,6 +3290,21 @@ class Pilote:
                 # manœuvre si la vanne n'a pas encore quitté sa butée cible
                 self._manoeuvres.pop("3voies", None)
                 self.commander_diaphragme(vise_diaph)
+                # demi-tour : la vanne n'a que le chemin déjà parcouru à
+                # refaire. Reste à courir vers l'ancienne cible au départ =
+                # t_course, au demi-tour = t_course - écoulé ; vers la
+                # nouvelle cible = course complète - ce reste. La course
+                # complète était attendue de nouveau (~13 s pour 1 s de
+                # chemin). Plancher de 2 s : réaction de la carte GF3.
+                retour = self._manoeuvres.get("3voies")
+                if retour is not None:
+                    ecoule = time.monotonic() - m["t_debut"]
+                    reste = max(m["t_course"] - ecoule, 0.0)
+                    t_course = min(self.t_vanne_3voies,
+                                   max(self.t_vanne_3voies - reste, 2.0))
+                    retour["t_course"] = t_course
+                    retour["t_max"] = retour["t_debut"] \
+                        + t_course * self.facteur_chien_garde
         elif etat_v.diaphragme in (PositionDiaphragme.ISO, PositionDiaphragme.MILLER) \
                 and etat_v.diaphragme.value != vise_diaph:
             self.commander_diaphragme(vise_diaph)

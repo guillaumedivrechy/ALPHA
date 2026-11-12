@@ -413,7 +413,7 @@ def test_relance_retire_le_resultat_precedent_et_remet_les_vannes_au_repos(
                                      "max_s": 10.0}
     app.etat["paliers_pdc"] = [(100.0, 900)]
     repos = []
-    pilote._position_repos = lambda: repos.append(True)
+    pilote._position_repos = lambda butee_sure=None: repos.append(True)
 
     def echec():
         app.etat["statut"] = "échec : fin de course jamais atteinte"
@@ -808,3 +808,79 @@ def test_positionnement_sans_attente_sur_une_butee_sure(monkeypatch,
 
     app._executer(sequence, {})
     assert vu["t"] == 0.0 and vu["duree"] < 1.0
+
+
+def test_repos_sans_attente_si_la_butee_miller_est_sure(monkeypatch, tmp_path):
+    """Fin d'apprentissage, vanne laissée sûrement en butée Miller (course
+    complète attendue) : pas de nouvelle manœuvre ni d'attente de ~13 s.
+    Sans butée sûre (vanne sur l'ISO), la manœuvre reste déclarée."""
+    _cames_sur_plages(monkeypatch)
+    b, app = _banc_11s(monkeypatch, tmp_path)
+    p = b.p
+    b.cycles(15.0, verifier=False)
+    miller = p._angle_par_diaphragme["miller"]
+    assert p.butee_3voies_sure() == miller
+    app._executer(lambda: None, {})                  # n'a pas bougé la vanne
+    assert "3voies" not in p._manoeuvres
+
+    def vers_iso():
+        assert app._positionner_diaphragme("iso") is not None
+    app._executer(vers_iso, {})
+    assert "3voies" in p._manoeuvres                 # retour au Miller attendu
+    b.cycles(15.0, verifier=False)
+    assert "3voies" not in p._manoeuvres
+    assert b.sim._v3._angle == pytest.approx(90.0, abs=1.0)
+
+
+def test_repos_memorise_d_une_session_a_l_autre(monkeypatch, tmp_path):
+    """Fermeture propre, vanne sûrement au Miller : mémorisé ; le démarrage
+    suivant n'attend pas la course (sauf lecture discordante). Mémoire
+    consommée à la lecture : un arrêt brutal ne laisse pas une garantie
+    périmée."""
+    import json
+    import core.pilote as cp
+    from core.pilote import Pilote
+    _cames_sur_plages(monkeypatch)
+    b, _ = _banc_11s(monkeypatch, tmp_path)
+    p = b.p
+    b.cycles(15.0, verifier=False)
+    miller = p._angle_par_diaphragme["miller"]
+    p.arreter()
+    fichier = cp.RACINE / cp.FICHIER_REPOS_3VOIES
+    assert json.loads(fichier.read_text())["butee_3voies_sure"] == miller
+    neuf = Pilote(p.banc, b.sim, b.cfg, b.air)
+    assert neuf._repos_3voies_memorise == miller
+    assert json.loads(fichier.read_text())["butee_3voies_sure"] is None
+    assert Pilote(p.banc, b.sim, b.cfg, b.air)._repos_3voies_memorise is None
+    # garantie utilisée seulement si les fins de course lisent le Miller
+    neuf.etat["mesures_brutes"] = p.etat["mesures_brutes"]
+    neuf._position_repos(butee_sure=miller)
+    assert "3voies" not in neuf._manoeuvres
+    neuf._position_repos()
+    assert "3voies" in neuf._manoeuvres
+
+
+def test_demi_tour_de_la_vanne_sans_course_complete(monkeypatch, tmp_path):
+    """Consigne corrigée juste après la bascule ISO -> Miller : la vanne fait
+    demi-tour après ~1 s de chemin ; la régulation reprend dès son retour
+    en butée ISO (~2-3 s), et non après une nouvelle course complète."""
+    _cames_sur_plages(monkeypatch)
+    b, _ = _banc_11s(monkeypatch, tmp_path)
+    p = b.p
+    b.consigne(9000, "veine")                        # ISO
+    assert b.jusqu_a_convergence(200) is not None
+    b.consigne(1500, "veine")                        # -> Miller
+    b.cycles(1.0, verifier=False)
+    assert "3voies" in p._manoeuvres
+    b.consigne(9000, "veine")                        # demi-tour -> ISO
+    t0, fin = b.t[0], None
+    while b.t[0] - t0 < 30.0:
+        b.cycles(p.periode, verifier=False)
+        if "3voies" not in p._manoeuvres:
+            fin = b.t[0] - t0
+            break
+    # retour (~2 s) + marge après manœuvre (2 s) ; ~13 s avant correction
+    assert fin is not None and fin < 5.0, fin
+    assert b.sim._v3._angle == pytest.approx(0.0, abs=1.0)
+    assert b.jusqu_a_convergence(150) is not None
+    assert not p.etat.get("arret_securite"), p.etat.get("arret_motif")

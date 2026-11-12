@@ -66,7 +66,8 @@ C'est l'usage normal.
 
 1. Cliquer sur **Asservi**.
 2. Choisir la référence (Veine ou Conduite).
-3. Taper le Reynolds voulu dans **Consigne Reynolds**.
+3. Taper le Reynolds voulu dans **Consigne Reynolds** (vide au démarrage
+   du logiciel : APPLIQUER sans consigne est refusé).
 4. Cliquer sur **✓ APPLIQUER**.
 5. Attendre le badge **RÉGULÉ ✓** (de quelques secondes à environ une
    minute selon l'écart).
@@ -162,7 +163,8 @@ Tant que l'arrêt n'est pas acquitté, aucune relance n'est possible.
 | ⚠ Défaut vanne | une vanne n'a pas atteint sa position à temps : vérifier la vanne, prévenir le responsable |
 | ⚠ Défaut variateur | le variateur signale un défaut : voir son afficheur |
 | ⚠ Table de gains à refaire | la régulation fonctionne mais peine : prévenir le responsable |
-| ⚠ Capteur d'air SHT45 | le capteur d'humidité et de température ne répond plus : vérifier le câble USB du boîtier SEK-SensorBridge. Pour l'humidité, le banc continue avec l'humidité saisie. Si le SHT45 fournit la température, aucune consigne n'est acceptée (et un essai en cours s'arrête) : rebrancher, ou passer sur la PT100 (onglet Configuration) |
+| ⚠ Capteur d'air SHT45 | le capteur d'humidité et de température ne répond plus (colonne de gauche : « SHT45 … · NON OK ») : vérifier le SHT45 et le câble USB du boîtier SEK-SensorBridge. Pour l'humidité, le banc continue avec l'humidité saisie. Si le SHT45 fournit la température, aucune consigne n'est acceptée (et un essai en cours s'arrête) : vérifier le SHT45, ou basculer la température en saisie manuelle (onglet Configuration) |
+| SHT45 · connexion en cours… | au démarrage du logiciel, le temps de trouver le boîtier (quelques secondes) : normal. Une consigne lancée pendant ce temps est refusée (« patienter quelques secondes puis relancer »). Ensuite : « SHT45 COM3 · OK » (port USB utilisé) |
 
 Un message suivi de « — rétabli » signifie que le problème a disparu.
 

@@ -417,3 +417,65 @@ def test_apprentissage_interrompu_si_le_ventilateur_est_refuse(monkeypatch,
     assert app.etat["statut"].startswith("interrompu : mode manuel refusé")
     assert "SHT45" in app.etat["statut"]
     assert p.tension_manuelle == 0.0
+
+
+def test_connexion_en_cours_distincte_d_une_perte(monkeypatch, tmp_path):
+    """Démarrage : tant que le 1er contact avec le SHT45 n'a pas abouti, état
+    « connexion », sans alerte rouge, refus « patienter » ; capteur perdu
+    ensuite : « non_ok », alerte et conseil (vérifier ou saisie manuelle)."""
+    b = _banc(monkeypatch, tmp_path, temperature={"source": "sht45"})
+    p = b.p
+
+    class EnConnexion:
+        connexion_en_cours = True
+        port_serie_actif = None
+        erreur = "connexion en cours"
+        description = "SHT45 (non connecté)"
+
+        def derniere_mesure(self):
+            return None
+
+    capteur = EnConnexion()
+    p.capteur_air = capteur
+    b.cycles(1.0, verifier=False)
+    e = p.etat
+    assert e["sht45"]["etat"] == "connexion"
+    assert e["alerte_sht45"] is None
+    assert p.demarrer_regulation().endswith(
+        "connexion SHT45 en cours : patienter quelques secondes puis relancer")
+    capteur.connexion_en_cours = False
+    capteur.erreur = "aucun port série USB"
+    b.cycles(1.0, verifier=False)
+    assert e["sht45"]["etat"] == "non_ok"
+    assert "consignes refusées" in e["alerte_sht45"]
+    assert "basculer la température en saisie manuelle" in e["alerte_sht45"]
+    assert "vérifier le SHT45 ou basculer la température en saisie " \
+        "manuelle" in p.demarrer_regulation()
+
+
+def test_etat_et_port_du_capteur_reel():
+    """Sht45SensorBridge : connexion en cours jusqu'au 1er résultat ; port
+    COM en service publié, effacé à la déconnexion."""
+    bridge = FauxBridge(port_capteur=0)
+    c = Sht45SensorBridge({"periode_s": 0.2, "reconnexion_s": 0.5},
+                          ouvrir_bridge=lambda p, d: bridge,
+                          lister_ports=lambda: ["COM3"])
+    assert c.connexion_en_cours and c.port_serie_actif is None
+    c.demarrer()
+    try:
+        fin = time.monotonic() + 3.0
+        while c.derniere_mesure() is None and time.monotonic() < fin:
+            time.sleep(0.05)
+        assert not c.connexion_en_cours and c.port_serie_actif == "COM3"
+        bridge.panne = True
+        fin = time.monotonic() + 3.0
+        while c.erreur is None and time.monotonic() < fin:
+            time.sleep(0.05)
+        assert c.port_serie_actif is None and not c.connexion_en_cours
+    finally:
+        c.arreter()
+    # 1er contact en échec : plus « en cours », mais en erreur
+    c = Sht45SensorBridge({}, ouvrir_bridge=lambda p, d: bridge,
+                          lister_ports=lambda: [])
+    c._signaler("aucun port série USB")
+    assert not c.connexion_en_cours

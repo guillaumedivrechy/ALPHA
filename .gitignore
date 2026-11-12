@@ -5,6 +5,8 @@ __pycache__/
 
 # état runtime du banc (gain appris, propre à chaque machine)
 etat_banc.json
+# position sûre de la vanne 3 voies à la dernière fermeture propre
+repos_vanne_3voies.json
 
 # journaux d'essai (un CSV par session de régulation)
 journaux/

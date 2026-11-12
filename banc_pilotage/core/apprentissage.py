@@ -177,7 +177,9 @@ class Apprentissage:
             try:
                 self.pilote.mode_manuel_tension(0.0)
                 self.pilote.arreter_regulation()
-                self.pilote._position_repos()
+                # butée garantie par la séquence (course complète attendue) :
+                # pas de nouvelle attente de course si c'est le Miller
+                self.pilote._position_repos(butee_sure=self._butee_3voies_sure)
             except Exception as e:
                 log.warning(f"Erreur mise en sécurité apprentissage : {e}")
             # les tests de vannes commandent es.* directement et peuvent laisser
